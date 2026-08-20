@@ -1,0 +1,42 @@
+# Local Docker Compose setup. Ships the app exactly as built (SQLite +
+# local-directory document storage — see docs/ARCHITECTURE.md for why SQLite
+# was substituted for Postgres+pgvector on this development machine).
+#
+# The commented-out `db` service shows the production upgrade path: swap
+# STORAGE_BACKEND/DB engine, uncomment, point DATABASE_URL at it, and implement
+# app/db_postgres.py behind the same get_conn()-shaped interface used
+# throughout app/ — every call site already goes through app/db.py, so no
+# route or ingestion code needs to change, only that one module.
+#
+# Usage:
+#   docker compose up --build
+#   docker compose exec app python scripts/ingest.py
+
+services:
+  app:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+      - ./backend/.env:/app/.env:ro
+    environment:
+      - DB_PATH=/data/db/app.db
+      - LOCAL_STORAGE_DIR=/data/object_storage
+      - LOCAL_MANUALS_DIR=/data/manuals_incoming
+    restart: unless-stopped
+
+  # db:
+  #   image: pgvector/pgvector:pg16
+  #   environment:
+  #     POSTGRES_DB: technician_manual_assistant
+  #     POSTGRES_USER: app
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+  #
+  # volumes:
+  #   pgdata:

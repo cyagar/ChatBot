@@ -1,0 +1,14 @@
+.env
+backend/.env
+__pycache__/
+*.pyc
+.pytest_cache/
+data/db/*.db
+data/object_storage/*
+!data/object_storage/.gitkeep
+data/reports/*
+!data/reports/.gitkeep
+_pipcheck/
+.venv/
+node_modules/
+*.egg-info/

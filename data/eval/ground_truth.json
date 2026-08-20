@@ -1,0 +1,87 @@
+{
+  "_notes": "Every entry's expected_filename/expected_keywords was verified against actually-indexed chunk content in this corpus (see data/reports/*.csv and the inspection scripts used to build this file) — none of it is invented. Machine names must match machines.model_name exactly for the eval script's lookup.",
+  "cases": [
+    {
+      "id": "troubleshoot-axiom-heating",
+      "category": "troubleshooting",
+      "machine": "Axiom",
+      "question": "The brewer's water temperature isn't reaching the ready temperature. What should I check?",
+      "expected_filename_contains": "AXIOM Series Service & Repair Manual",
+      "expected_keywords": ["Tank Heater failure", "Temp Sensor"],
+      "must_not_come_from": ["ITB_ITCB_HV, ICB_TWIN Service & Repair Manual"]
+    },
+    {
+      "id": "similar-model-separation-heating",
+      "category": "similar_model_separation",
+      "machine": "ITB/ITCB/ITCB-DV HV/ITCB TWIN HV",
+      "question": "The brewer's water temperature isn't reaching the ready temperature. What should I check?",
+      "expected_filename_contains": "ITB_ITCB_HV, ICB_TWIN Service & Repair Manual",
+      "expected_keywords": ["Tank Heater failure", "Temp Sensor"],
+      "must_not_come_from": ["AXIOM Series Service & Repair Manual"],
+      "note": "Axiom and ITB/ITCB manuals share near-identical templated troubleshooting tables (same wording: 'Temperature Too Low / Heating Time Too Long / Temp Sensor Out Of Range'). This is the real test of acceptance criterion 'information from one model is not incorrectly attributed to another' -- lexical similarity alone cannot distinguish these, only the machine_id filter can."
+    },
+    {
+      "id": "parts-dema-titan",
+      "category": "parts",
+      "machine": "Titan II Warewash Control (T.812/T.813)",
+      "question": "What is the part number for the Titan II control board and display assembly?",
+      "expected_filename_contains": "Dema Titan",
+      "expected_keywords": ["81-118-31", "CONTROL BOARD"]
+    },
+    {
+      "id": "ultra-nx-blank-display",
+      "category": "troubleshooting",
+      "machine": "Ultra NX",
+      "question": "The LCD display on the Ultra NX is blank. What should I check?",
+      "expected_filename_contains": "Ultra NX Use and Care",
+      "expected_keywords": ["Power cord", "disconnected"]
+    },
+    {
+      "id": "safety-warning-cma-180uc",
+      "category": "safety",
+      "machine": "CMA-180/180 Tall",
+      "question": "What electrical safety requirements apply when installing this dishmachine?",
+      "expected_filename_contains": "180UC",
+      "expected_keywords": ["grounding", "Electrical"]
+    },
+    {
+      "id": "ambiguous-no-machine-selected",
+      "category": "ambiguous_question",
+      "machine": null,
+      "question": "Why won't it heat up?",
+      "expect_clarifying_question": true
+    },
+    {
+      "id": "absent-answer-out-of-scope",
+      "category": "absent_answer",
+      "machine": "Axiom",
+      "question": "What is the recommended tire pressure for a delivery van?",
+      "expect_no_answer": true
+    },
+    {
+      "id": "absent-answer-unindexed-spec",
+      "category": "absent_answer",
+      "machine": "Axiom",
+      "question": "What is the machine's Bluetooth pairing code?",
+      "expect_no_answer": true
+    },
+    {
+      "id": "scanned-ocr-asq16",
+      "category": "scanned_ocr",
+      "machine": "ASQ16",
+      "question": "What is the Super Q glasswasher's carousel design about?",
+      "expected_filename_contains": "ASQ16",
+      "expected_keywords": ["Carousel"],
+      "note": "This file has no native PDF text layer; content only exists via Tesseract OCR. A hit here proves OCR text actually made it into the index."
+    },
+    {
+      "id": "table-parts-dema",
+      "category": "tables",
+      "machine": "Titan II Warewash Control (T.812/T.813)",
+      "question": "What is the mounting bracket part number for the Titan II?",
+      "expected_filename_contains": "Dema Titan",
+      "expected_chunk_type": "table_or_error_code",
+      "expected_keywords": ["81-187-1", "MOUNTING BRACKET"]
+    }
+  ]
+}

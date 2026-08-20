@@ -1,0 +1,43 @@
+.admin-shell { display: flex; min-height: 100vh; }
+
+.admin-nav {
+  width: 220px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 16px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.admin-nav button {
+  text-align: left;
+  border: none;
+  background: transparent;
+  min-height: 44px;
+}
+.admin-nav button.active { background: var(--surface-raised); font-weight: 600; }
+
+.admin-main { flex: 1; padding: 20px; max-width: 1200px; overflow-x: auto; }
+
+.admin-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.admin-table th, .admin-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.admin-table th { color: var(--text-dim); font-weight: 600; position: sticky; top: 0; background: var(--bg); }
+
+.status-badge { padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; border: 1px solid var(--border); }
+.status-badge.indexed { color: var(--accent); border-color: var(--accent); }
+.status-badge.partial { color: var(--warn-border); border-color: var(--warn-border); }
+.status-badge.duplicate { color: var(--text-dim); }
+.status-badge.failed, .status-badge.unsupported { color: var(--danger); border-color: var(--danger); }
+
+.toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.toolbar input, .toolbar select { min-height: 40px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); padding: 0 10px; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+
+.passage-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; margin-bottom: 10px; }
+.passage-card .score { font-size: 0.78rem; color: var(--text-dim); }
+
+.edit-form { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.edit-form input, .edit-form select, .edit-form textarea { border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); padding: 8px; }

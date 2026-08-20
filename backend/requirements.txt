@@ -1,0 +1,42 @@
+# --- Core web framework ---
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.4
+pydantic[email]==2.13.4
+pydantic-settings==2.7.0
+python-multipart==0.0.20
+
+# --- Auth / security ---
+bcrypt==5.0.0
+pyjwt==2.10.1
+slowapi==0.1.9
+
+# --- Document processing ---
+pymupdf==1.28.2
+pdfplumber==0.11.10
+python-docx==1.2.0
+olefile==0.47
+pillow==12.3.0
+
+# --- Retrieval / search ---
+rank-bm25==0.2.2
+rapidfuzz==3.14.5
+numpy==2.5.2
+
+# --- Local embeddings (no external AI provider required) ---
+sentence-transformers==6.0.0
+torch==2.13.0
+
+# --- Templating ---
+jinja2==3.1.5
+
+# --- Testing ---
+pytest==8.3.4
+pytest-asyncio==0.25.2
+httpx==0.28.1
+
+# --- Optional: enabled once a provider API key is supplied via .env ---
+anthropic==0.125.0
+# openai
+
+pytesseract==0.3.13
