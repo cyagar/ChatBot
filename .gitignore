@@ -8,6 +8,12 @@ data/object_storage/*
 !data/object_storage/.gitkeep
 data/reports/*
 !data/reports/.gitkeep
+# Raw manual corpus: large, proprietary third-party equipment-manufacturer
+# content -- never belongs in git history (see the 2026-08-21 history rewrite
+# that removed a 255MB source zip + 71 PDFs committed here by mistake).
+data/manuals_incoming/*
+!data/manuals_incoming/.gitkeep
+*.zip
 _pipcheck/
 .venv/
 node_modules/
