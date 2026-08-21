@@ -34,10 +34,13 @@ def _row_to_machine(row) -> MachineOut:
 
 
 @router.get("", response_model=list[MachineOut])
-def search_machines(q: str = "", limit: int = 25):
+def search_machines(q: str = "", limit: int = 25, user: CurrentUser = Depends(get_current_user)):
     """Autocomplete search across model name, family, and manufacturer. Only
     machines that actually have at least one indexed document are returned, so
-    the picker never dead-ends into a machine with no manual coverage."""
+    the picker never dead-ends into a machine with no manual coverage.
+
+    Requires auth: the equipment catalog is proprietary to the deployment
+    (concern #20 -- this endpoint leaked it to unauthenticated requests)."""
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
                COUNT(DISTINCT dm.document_id) AS document_count

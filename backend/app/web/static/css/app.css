@@ -289,6 +289,9 @@ main {
 .msg-actions { display: flex; gap: 8px; }
 .msg-actions button { min-height: 40px; padding: 0 12px; font-size: 0.85rem; }
 
+.clarify-options { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.clarify-options button { border: 1px solid var(--border); padding: 0 14px; }
+
 /* --- Composer --- */
 
 .composer {

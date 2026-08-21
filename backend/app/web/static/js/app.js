@@ -55,6 +55,10 @@ async function api(path, options = {}) {
 
 // --- Boot ---------------------------------------------------------------
 
+function notifyServiceWorker(message) {
+  navigator.serviceWorker?.controller?.postMessage(message);
+}
+
 async function boot() {
   window.addEventListener("online", () => { state.online = true; render(); });
   window.addEventListener("offline", () => { state.online = false; render(); });
@@ -66,11 +70,21 @@ async function boot() {
   try {
     state.user = await api("/api/auth/me");
     state.screen = "picker";
+    // Tells the worker which user's manual cache to read/write from now on --
+    // it has no other way to know (concern #21: a shared tablet must not mix
+    // one technician's cached manuals into another's session).
+    notifyServiceWorker({ type: "SET_USER", userId: state.user.id });
     await loadRecentMachines();
   } catch (e) {
     state.screen = "auth";
   }
   render();
+}
+
+async function logout() {
+  await api("/api/auth/logout", { method: "POST" });
+  notifyServiceWorker({ type: "LOGOUT" });
+  state.user = null; state.screen = "auth"; render();
 }
 
 // --- Auth -----------------------------------------------------------------
@@ -118,6 +132,7 @@ function renderAuth() {
     };
     try {
       state.user = await api(path, { method: "POST", body: JSON.stringify(payload) });
+      notifyServiceWorker({ type: "SET_USER", userId: state.user.id });
       state.authError = null;
       state.screen = "picker";
       await loadRecentMachines();
@@ -162,7 +177,6 @@ function machineListItem(m) {
 function renderPicker() {
   const showResults = state.searchQuery.trim().length > 0;
   root.innerHTML = `
-    <div id="app">
       <header class="app-header">
         <div class="brand">🔧 Technician Manual Assistant</div>
         <div class="header-actions">
@@ -191,13 +205,9 @@ function renderPicker() {
           <button id="skip-machine" class="ghost">Skip — I'll say which machine in my question</button>
         </div>
       </main>
-    </div>
   `;
 
-  document.getElementById("logout-btn").addEventListener("click", async () => {
-    await api("/api/auth/logout", { method: "POST" });
-    state.user = null; state.screen = "auth"; render();
-  });
+  document.getElementById("logout-btn").addEventListener("click", logout);
 
   const searchInput = document.getElementById("machine-search");
   searchInput.addEventListener("input", debounce((e) => {
@@ -244,13 +254,17 @@ async function startConversation(machineId) {
 
 // --- Chat -----------------------------------------------------------------
 
+function machineDisplayLabel(m) {
+  if (!m) return "No machine selected";
+  return m.label || `${m.manufacturer || ""}${m.manufacturer && m.model_name ? " — " : ""}${m.model_name || ""}`;
+}
+
 function renderChat() {
   root.innerHTML = `
-    <div id="app">
       <header class="app-header">
         <button id="change-machine" class="machine-pill" aria-label="Change machine">
           <span aria-hidden="true">🔧</span>
-          <span class="machine-pill-text">${state.machine ? escapeHtml(state.machine.manufacturer + " — " + state.machine.model_name) : "No machine selected"}</span>
+          <span class="machine-pill-text">${escapeHtml(machineDisplayLabel(state.machine))}</span>
         </button>
         <div class="header-actions">
           <button id="new-conversation" class="ghost">New conversation</button>
@@ -263,7 +277,7 @@ function renderChat() {
         <div class="chat-log" id="chat-log" role="log" aria-live="polite">
           ${state.messages.length === 0 ? `
             <div class="empty-state">
-              Ask a question below${state.machine ? " about the " + escapeHtml(state.machine.model_name) : ""}.
+              Ask a question below${state.machine ? " about the " + escapeHtml(machineDisplayLabel(state.machine)) : ""}.
               Answers are grounded in the indexed manuals and always cite their source.
             </div>
           ` : state.messages.map(renderMessage).join("")}
@@ -281,17 +295,13 @@ function renderChat() {
           Manual-based assistance only. Always follow your company's safety procedures. Not a substitute for lockout/tagout or manufacturer instructions.
         </footer>
       </main>
-    </div>
   `;
 
   document.getElementById("change-machine").addEventListener("click", () => {
     state.screen = "picker"; state.searchQuery = ""; render();
   });
   document.getElementById("new-conversation").addEventListener("click", () => startConversation(state.machine?.id ?? null));
-  document.getElementById("logout-btn").addEventListener("click", async () => {
-    await api("/api/auth/logout", { method: "POST" });
-    state.user = null; state.screen = "auth"; render();
-  });
+  document.getElementById("logout-btn").addEventListener("click", logout);
 
   document.getElementById("composer-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -332,6 +342,20 @@ function renderMessage(m) {
   const bubbleClass = m.is_clarifying_question ? "clarifying" : (m.is_no_answer ? "no-answer" : "");
   const parts = [`<div class="msg assistant" data-message-id="${m.id}">`];
   parts.push(`<div class="bubble ${bubbleClass}">${renderMarkdownish(m.content)}</div>`);
+
+  if (m.is_clarifying_question && m.clarifying_options && m.clarifying_options.length) {
+    // Tappable, not "type the machine name again" -- carries the canonical
+    // machine ID straight to the confirm endpoint (concern #6).
+    parts.push(`<div class="clarify-options">${m.clarifying_options.map((o) =>
+      `<button class="ghost clarify-option-btn" data-machine-id="${o.id}">${escapeHtml(o.label)}</button>`
+    ).join("")}</div>`);
+  } else if (m.is_clarifying_question) {
+    parts.push(`<div class="clarify-options"><button class="ghost clarify-pick-btn">Choose a machine</button></div>`);
+  }
+
+  if (m.answer_status === "failed") {
+    parts.push(`<div class="msg-actions"><button class="ghost retry-btn" data-message-id="${m.id}">↻ Retry</button></div>`);
+  }
 
   if (m.safety_warnings && m.safety_warnings.length) {
     parts.push(`<div class="warning-box"><strong>⚠ Safety warning from the manual</strong>${m.safety_warnings.map(escapeHtml).join("<br>")}</div>`);
@@ -382,7 +406,47 @@ function wireEvidenceToggles() {
   });
 }
 
+function previousUserQuestion(messageId) {
+  const idx = state.messages.findIndex((m) => String(m.id) === String(messageId));
+  for (let i = idx - 1; i >= 0; i--) {
+    if (state.messages[i].role === "user") return state.messages[i].content;
+  }
+  return null;
+}
+
+async function confirmMachine(machineId, resendQuestion) {
+  try {
+    const conv = await api(`/api/conversations/${state.conversationId}/machine`, {
+      method: "POST",
+      body: JSON.stringify({ machine_id: machineId }),
+    });
+    state.machine = { id: conv.machine_id, label: conv.machine_label };
+    if (resendQuestion) {
+      await sendQuestion(resendQuestion);
+    } else {
+      render();
+    }
+  } catch (err) {
+    alert("Could not set the machine: " + err.message);
+  }
+}
+
 function wireMessageActions() {
+  root.querySelectorAll(".clarify-option-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const messageId = btn.closest(".msg")?.dataset.messageId;
+      confirmMachine(parseInt(btn.dataset.machineId, 10), previousUserQuestion(messageId));
+    });
+  });
+  root.querySelectorAll(".clarify-pick-btn").forEach((btn) => {
+    btn.addEventListener("click", () => { state.screen = "picker"; state.searchQuery = ""; render(); });
+  });
+  root.querySelectorAll(".retry-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const q = previousUserQuestion(btn.dataset.messageId);
+      if (q) sendQuestion(q);
+    });
+  });
   root.querySelectorAll(".copy-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const m = state.messages.find((x) => String(x.id) === btn.dataset.messageId);

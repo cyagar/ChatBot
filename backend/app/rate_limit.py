@@ -20,3 +20,10 @@ limiter = Limiter(key_func=_key_func)
 
 def default_limit_string() -> str:
     return f"{get_settings().rate_limit_per_minute}/minute"
+
+
+# Deliberately tighter and fixed (not settings-derived): login/register are
+# brute-force/enumeration targets, not normal usage traffic, so this shouldn't
+# scale with the general chat rate limit (concern #20: "rate-limit login and
+# registration, not only chat").
+AUTH_RATE_LIMIT = "10/minute"

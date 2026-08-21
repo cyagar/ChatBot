@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
 
 from app.auth.deps import SESSION_COOKIE, CurrentUser, get_current_user
 from app.auth.security import create_session_token, hash_password, verify_password
 from app.config import get_settings
 from app.db import get_conn
+from app.rate_limit import AUTH_RATE_LIMIT, limiter
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -42,14 +43,30 @@ def _set_session_cookie(response: Response, user_id: int, role: str):
     )
 
 
+def _check_registration_allowed(email: str) -> None:
+    allowed = [d.strip().lower() for d in get_settings().allowed_registration_domains.split(",") if d.strip()]
+    if not allowed:
+        return
+    domain = email.rsplit("@", 1)[-1].lower()
+    if domain not in allowed:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail="Registration is restricted to approved email domains. Contact an administrator for access.",
+        )
+
+
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, response: Response):
+@limiter.limit(AUTH_RATE_LIMIT)
+def register(payload: RegisterRequest, request: Request, response: Response):
+    _check_registration_allowed(payload.email)
     with get_conn() as conn:
         existing = conn.execute("SELECT id FROM users WHERE email = ?", (payload.email,)).fetchone()
         if existing:
             raise HTTPException(status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
         # First-ever account becomes administrator so the system is bootstrap-able
         # without direct DB access; every subsequent signup is a technician.
+        # Still subject to the domain check above once allowed_registration_domains
+        # is set, so an attacker can't win the race to be "first" from outside.
         user_count = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
         role = "administrator" if user_count == 0 else "technician"
         cur = conn.execute(
@@ -63,7 +80,8 @@ def register(payload: RegisterRequest, response: Response):
 
 
 @router.post("/login", response_model=UserOut)
-def login(payload: LoginRequest, response: Response):
+@limiter.limit(AUTH_RATE_LIMIT)
+def login(payload: LoginRequest, request: Request, response: Response):
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id, email, password_hash, role, display_name FROM users WHERE email = ?",

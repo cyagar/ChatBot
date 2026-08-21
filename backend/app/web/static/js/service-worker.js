@@ -18,7 +18,35 @@
 // cache-first means an already-registered service worker keeps serving the
 // stale cached copies indefinitely otherwise.
 const SHELL_CACHE = "tma-shell-v5";
-const MANUAL_CACHE = "tma-manuals-v1";
+const MANUAL_CACHE_PREFIX = "tma-manuals-";
+
+// Proprietary manuals must not survive a logout or a different technician
+// picking up the same shared tablet (independent review concern #21). The
+// cache is namespaced per user id, and the page tells this worker who's
+// logged in via postMessage -- a service worker has no access to the page's
+// cookies/state on its own. Until a user id arrives (or after a restart,
+// since an idle worker can be evicted and its in-memory state lost) manual
+// assets are served network-only rather than risking an unscoped cache.
+let currentUserId = null;
+
+function manualCacheName() {
+  return currentUserId ? `${MANUAL_CACHE_PREFIX}${currentUserId}` : null;
+}
+
+async function purgeManualCaches() {
+  const keys = await caches.keys();
+  await Promise.all(keys.filter((k) => k.startsWith(MANUAL_CACHE_PREFIX)).map((k) => caches.delete(k)));
+}
+
+self.addEventListener("message", (event) => {
+  const data = event.data || {};
+  if (data.type === "SET_USER") {
+    currentUserId = data.userId ?? null;
+  } else if (data.type === "LOGOUT") {
+    currentUserId = null;
+    event.waitUntil(purgeManualCaches());
+  }
+});
 
 const SHELL_ASSETS = [
   "/",
@@ -40,7 +68,7 @@ self.addEventListener("activate", (event) => {
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((k) => k !== SHELL_CACHE && k !== MANUAL_CACHE)
+          .filter((k) => k !== SHELL_CACHE && !k.startsWith(MANUAL_CACHE_PREFIX))
           .map((k) => caches.delete(k))
       )
     ).then(() => self.clients.claim())
@@ -76,11 +104,23 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (isManualAsset(url)) {
+    const cacheName = manualCacheName();
+    if (!cacheName) {
+      // No known user yet (fresh worker, or restarted and not re-told by the
+      // page) -- go straight to network rather than risk reading or writing
+      // an unscoped cache that could belong to (or later be seen by) someone
+      // else on a shared tablet.
+      event.respondWith(fetch(event.request));
+      return;
+    }
     event.respondWith(
-      caches.open(MANUAL_CACHE).then(async (cache) => {
+      caches.open(cacheName).then(async (cache) => {
         const cached = await cache.match(event.request);
         const network = fetch(event.request)
           .then((resp) => {
+            // Never cache an authorization failure (concern #21) -- resp.ok
+            // is false for 401/403, so this already excludes them, but keep
+            // it explicit since that's a security property, not incidental.
             if (resp.ok) cache.put(event.request, resp.clone());
             return resp;
           })
