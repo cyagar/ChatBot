@@ -22,18 +22,21 @@ def _seed_two_machines_with_similar_language(conn):
         "VALUES (2, 1, 'ICB Twin', 'Infusion Series', 'coffee brewer')"
     )
 
+    # review_status='approved' explicitly: these fixtures simulate an
+    # already-published, reviewed corpus, not the P0-6 review-queue workflow
+    # itself (that's covered separately in test_review_status_gates_retrieval).
     conn.execute(
         "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
-        "file_type, sha256, byte_size, status) VALUES (1, 'axiom.pdf', 'axiom.pdf', 'local_directory', "
-        "'axiom.pdf', 'pdf', 'hash1', 100, 'indexed')"
+        "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+        "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
     )
     conn.execute(
         "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
-        "file_type, sha256, byte_size, status) VALUES (2, 'icb.pdf', 'icb.pdf', 'local_directory', "
-        "'icb.pdf', 'pdf', 'hash2', 100, 'indexed')"
+        "file_type, sha256, byte_size, status, review_status) VALUES (2, 'icb.pdf', 'icb.pdf', "
+        "'local_directory', 'icb.pdf', 'pdf', 'hash2', 100, 'indexed', 'approved')"
     )
-    conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (1, 1)")
-    conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (2, 2)")
+    conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 1, 'approved')")
+    conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (2, 2, 'approved')")
 
     conn.execute(
         "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
@@ -88,6 +91,66 @@ def test_unfiltered_query_can_return_both_machines(test_env):
     results = hybrid_search("brewer heating element error", machine_id=None, top_k=10)
     doc_ids = {r.document_id for r in results}
     assert doc_ids == {1, 2}
+
+
+@pytest.mark.slow
+def test_review_status_gates_retrieval(test_env):
+    """Independent follow-up review P0-6: 'Confidence is stored but not
+    enforced.' Same document, linked to two machines -- one link approved,
+    one still pending. Retrieval must return results for the approved link
+    and nothing for the pending one, proving both documents.review_status AND
+    document_machines.review_status are enforced, not just one of them."""
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (2, 1, 'ICB Twin')")
+        conn.execute(
+            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "'google_drive', 'f1', 'pdf', 'hash1', 100, 'indexed', 'approved')"
+        )
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 1, 'approved')"
+        )
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 2, 'pending')"
+        )
+        conn.execute(
+            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 1, 4, 'text', 'Axiom brewer heating element error E4 troubleshooting steps.', 60, 0)"
+        )
+        conn.execute("INSERT INTO chunks_fts (rowid, content) SELECT id, content FROM chunks")
+    _embed_seeded_chunks()
+
+    from app.retrieval.search import hybrid_search
+
+    approved = hybrid_search("error E4", machine_id=1, top_k=10)
+    assert approved and all(r.document_id == 1 for r in approved)
+
+    pending = hybrid_search("error E4", machine_id=2, top_k=10)
+    assert pending == [], "a document_machines link that hasn't been approved must never surface in retrieval"
+
+
+@pytest.mark.slow
+def test_unapproved_document_excluded_even_without_a_machine_filter(test_env):
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
+        conn.execute(
+            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "'google_drive', 'f1', 'pdf', 'hash1', 100, 'indexed', 'pending')"
+        )
+        conn.execute(
+            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 1, 4, 'text', 'Freshly ingested content awaiting admin review.', 48, 0)"
+        )
+        conn.execute("INSERT INTO chunks_fts (rowid, content) SELECT id, content FROM chunks")
+    _embed_seeded_chunks()
+
+    from app.retrieval.search import hybrid_search
+
+    results = hybrid_search("freshly ingested content", machine_id=None, top_k=10)
+    assert results == []
 
 
 def test_fts_query_sanitization_handles_special_characters(test_env):

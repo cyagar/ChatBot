@@ -174,8 +174,20 @@ reload steps.
 ## Security & reliability
 
 - Auth: bcrypt password hashing, JWT session cookie (httponly, samesite=lax),
-  two roles (technician/administrator; first registered account becomes
-  administrator).
+  two roles (technician/administrator). No public self-registration --
+  `POST /api/auth/register` requires a valid admin-issued invitation
+  (`invitations` table); the first administrator is created out-of-band via
+  `scripts/bootstrap_admin.py`, which refuses to run once any user exists.
+  Session tokens embed the user's `token_version`; disabling an account bumps
+  it, invalidating every token already issued to that user immediately, not
+  just future logins.
+- Document approval: `documents.review_status` and
+  `document_machines.review_status` (`pending`/`approved`/`rejected`) gate
+  retrieval independently of ingestion status -- a Drive edit alone never
+  makes a document or a proposed machine link retrievable; an administrator
+  must approve both via the admin "Review queue" tab
+  (`POST /api/admin/documents/{id}/review`,
+  `POST /api/admin/documents/{id}/machines/{machine_id}/review`).
 - Rate limiting: `slowapi`, keyed by session (falls back to IP for
   unauthenticated requests), configurable via `.env`.
 - Input validation: Pydantic models on every request body; FTS5 query text is

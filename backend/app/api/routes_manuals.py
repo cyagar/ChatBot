@@ -29,13 +29,20 @@ _MIME_BY_TYPE = {
 }
 
 
-def _get_document(document_id: int):
+def _get_document(document_id: int, *, allow_unapproved: bool = False):
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id, original_filename, storage_path, file_type, status "
             "FROM documents WHERE id = ? AND deactivated_at IS NULL",
             (document_id,),
         ).fetchone()
+        if row is not None and not allow_unapproved:
+            approved = conn.execute(
+                "SELECT 1 FROM documents WHERE id = ? AND review_status = 'approved'",
+                (document_id,),
+            ).fetchone()
+            if approved is None:
+                row = None
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Manual not found.")
     return row
@@ -45,8 +52,13 @@ def _get_document(document_id: int):
 def get_manual_file(document_id: int, user: CurrentUser = Depends(get_current_user)):
     """Serves the raw file. The frontend appends #page=N (browser-native PDF
     navigation, supported by Chrome/Edge/Safari, including iPadOS) to deep-link
-    to the cited page without needing a bundled PDF.js viewer."""
-    doc = _get_document(document_id)
+    to the cited page without needing a bundled PDF.js viewer.
+
+    Gated on review_status='approved' for everyone except administrators --
+    the raw file and evidence endpoints are a second path to document content
+    that must honor the same P0-6 approval boundary as retrieval, not just be
+    reachable via an old citation or a guessed document id (concern #6)."""
+    doc = _get_document(document_id, allow_unapproved=user.role == "administrator")
     settings = get_settings()
     path = settings.local_storage_dir_resolved / doc["storage_path"]
     if not path.exists():
@@ -78,7 +90,7 @@ def _render_page_png(document_id: int, storage_path: str, page_number: int) -> b
 
 @router.get("/{document_id}/pages/{page_number}/image")
 def get_page_image(document_id: int, page_number: int, user: CurrentUser = Depends(get_current_user)):
-    doc = _get_document(document_id)
+    doc = _get_document(document_id, allow_unapproved=user.role == "administrator")
     if doc["file_type"] != "pdf":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Page images are only available for PDF manuals.")
     png_bytes = _render_page_png(doc["id"], doc["storage_path"], page_number)
@@ -88,13 +100,17 @@ def get_page_image(document_id: int, page_number: int, user: CurrentUser = Depen
 @router.get("/{document_id}/chunks/{chunk_id}/evidence")
 def get_evidence(document_id: int, chunk_id: int, user: CurrentUser = Depends(get_current_user)):
     """Backs the 'View manual evidence' expandable panel: the exact excerpt text
-    plus (for PDFs) a link to the rendered page image."""
+    plus (for PDFs) a link to the rendered page image.
+
+    Gated on review_status='approved' for everyone except administrators, same
+    as get_manual_file -- this is a second path to full chunk content (concern #6)."""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT c.id, c.content, c.page_number, c.section_heading, c.chunk_type, "
             "d.original_filename, d.title, d.revision, d.doc_type, d.file_type, d.is_current_revision "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "WHERE c.id = ? AND c.document_id = ? AND d.deactivated_at IS NULL",
+            "WHERE c.id = ? AND c.document_id = ? AND d.deactivated_at IS NULL"
+            + ("" if user.role == "administrator" else " AND d.review_status = 'approved'"),
             (chunk_id, document_id),
         ).fetchone()
     if not row:

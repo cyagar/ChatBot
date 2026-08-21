@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from datetime import datetime, timedelta, timezone
 
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from pydantic import BaseModel, EmailStr, Field
+
+from app.auth.audit import log_audit_event
 from app.auth.deps import CurrentUser, require_admin
+from app.auth.security import generate_invitation_token
+from app.config import get_settings
 from app.db import get_conn
 from app.ingestion.pipeline import _INGEST_LOCK, ingest_all
 from app.retrieval.search import hybrid_search
@@ -31,6 +36,8 @@ class DocumentOut(BaseModel):
     machines: list[str]
     machine_ids: list[int]
     ingested_at: str | None
+    review_status: str
+    reviewed_at: str | None
 
 
 def _row_to_document(conn, row) -> DocumentOut:
@@ -48,6 +55,8 @@ def _row_to_document(conn, row) -> DocumentOut:
         machines=[f"{m['model_name']} ({m['confidence']:.2f})" for m in machines],
         machine_ids=[m["id"] for m in machines],
         ingested_at=row["ingested_at"],
+        review_status=row["review_status"],
+        reviewed_at=row["reviewed_at"],
     )
 
 
@@ -151,11 +160,20 @@ def correct_metadata(document_id: int, payload: MetadataCorrection, admin: Curre
 
         if payload.machine_ids is not None:
             _log("machine_links", None, payload.machine_ids)
+            # An admin setting links here IS the human review those links get
+            # (independent follow-up review P0-6) -- insert them pre-approved
+            # rather than 'pending', or this endpoint would silently remove a
+            # document from retrieval every time an admin corrected it.
+            # Deliberately clears any prior 'rejected' rows for this document
+            # too: the admin is explicitly overriding whatever review state
+            # existed before, not appending to it.
             conn.execute("DELETE FROM document_machines WHERE document_id = ?", (document_id,))
             for mid in payload.machine_ids:
                 conn.execute(
-                    "INSERT OR IGNORE INTO document_machines (document_id, machine_id, confidence) VALUES (?, ?, 1.0)",
-                    (document_id, mid),
+                    "INSERT OR IGNORE INTO document_machines "
+                    "(document_id, machine_id, confidence, review_status, reviewed_by, reviewed_at) "
+                    "VALUES (?, ?, 1.0, 'approved', ?, datetime('now'))",
+                    (document_id, mid, admin.id),
                 )
 
         row = conn.execute(
@@ -177,6 +195,259 @@ def deactivate_document(document_id: int, reason: str = "Deactivated by administ
         )
         if result.rowcount == 0:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found or already deactivated.")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Document/link review queue (independent follow-up review P0-6: heuristic
+# metadata proposes machine associations, but a Drive edit alone must never be
+# enough to make a document retrievable -- retrieval only ever uses documents
+# and document_machines links with review_status='approved', enforced in
+# app/retrieval/search.py, not just displayed here.)
+# ---------------------------------------------------------------------------
+
+class PendingLinkOut(BaseModel):
+    machine_id: int
+    model_name: str
+    manufacturer: str
+    confidence: float
+    review_status: str
+
+
+class ReviewQueueDocumentOut(BaseModel):
+    id: int
+    original_filename: str
+    doc_type: str | None
+    manufacturer: str | None
+    title: str | None
+    status: str
+    review_status: str
+    ingested_at: str | None
+    links: list[PendingLinkOut]
+
+
+@router.get("/review-queue", response_model=list[ReviewQueueDocumentOut])
+def review_queue(admin: CurrentUser = Depends(require_admin)):
+    """Every active document that either isn't approved itself, or has at
+    least one non-approved (pending/rejected) machine link -- the second half
+    matters even for an already-approved document, since a re-index can
+    propose a *new* link on an existing approved document at any time."""
+    with get_conn() as conn:
+        docs = conn.execute(
+            "SELECT DISTINCT d.id, d.original_filename, d.doc_type, mf.name AS manufacturer, "
+            "d.title, d.status, d.review_status, d.ingested_at "
+            "FROM documents d "
+            "LEFT JOIN manufacturers mf ON mf.id = d.manufacturer_id "
+            "LEFT JOIN document_machines dm ON dm.document_id = d.id "
+            "WHERE d.deactivated_at IS NULL "
+            "AND (d.review_status != 'approved' OR dm.review_status != 'approved') "
+            "ORDER BY d.ingested_at DESC"
+        ).fetchall()
+        out = []
+        for d in docs:
+            links = conn.execute(
+                "SELECT m.id AS machine_id, m.model_name, mf.name AS manufacturer, "
+                "dm.confidence, dm.review_status "
+                "FROM document_machines dm "
+                "JOIN machines m ON m.id = dm.machine_id "
+                "JOIN manufacturers mf ON mf.id = m.manufacturer_id "
+                "WHERE dm.document_id = ? ORDER BY dm.review_status, m.model_name",
+                (d["id"],),
+            ).fetchall()
+            out.append(ReviewQueueDocumentOut(
+                id=d["id"], original_filename=d["original_filename"], doc_type=d["doc_type"],
+                manufacturer=d["manufacturer"], title=d["title"], status=d["status"],
+                review_status=d["review_status"], ingested_at=d["ingested_at"],
+                links=[PendingLinkOut(machine_id=l["machine_id"], model_name=l["model_name"],
+                                       manufacturer=l["manufacturer"], confidence=l["confidence"],
+                                       review_status=l["review_status"]) for l in links],
+            ))
+    return out
+
+
+class DocumentReviewRequest(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected)$")
+    note: str | None = Field(default=None, max_length=500)
+
+
+@router.post("/documents/{document_id}/review")
+def review_document(document_id: int, payload: DocumentReviewRequest, admin: CurrentUser = Depends(require_admin)):
+    with get_conn() as conn:
+        doc = conn.execute("SELECT id FROM documents WHERE id = ? AND deactivated_at IS NULL", (document_id,)).fetchone()
+        if not doc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found or deactivated.")
+        conn.execute(
+            "UPDATE documents SET review_status = ?, reviewed_by = ?, reviewed_at = datetime('now'), "
+            "review_note = ? WHERE id = ?",
+            (payload.decision, admin.id, payload.note, document_id),
+        )
+        log_audit_event(conn, "document_reviewed", actor_user_id=admin.id, target_type="document",
+                         target_id=document_id, detail=f"{payload.decision}" + (f": {payload.note}" if payload.note else ""))
+    return {"ok": True}
+
+
+class LinkReviewRequest(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected)$")
+
+
+@router.post("/documents/{document_id}/machines/{machine_id}/review")
+def review_document_machine_link(document_id: int, machine_id: int, payload: LinkReviewRequest,
+                                  admin: CurrentUser = Depends(require_admin)):
+    with get_conn() as conn:
+        result = conn.execute(
+            "UPDATE document_machines SET review_status = ?, reviewed_by = ?, reviewed_at = datetime('now') "
+            "WHERE document_id = ? AND machine_id = ?",
+            (payload.decision, admin.id, document_id, machine_id),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document-machine link not found.")
+        log_audit_event(conn, "document_machine_reviewed", actor_user_id=admin.id, target_type="document_machine",
+                         target_id=document_id, detail=f"machine_id={machine_id}: {payload.decision}")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Invitations + account management (independent follow-up review P0-5: public
+# self-registration is closed -- an account can only be created by consuming
+# an admin-issued invitation. See app/auth/routes.py:register and
+# scripts/bootstrap_admin.py for the very first administrator.)
+# ---------------------------------------------------------------------------
+
+DEFAULT_INVITE_TTL_HOURS = 72
+
+
+class InvitationCreate(BaseModel):
+    email: EmailStr
+    role: str = Field(default="technician", pattern="^(technician|administrator)$")
+    expires_in_hours: int = Field(default=DEFAULT_INVITE_TTL_HOURS, ge=1, le=24 * 30)
+
+
+class InvitationOut(BaseModel):
+    id: int
+    email: str
+    role: str
+    created_at: str
+    expires_at: str
+    used_at: str | None
+    revoked_at: str | None
+    token: str | None = None  # only populated once, in the create response
+
+
+def _check_invite_domain_allowed(email: str) -> None:
+    allowed = [d.strip().lower() for d in get_settings().allowed_registration_domains.split(",") if d.strip()]
+    if not allowed:
+        return
+    domain = email.rsplit("@", 1)[-1].lower()
+    if domain not in allowed:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"{domain!r} is not in ALLOWED_REGISTRATION_DOMAINS.",
+        )
+
+
+@router.post("/invitations", response_model=InvitationOut, status_code=status.HTTP_201_CREATED)
+def create_invitation(payload: InvitationCreate, admin: CurrentUser = Depends(require_admin)):
+    _check_invite_domain_allowed(payload.email)
+    raw_token, token_hash = generate_invitation_token()
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=payload.expires_in_hours)).isoformat()
+
+    with get_conn() as conn:
+        existing_user = conn.execute("SELECT id FROM users WHERE email = ?", (payload.email,)).fetchone()
+        if existing_user:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
+        cur = conn.execute(
+            "INSERT INTO invitations (token_hash, email, role, created_by, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (token_hash, payload.email, payload.role, admin.id, expires_at),
+        )
+        invite_id = cur.lastrowid
+        log_audit_event(conn, "invite_created", actor_user_id=admin.id, target_type="invitation",
+                         target_id=invite_id, detail=f"role={payload.role} email={payload.email}")
+        row = conn.execute("SELECT * FROM invitations WHERE id = ?", (invite_id,)).fetchone()
+
+    return InvitationOut(
+        id=row["id"], email=row["email"], role=row["role"], created_at=row["created_at"],
+        expires_at=row["expires_at"], used_at=row["used_at"], revoked_at=row["revoked_at"],
+        token=raw_token,
+    )
+
+
+@router.get("/invitations", response_model=list[InvitationOut])
+def list_invitations(admin: CurrentUser = Depends(require_admin), limit: int = 50):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM invitations ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [
+        InvitationOut(id=r["id"], email=r["email"], role=r["role"], created_at=r["created_at"],
+                      expires_at=r["expires_at"], used_at=r["used_at"], revoked_at=r["revoked_at"])
+        for r in rows
+    ]
+
+
+@router.post("/invitations/{invitation_id}/revoke")
+def revoke_invitation(invitation_id: int, admin: CurrentUser = Depends(require_admin)):
+    with get_conn() as conn:
+        result = conn.execute(
+            "UPDATE invitations SET revoked_at = datetime('now') "
+            "WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL",
+            (invitation_id,),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Invitation not found, already used, or already revoked.")
+    return {"ok": True}
+
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+    role: str
+    display_name: str | None
+    is_disabled: bool
+    created_at: str
+    last_login_at: str | None
+
+
+@router.get("/users", response_model=list[UserOut])
+def list_users(admin: CurrentUser = Depends(require_admin)):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, email, role, display_name, is_disabled, created_at, last_login_at "
+            "FROM users ORDER BY created_at"
+        ).fetchall()
+    return [UserOut(id=r["id"], email=r["email"], role=r["role"], display_name=r["display_name"],
+                     is_disabled=bool(r["is_disabled"]), created_at=r["created_at"],
+                     last_login_at=r["last_login_at"]) for r in rows]
+
+
+@router.post("/users/{user_id}/disable")
+def disable_user(user_id: int, admin: CurrentUser = Depends(require_admin)):
+    if user_id == admin.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="You cannot disable your own account.")
+    with get_conn() as conn:
+        # Bumping token_version invalidates every session token already issued
+        # to this user, even ones that haven't expired yet (P0-5's "session
+        # revocation" requirement) -- see app/auth/deps.py's tv check.
+        result = conn.execute(
+            "UPDATE users SET is_disabled = 1, disabled_at = datetime('now'), "
+            "token_version = token_version + 1 WHERE id = ? AND is_disabled = 0",
+            (user_id,),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found or already disabled.")
+        log_audit_event(conn, "user_disabled", actor_user_id=admin.id, target_type="user", target_id=user_id)
+    return {"ok": True}
+
+
+@router.post("/users/{user_id}/enable")
+def enable_user(user_id: int, admin: CurrentUser = Depends(require_admin)):
+    with get_conn() as conn:
+        result = conn.execute(
+            "UPDATE users SET is_disabled = 0, disabled_at = NULL WHERE id = ? AND is_disabled = 1",
+            (user_id,),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found or not disabled.")
+        log_audit_event(conn, "user_enabled", actor_user_id=admin.id, target_type="user", target_id=user_id)
     return {"ok": True}
 
 

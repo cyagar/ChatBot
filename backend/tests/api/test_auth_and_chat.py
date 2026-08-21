@@ -3,31 +3,123 @@ from fastapi.testclient import TestClient
 
 from app.db import get_conn
 from app.main import app
+from tests.conftest import register_test_user
 
 client = TestClient(app)
 
 
 def _register(email="tech1@example.com", password="password123"):
-    return client.post("/api/auth/register", json={"email": email, "password": password})
+    return register_test_user(client, email, role="technician", password=password)
 
 
-def test_first_registered_user_becomes_administrator(test_env):
-    resp = _register()
-    assert resp.status_code == 201
-    assert resp.json()["role"] == "administrator"
+def test_registration_without_invite_is_rejected(test_env):
+    """Independent follow-up review P0-5: public self-registration used to
+    always succeed (the first registrant even became administrator). Now a
+    request with no invite_token at all must fail validation, and critically
+    must not create a user row -- a 4xx alone doesn't prove that."""
+    resp = client.post("/api/auth/register", json={"email": "uninvited@example.com", "password": "password123"})
+    assert resp.status_code == 422
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT id FROM users WHERE email = ?", ("uninvited@example.com",)).fetchone()
+    assert row is None
 
 
-def test_second_registered_user_is_technician(test_env):
-    _register("admin@example.com")
-    resp = _register("tech2@example.com")
-    assert resp.status_code == 201
-    assert resp.json()["role"] == "technician"
+def test_registration_with_bogus_invite_token_is_rejected(test_env):
+    resp = client.post(
+        "/api/auth/register",
+        json={"email": "nope@example.com", "password": "password123", "invite_token": "not-a-real-token"},
+    )
+    assert resp.status_code == 403
+    with get_conn() as conn:
+        row = conn.execute("SELECT id FROM users WHERE email = ?", ("nope@example.com",)).fetchone()
+    assert row is None
+
+
+def test_invite_is_bound_to_its_email_and_single_use(test_env):
+    register_test_user(client, "bootstrap-admin@example.com", role="administrator")
+    invite = client.post(
+        "/api/admin/invitations", json={"email": "invited@example.com", "role": "technician"}
+    ).json()
+    token = invite["token"]
+    client.post("/api/auth/logout")
+
+    # Wrong email for this token.
+    wrong_email = client.post(
+        "/api/auth/register",
+        json={"email": "someone-else@example.com", "password": "password123", "invite_token": token},
+    )
+    assert wrong_email.status_code == 403
+
+    # Correct email consumes it.
+    ok = client.post(
+        "/api/auth/register",
+        json={"email": "invited@example.com", "password": "password123", "invite_token": token},
+    )
+    assert ok.status_code == 201
+    assert ok.json()["role"] == "technician"
+    client.post("/api/auth/logout")
+
+    # Same token again, even with the right email, must fail -- single-use.
+    reuse = client.post(
+        "/api/auth/register",
+        json={"email": "invited@example.com", "password": "password123", "invite_token": token},
+    )
+    assert reuse.status_code == 403
+
+
+def test_bootstrap_admin_refuses_once_a_user_exists(test_env):
+    from app.auth.bootstrap import bootstrap_admin
+
+    bootstrap_admin("first-admin@example.com", "password123")
+    with pytest.raises(RuntimeError, match="Refusing to bootstrap"):
+        bootstrap_admin("second-admin@example.com", "password123")
 
 
 def test_duplicate_email_registration_rejected(test_env):
-    _register("dup@example.com")
-    resp = _register("dup@example.com")
+    """Defense-in-depth check at the register endpoint itself, independent of
+    invite creation already refusing to issue an invite for an email that has
+    an account (covered by test_invite_creation_rejects_existing_email)."""
+    register_test_user(client, "bootstrap-admin@example.com", role="administrator")
+    invite = client.post(
+        "/api/admin/invitations", json={"email": "raceduplicate@example.com", "role": "technician"}
+    ).json()
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO users (email, password_hash, role) VALUES (?, 'x', 'technician')",
+            ("raceduplicate@example.com",),
+        )
+    client.post("/api/auth/logout")
+    resp = client.post(
+        "/api/auth/register",
+        json={"email": "raceduplicate@example.com", "password": "password123", "invite_token": invite["token"]},
+    )
     assert resp.status_code == 409
+
+
+def test_disabled_user_cannot_log_in_or_use_an_existing_session(test_env):
+    register_test_user(client, "bootstrap-admin@example.com", role="administrator")
+    reg = register_test_user(client, "todisable@example.com")
+    user_id = reg.json()["id"]
+
+    # A second client holds the disabled-to-be user's own session cookie,
+    # captured before the admin disables them, so we can prove an ALREADY
+    # ISSUED token stops working -- not just that a fresh login is blocked
+    # (independent follow-up review P0-5: "session revocation").
+    tech_client = TestClient(app)
+    tech_client.cookies.set("tma_session", client.cookies.get("tma_session"))
+    assert tech_client.get("/api/auth/me").status_code == 200
+
+    register_test_user(client, "bootstrap-admin@example.com", role="administrator")
+    disable_resp = client.post(f"/api/admin/users/{user_id}/disable")
+    assert disable_resp.status_code == 200
+
+    assert tech_client.get("/api/auth/me").status_code == 401, (
+        "a session token issued before disable must stop working immediately, not just at its natural expiry"
+    )
+
+    login_resp = client.post("/api/auth/login", json={"email": "todisable@example.com", "password": "password123"})
+    assert login_resp.status_code == 401
 
 
 def test_login_wrong_password_rejected(test_env):
@@ -86,15 +178,13 @@ def test_cannot_access_another_users_conversation(test_env):
 
 
 def test_admin_endpoint_forbidden_for_technician(test_env):
-    _register("admin2@example.com")  # first user -> administrator
-    client.post("/api/auth/logout")
-    _register("plaintech@example.com")  # second user -> technician
+    _register("plaintech@example.com")
     resp = client.get("/api/admin/documents")
     assert resp.status_code == 403
 
 
 def test_admin_endpoint_allowed_for_administrator(test_env):
-    _register("admin3@example.com")
+    register_test_user(client, "bootstrap-admin@example.com", role="administrator")
     resp = client.get("/api/admin/documents")
     assert resp.status_code == 200
 

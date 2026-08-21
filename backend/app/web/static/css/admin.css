@@ -30,6 +30,9 @@
 .status-badge.partial { color: var(--warn-border); border-color: var(--warn-border); }
 .status-badge.duplicate { color: var(--text-dim); }
 .status-badge.failed, .status-badge.unsupported { color: var(--danger); border-color: var(--danger); }
+.status-badge.approved, .status-badge.used { color: var(--accent); border-color: var(--accent); }
+.status-badge.pending { color: var(--warn-border); border-color: var(--warn-border); }
+.status-badge.rejected, .status-badge.revoked { color: var(--danger); border-color: var(--danger); }
 
 .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .toolbar input, .toolbar select { min-height: 40px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); padding: 0 10px; }

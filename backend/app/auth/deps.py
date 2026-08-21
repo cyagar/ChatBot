@@ -27,10 +27,18 @@ def get_current_user(tma_session: str | None = Cookie(default=None, alias=SESSIO
 
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT id, email, role, display_name FROM users WHERE id = ?", (int(payload["sub"]),)
+            "SELECT id, email, role, display_name, is_disabled, token_version FROM users WHERE id = ?",
+            (int(payload["sub"]),),
         ).fetchone()
     if not row:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="User no longer exists.")
+    if row["is_disabled"]:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="This account has been disabled.")
+    # A token with no "tv" claim predates session-revocation support and must
+    # not be treated as version 0 by default -- reject it outright rather than
+    # let a pre-migration cookie silently keep working forever.
+    if payload.get("tv") != row["token_version"]:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Session was revoked. Please sign in again.")
 
     return CurrentUser(id=row["id"], email=row["email"], role=row["role"], display_name=row["display_name"])
 

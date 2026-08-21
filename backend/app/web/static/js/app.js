@@ -6,6 +6,8 @@ const state = {
   user: null,
   screen: "loading", // loading | auth | picker | chat
   authMode: "login", // login | register
+  inviteToken: null,
+  inviteEmail: null,
   machine: null, // {id, manufacturer, model_name, ...}
   conversationId: null,
   messages: [],
@@ -63,6 +65,16 @@ async function boot() {
   window.addEventListener("online", () => { state.online = true; render(); });
   window.addEventListener("offline", () => { state.online = false; render(); });
 
+  // An admin-issued invitation link looks like /?invite=<token>&email=<email>
+  // (independent follow-up review P0-5 -- registration now requires one).
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("invite")) {
+    state.inviteToken = params.get("invite");
+    state.inviteEmail = params.get("email") || null;
+    state.authMode = "register";
+    window.history.replaceState({}, "", window.location.pathname);
+  }
+
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/service-worker.js").catch(() => {});
   }
@@ -91,6 +103,7 @@ async function logout() {
 
 function renderAuth() {
   const isLogin = state.authMode === "login";
+  const hasInvite = !isLogin && !!state.inviteToken;
   root.innerHTML = `
     <main style="justify-content:center; align-items:center; min-height:100vh;">
       <form id="auth-form" class="picker-card" style="max-width:420px; width:100%;">
@@ -102,15 +115,23 @@ function renderAuth() {
           <input id="display_name" name="display_name" placeholder="Your name (optional)" autocomplete="name" />
         ` : ""}
         <label class="sr-only" for="email">Email</label>
-        <input id="email" name="email" type="email" placeholder="Email" required autocomplete="username" />
+        <input id="email" name="email" type="email" placeholder="Email" required autocomplete="username"
+          value="${escapeHtml(state.inviteEmail || "")}" ${state.inviteEmail ? "readonly" : ""} />
         <label class="sr-only" for="password">Password</label>
         <input id="password" name="password" type="password" placeholder="Password" required minlength="8" autocomplete="${isLogin ? "current-password" : "new-password"}" />
+        ${!isLogin ? `
+          <label class="sr-only" for="invite_token">Invitation code</label>
+          <input id="invite_token" name="invite_token" placeholder="Invitation code (from your administrator)" required
+            value="${escapeHtml(state.inviteToken || "")}" ${hasInvite ? "readonly" : ""} />
+        ` : ""}
         <button type="submit" class="primary">${isLogin ? "Sign in" : "Create account"}</button>
         <button type="button" id="toggle-auth" class="ghost">
-          ${isLogin ? "Need an account? Register" : "Already have an account? Sign in"}
+          ${isLogin ? "Have an invitation? Register" : "Already have an account? Sign in"}
         </button>
         <p style="font-size:0.8rem; color:var(--text-dim);">
-          The first account created on a fresh install becomes the administrator.
+          ${isLogin
+            ? "New here? You'll need an invitation from an administrator to create an account."
+            : "Registration requires a single-use invitation issued by an administrator -- paste the code they sent you, or open the link they shared."}
         </p>
       </form>
     </main>
@@ -129,11 +150,14 @@ function renderAuth() {
     const path = isLogin ? "/api/auth/login" : "/api/auth/register";
     const payload = isLogin ? { email, password } : {
       email, password, display_name: document.getElementById("display_name")?.value.trim() || null,
+      invite_token: document.getElementById("invite_token").value.trim(),
     };
     try {
       state.user = await api(path, { method: "POST", body: JSON.stringify(payload) });
       notifyServiceWorker({ type: "SET_USER", userId: state.user.id });
       state.authError = null;
+      state.inviteToken = null;
+      state.inviteEmail = null;
       state.screen = "picker";
       await loadRecentMachines();
       render();

@@ -34,9 +34,54 @@ def test_env(tmp_path, monkeypatch):
     from app.db import run_migrations
     run_migrations()
 
+    # slowapi's limiter storage is process-global, not per-request -- without
+    # this, request counts from earlier tests in the same run accumulate
+    # against the same in-memory bucket (test requests share a fake IP/no
+    # session cookie yet) and an unrelated later test can start already
+    # partway to AUTH_RATE_LIMIT or RATE_LIMIT_PER_MINUTE. This only resets
+    # counters between tests; the limits themselves are untouched.
+    from app.rate_limit import limiter
+    limiter.reset()
+
     yield get_settings()
 
     get_settings.cache_clear()
+
+
+def register_test_user(client, email, role="technician", password="password123",
+                        admin_email="bootstrap-admin@example.com", admin_password="password123"):
+    """Test-support helper mirroring the real post-P0-5 flow: public
+    self-registration is closed, so getting a logged-in user of any role now
+    requires (1) a bootstrap administrator to exist -- created directly via
+    app.auth.bootstrap.bootstrap_admin, the same code scripts/bootstrap_admin.py
+    uses, never through HTTP -- and (2) that admin issuing a single-use
+    invitation the target email then registers with. Leaves `client`'s session
+    cookie set to the requested user (or the bootstrap admin itself, if
+    email == admin_email)."""
+    from app.db import get_conn
+
+    with get_conn() as conn:
+        admin_row = conn.execute("SELECT id FROM users WHERE email = ?", (admin_email,)).fetchone()
+    if admin_row is None:
+        from app.auth.bootstrap import bootstrap_admin
+        bootstrap_admin(admin_email, admin_password)
+
+    login_resp = client.post("/api/auth/login", json={"email": admin_email, "password": admin_password})
+    assert login_resp.status_code == 200, login_resp.text
+    if email == admin_email:
+        return login_resp
+
+    invite_resp = client.post("/api/admin/invitations", json={"email": email, "role": role})
+    assert invite_resp.status_code == 201, invite_resp.text
+    token = invite_resp.json()["token"]
+
+    client.post("/api/auth/logout")
+    reg_resp = client.post(
+        "/api/auth/register",
+        json={"email": email, "password": password, "invite_token": token},
+    )
+    assert reg_resp.status_code == 201, reg_resp.text
+    return reg_resp
 
 
 @pytest.fixture

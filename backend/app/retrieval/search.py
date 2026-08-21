@@ -61,7 +61,8 @@ def _machine_filter_sql(machine_id: int | None) -> tuple[str, list]:
     if machine_id is None:
         return "", []
     return (
-        " AND d.id IN (SELECT document_id FROM document_machines WHERE machine_id = ?) ",
+        " AND d.id IN (SELECT document_id FROM document_machines "
+        "WHERE machine_id = ? AND review_status = 'approved') ",
         [machine_id],
     )
 
@@ -79,6 +80,7 @@ def lexical_search(query: str, machine_id: int | None, limit: int = CANDIDATE_PO
         WHERE chunks_fts MATCH ?
           AND d.status IN ('indexed','partial')
           AND d.deactivated_at IS NULL
+          AND d.review_status = 'approved'
           {filter_sql}
         ORDER BY score
         LIMIT ?
@@ -98,6 +100,7 @@ def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POO
         JOIN documents d ON d.id = c.document_id
         WHERE d.status IN ('indexed','partial')
           AND d.deactivated_at IS NULL
+          AND d.review_status = 'approved'
           {filter_sql}
     """
     with get_conn() as conn:

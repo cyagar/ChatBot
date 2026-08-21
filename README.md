@@ -86,9 +86,18 @@ cd backend
 python -m uvicorn app.main:app --reload
 ```
 
-Open `http://localhost:8000`. **The first account you register becomes the
-administrator**; every account after that is a technician. Admin dashboard is
-at `http://localhost:8000/admin`.
+There is no public sign-up. Create the first administrator out-of-band:
+
+```bash
+cd backend
+python scripts/bootstrap_admin.py --email you@example.com
+```
+
+(Refuses to run once any user already exists.) Log in at
+`http://localhost:8000` and open the admin dashboard at
+`http://localhost:8000/admin` → **Invitations** to invite technicians (and,
+if needed, additional administrators) — each invite is a single-use,
+expiring, email-bound link you send them yourself.
 
 **If you change a frontend file (`app.js`, `app.css`, templates) and a tab
 that already had the app open doesn't show the update:** the service worker

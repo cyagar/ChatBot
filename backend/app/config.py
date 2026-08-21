@@ -65,9 +65,10 @@ class Settings(BaseSettings):
             if not self.allowed_registration_domains:
                 raise RuntimeError(
                     "ALLOWED_REGISTRATION_DOMAINS is not set for APP_ENV="
-                    f"{self.app_env!r} -- this leaves self-registration open to any email "
-                    "address, which is only acceptable for local development. Set it to a "
-                    "comma-separated allowlist before deploying."
+                    f"{self.app_env!r}. Registration itself requires an admin-issued invitation "
+                    "now, but an administrator could still invite any email address without this "
+                    "set -- it's the allowlist invitations are restricted to. Set it to a "
+                    "comma-separated list before deploying."
                 )
         if self.ai_provider not in {"local_extractive", "anthropic", "openai"}:
             raise RuntimeError(f"Unknown AI_PROVIDER: {self.ai_provider!r}")

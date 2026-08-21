@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { tab: "documents", user: null, documents: [], duplicates: [], runs: [], feedback: [], unanswered: [], queryResult: null, machines: [], allMachines: [] };
+const state = { tab: "documents", user: null, documents: [], duplicates: [], runs: [], feedback: [], unanswered: [], queryResult: null, machines: [], allMachines: [], reviewQueue: [], invitations: [], lastInvite: null };
 const root = document.getElementById("admin-app");
 
 async function api(path, options = {}) {
@@ -34,20 +34,24 @@ async function boot() {
 }
 
 const TABS = [
+  { id: "review", label: "Review queue" },
   { id: "documents", label: "Manuals & metadata" },
   { id: "duplicates", label: "Duplicates" },
   { id: "ingestion", label: "Ingestion reports" },
+  { id: "access", label: "Invitations" },
   { id: "query", label: "Query tester" },
   { id: "feedback", label: "Feedback & gaps" },
 ];
 
 async function loadTab() {
+  if (state.tab === "review") state.reviewQueue = await api("/api/admin/review-queue");
   if (state.tab === "documents") {
     state.documents = await api("/api/admin/documents");
     if (state.allMachines.length === 0) state.allMachines = await api("/api/admin/machines");
   }
   if (state.tab === "duplicates") state.duplicates = await api("/api/admin/duplicates");
   if (state.tab === "ingestion") state.runs = await api("/api/admin/ingestion/runs");
+  if (state.tab === "access") state.invitations = await api("/api/admin/invitations");
   if (state.tab === "feedback") {
     state.feedback = await api("/api/admin/feedback");
     state.unanswered = await api("/api/admin/unanswered");
@@ -79,12 +83,100 @@ function render() {
 }
 
 function renderTab() {
+  if (state.tab === "review") return renderReviewQueue();
   if (state.tab === "documents") return renderDocuments();
   if (state.tab === "duplicates") return renderDuplicates();
   if (state.tab === "ingestion") return renderIngestion();
+  if (state.tab === "access") return renderAccess();
   if (state.tab === "query") return renderQuery();
   if (state.tab === "feedback") return renderFeedback();
   return "";
+}
+
+// --- Review queue ---
+
+function renderReviewQueue() {
+  return `
+    <h1>Review queue</h1>
+    <p style="color:var(--text-dim)">A Drive edit alone never makes a document retrievable to technicians -- every document and every machine link needs an explicit approval here first. ${state.reviewQueue.length} item(s) need attention.</p>
+    ${state.reviewQueue.length === 0 ? `<p>Nothing pending.</p>` : state.reviewQueue.map((d) => `
+      <div class="card" style="margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+          <div>
+            <strong>${esc(d.original_filename)}</strong>
+            <div style="color:var(--text-dim); font-size:0.85rem;">${esc(d.manufacturer || "—")} · ${esc(d.doc_type || "—")} · ${esc(d.title || "—")}</div>
+          </div>
+          <span class="status-badge ${d.review_status}">${esc(d.review_status)}</span>
+        </div>
+        ${d.review_status !== "approved" ? `
+          <div style="margin-top:8px;">
+            <button class="primary approve-doc-btn" data-doc="${d.id}">Approve document</button>
+            <button class="ghost reject-doc-btn" data-doc="${d.id}">Reject document</button>
+          </div>
+        ` : ""}
+        ${d.links.length > 0 ? `
+          <table class="admin-table" style="margin-top:10px;">
+            <thead><tr><th>Machine</th><th>Confidence</th><th>Link status</th><th></th></tr></thead>
+            <tbody>
+              ${d.links.map((l) => `
+                <tr>
+                  <td>${esc(l.manufacturer)} — ${esc(l.model_name)}</td>
+                  <td>${l.confidence.toFixed(2)}</td>
+                  <td><span class="status-badge ${l.review_status}">${esc(l.review_status)}</span></td>
+                  <td>
+                    ${l.review_status !== "approved" ? `<button class="ghost approve-link-btn" data-doc="${d.id}" data-machine="${l.machine_id}">Approve link</button>` : ""}
+                    ${l.review_status !== "rejected" ? `<button class="ghost reject-link-btn" data-doc="${d.id}" data-machine="${l.machine_id}">Reject link</button>` : ""}
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        ` : `<p style="color:var(--text-dim); margin-top:8px;">No machine links proposed yet.</p>`}
+      </div>
+    `).join("")}
+  `;
+}
+
+// --- Invitations ---
+
+function renderAccess() {
+  return `
+    <h1>Invitations</h1>
+    <p style="color:var(--text-dim)">Registration requires an invitation -- there is no public sign-up. Share the link with the invited technician out of band (e.g. in person, by phone, or via your own messaging tool); it is shown only once.</p>
+    <form id="invite-form" class="edit-form" style="max-width:480px;">
+      <label>Email <input name="email" type="email" required /></label>
+      <label>Role
+        <select name="role">
+          <option value="technician" selected>Technician</option>
+          <option value="administrator">Administrator</option>
+        </select>
+      </label>
+      <label>Expires in (hours) <input name="expires_in_hours" type="number" value="72" min="1" max="720" /></label>
+      <div><button type="submit" class="primary">Create invitation</button></div>
+    </form>
+    ${state.lastInvite ? `
+      <div class="card" style="margin-top:14px;">
+        <strong>Invitation created for ${esc(state.lastInvite.email)}</strong>
+        <p style="font-size:0.85rem; color:var(--text-dim);">Copy this link and send it to them directly -- it will not be shown again.</p>
+        <input readonly style="width:100%;" value="${esc(state.lastInvite.link)}" onclick="this.select()" />
+      </div>
+    ` : ""}
+    <table class="admin-table" style="margin-top:20px;">
+      <thead><tr><th>Email</th><th>Role</th><th>Created</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        ${state.invitations.map((i) => {
+          const invStatus = i.used_at ? "used" : i.revoked_at ? "revoked" : "pending";
+          return `
+          <tr>
+            <td>${esc(i.email)}</td><td>${esc(i.role)}</td><td>${esc(i.created_at)}</td><td>${esc(i.expires_at)}</td>
+            <td><span class="status-badge ${invStatus}">${invStatus}</span></td>
+            <td>${invStatus === "pending" ? `<button class="ghost revoke-invite-btn" data-id="${i.id}">Revoke</button>` : ""}</td>
+          </tr>
+        `;
+        }).join("") || `<tr><td colspan="6">No invitations yet.</td></tr>`}
+      </tbody>
+    </table>
+  `;
 }
 
 // --- Documents / metadata correction ---
@@ -94,12 +186,13 @@ function renderDocuments() {
     <h1>Manuals &amp; metadata</h1>
     <p style="color:var(--text-dim)">${state.documents.length} active document(s). Correct auto-detected metadata below — every edit is logged for audit.</p>
     <table class="admin-table">
-      <thead><tr><th>File</th><th>Status</th><th>Manufacturer</th><th>Doc type</th><th>Title</th><th>Revision</th><th>Machines</th><th></th></tr></thead>
+      <thead><tr><th>File</th><th>Status</th><th>Review</th><th>Manufacturer</th><th>Doc type</th><th>Title</th><th>Revision</th><th>Machines</th><th></th></tr></thead>
       <tbody>
         ${state.documents.map((d) => `
           <tr>
             <td>${esc(d.original_filename)}<br><span style="color:var(--text-dim);font-size:0.8rem;">${d.file_type} · ${d.page_count ?? "?"} pages${d.is_current_revision ? "" : " · SUPERSEDED"}</span></td>
             <td><span class="status-badge ${d.status}">${d.status}</span>${d.status_reason ? `<div style="font-size:0.78rem;color:var(--text-dim);max-width:220px;">${esc(d.status_reason)}</div>` : ""}</td>
+            <td><span class="status-badge ${d.review_status}">${esc(d.review_status)}</span></td>
             <td>${esc(d.manufacturer || "—")}</td>
             <td>${esc(d.doc_type || "—")}</td>
             <td>${esc(d.title || "—")}</td>
@@ -111,7 +204,7 @@ function renderDocuments() {
             </td>
           </tr>
           <tr class="edit-row" data-edit-for="${d.id}" style="display:none;">
-            <td colspan="8">
+            <td colspan="9">
               <form class="edit-form" data-id="${d.id}">
                 <label>Manufacturer <input name="manufacturer_name" value="${esc(d.manufacturer || "")}" /></label>
                 <label>Doc type
@@ -248,6 +341,68 @@ function renderFeedback() {
 // --- Event wiring ---
 
 function wireTabEvents() {
+  root.querySelectorAll(".approve-doc-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await api(`/api/admin/documents/${btn.dataset.doc}/review`, { method: "POST", body: JSON.stringify({ decision: "approved" }) });
+      state.reviewQueue = await api("/api/admin/review-queue");
+      render();
+    });
+  });
+  root.querySelectorAll(".reject-doc-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Reject this document? It will never be used to answer technician questions.")) return;
+      await api(`/api/admin/documents/${btn.dataset.doc}/review`, { method: "POST", body: JSON.stringify({ decision: "rejected" }) });
+      state.reviewQueue = await api("/api/admin/review-queue");
+      render();
+    });
+  });
+  root.querySelectorAll(".approve-link-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await api(`/api/admin/documents/${btn.dataset.doc}/machines/${btn.dataset.machine}/review`,
+        { method: "POST", body: JSON.stringify({ decision: "approved" }) });
+      state.reviewQueue = await api("/api/admin/review-queue");
+      render();
+    });
+  });
+  root.querySelectorAll(".reject-link-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await api(`/api/admin/documents/${btn.dataset.doc}/machines/${btn.dataset.machine}/review`,
+        { method: "POST", body: JSON.stringify({ decision: "rejected" }) });
+      state.reviewQueue = await api("/api/admin/review-queue");
+      render();
+    });
+  });
+
+  const inviteForm = document.getElementById("invite-form");
+  if (inviteForm) inviteForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(inviteForm);
+    try {
+      const invite = await api("/api/admin/invitations", {
+        method: "POST",
+        body: JSON.stringify({
+          email: fd.get("email"),
+          role: fd.get("role"),
+          expires_in_hours: parseInt(fd.get("expires_in_hours"), 10) || 72,
+        }),
+      });
+      const link = `${window.location.origin}/?invite=${encodeURIComponent(invite.token)}&email=${encodeURIComponent(invite.email)}`;
+      state.lastInvite = { email: invite.email, link };
+      state.invitations = await api("/api/admin/invitations");
+      render();
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+  root.querySelectorAll(".revoke-invite-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Revoke this invitation? The link will stop working.")) return;
+      await api(`/api/admin/invitations/${btn.dataset.id}/revoke`, { method: "POST" });
+      state.invitations = await api("/api/admin/invitations");
+      render();
+    });
+  });
+
   root.querySelectorAll(".edit-doc-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const row = root.querySelector(`.edit-row[data-edit-for="${btn.dataset.id}"]`);

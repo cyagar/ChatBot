@@ -36,18 +36,21 @@ def _row_to_machine(row) -> MachineOut:
 @router.get("", response_model=list[MachineOut])
 def search_machines(q: str = "", limit: int = 25, user: CurrentUser = Depends(get_current_user)):
     """Autocomplete search across model name, family, and manufacturer. Only
-    machines that actually have at least one indexed document are returned, so
-    the picker never dead-ends into a machine with no manual coverage.
+    machines that actually have at least one indexed, approved document (with
+    an approved link) are returned -- otherwise the picker would offer a
+    machine that then dead-ends into "no manuals" the moment retrieval applies
+    its own approval filter (independent follow-up review P0-6).
 
     Requires auth: the equipment catalog is proprietary to the deployment
     (concern #20 -- this endpoint leaked it to unauthenticated requests)."""
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
-               COUNT(DISTINCT dm.document_id) AS document_count
+               COUNT(DISTINCT d.id) AS document_count
         FROM machines m
         JOIN manufacturers mf ON mf.id = m.manufacturer_id
-        LEFT JOIN document_machines dm ON dm.machine_id = m.id
-        LEFT JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial') AND d.deactivated_at IS NULL
+        LEFT JOIN document_machines dm ON dm.machine_id = m.id AND dm.review_status = 'approved'
+        LEFT JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial')
+            AND d.deactivated_at IS NULL AND d.review_status = 'approved'
         WHERE (? = '' OR m.model_name LIKE ? OR m.family LIKE ? OR mf.name LIKE ?)
         GROUP BY m.id
         HAVING document_count > 0
@@ -64,12 +67,14 @@ def search_machines(q: str = "", limit: int = 25, user: CurrentUser = Depends(ge
 def recent_machines(user: CurrentUser = Depends(get_current_user), limit: int = 10):
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
-               COUNT(DISTINCT dm.document_id) AS document_count,
+               COUNT(DISTINCT d.id) AS document_count,
                r.is_favorite, r.last_used_at
         FROM recent_machines r
         JOIN machines m ON m.id = r.machine_id
         JOIN manufacturers mf ON mf.id = m.manufacturer_id
-        LEFT JOIN document_machines dm ON dm.machine_id = m.id
+        LEFT JOIN document_machines dm ON dm.machine_id = m.id AND dm.review_status = 'approved'
+        LEFT JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial')
+            AND d.deactivated_at IS NULL AND d.review_status = 'approved'
         WHERE r.user_id = ?
         GROUP BY m.id
         ORDER BY r.is_favorite DESC, r.last_used_at DESC

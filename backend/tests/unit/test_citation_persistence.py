@@ -17,6 +17,7 @@ from app.db import get_conn
 from app.main import app
 from app.providers.base import AIProvider, GeneratedAnswer, parse_and_validate
 from app.retrieval.search import RetrievedChunk
+from tests.conftest import register_test_user
 
 client = TestClient(app)
 
@@ -91,7 +92,7 @@ def test_subset_citation_persists_and_reloads_as_exactly_that_subset(monkeypatch
     monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: six_passages)
     monkeypatch.setattr(routes_chat, "get_provider", lambda: _SubsetCitingProvider())
 
-    client.post("/api/auth/register", json={"email": "citetest@example.com", "password": "password123"})
+    register_test_user(client, "citetest@example.com")
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()
 
     ask = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "How do I fix it?"})
