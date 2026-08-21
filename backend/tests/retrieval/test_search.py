@@ -198,3 +198,44 @@ def test_deactivated_document_excluded_from_retrieval(test_env):
     results = lexical_search("thermistor circuit open", machine_id=None)
     matched_ids = [cid for cid, _ in results]
     assert 1 not in matched_ids
+
+
+def test_superseded_document_is_excluded_from_retrieval_not_merely_penalized(test_env):
+    """P1-11 (independent follow-up review): is_current_revision previously
+    only applied a -0.20 rerank boost, so a withdrawn revision could still
+    surface and be cited. A superseded manual isn't a weaker answer, it's a
+    wrong one -- an obsolete torque spec or wiring diagram is exactly the harm
+    this system exists to prevent."""
+    with get_conn() as conn:
+        _seed_two_machines_with_similar_language(conn)
+        conn.execute("UPDATE documents SET is_current_revision = 0 WHERE id = 1")
+
+    from app.retrieval.search import lexical_search
+
+    results = lexical_search("thermistor circuit open", machine_id=None)
+    assert 1 not in [cid for cid, _ in results], "superseded document must not be retrievable"
+
+    # ...but the admin/audit flow can still deliberately look at it.
+    audit = lexical_search("thermistor circuit open", machine_id=None, include_superseded=True)
+    assert 1 in [cid for cid, _ in audit], "admin query tester must still be able to inspect it"
+
+
+def test_machine_picker_excludes_machines_whose_only_manual_is_superseded(test_env):
+    """The picker's eligibility rules must match retrieval's exactly (P1-6),
+    including the current-revision rule -- otherwise a technician selects a
+    machine that then dead-ends into 'no manuals'."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from tests.conftest import register_test_user
+
+    picker_client = TestClient(app)
+    with get_conn() as conn:
+        _seed_two_machines_with_similar_language(conn)
+        conn.execute("UPDATE documents SET is_current_revision = 0 WHERE id = 1")
+
+    register_test_user(picker_client, "supersededpicker@example.com")
+    listing = picker_client.get("/api/machines").json()
+    ids = [m["id"] for m in listing]
+    assert 1 not in ids, "machine whose only manual is superseded must not be offered"
+    assert 2 in ids, "the machine with a current manual must still be offered"

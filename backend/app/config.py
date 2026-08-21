@@ -72,12 +72,63 @@ class Settings(BaseSettings):
                 )
         if self.ai_provider not in {"local_extractive", "anthropic", "openai"}:
             raise RuntimeError(f"Unknown AI_PROVIDER: {self.ai_provider!r}")
+
+        # P1-2's "production can boot with the wrong source" half is already
+        # structurally impossible: there is no DOCUMENT_SOURCE setting any
+        # more, and get_document_source() (app/ingestion/sources.py) can only
+        # ever construct a GoogleDriveSource. LocalDirectorySource survives
+        # solely as test infrastructure, passed explicitly to ingest_all().
         if not self.google_drive_folder_id:
             raise RuntimeError("GOOGLE_DRIVE_FOLDER_ID is not set -- ingestion has no document source.")
-        if not self.google_service_account_json_path_resolved.exists():
+        self._validate_service_account_key()
+
+    def _validate_service_account_key(self) -> None:
+        """Validate the credential is a readable, parseable service-account key
+        file -- not merely that something exists at that path.
+
+        `.exists()` is true for a DIRECTORY, so a misconfigured secret mount
+        (a very common Docker/Kubernetes mistake: mounting a directory where a
+        file was intended) passed startup validation and only failed later at
+        the first ingestion attempt (independent follow-up review P1-2).
+
+        This is a LOCAL shape check only. It deliberately does not call Drive:
+        a bounded network readiness probe at startup would turn any Drive
+        outage into a boot failure, taking down chat/retrieval that don't need
+        Drive at all. Live reachability is therefore NOT verified here.
+        Error messages never echo the key's contents, client_email, or
+        project id -- only the path and the structural problem."""
+        import json
+
+        path = self.google_service_account_json_path_resolved
+        if not path.is_file():
             raise RuntimeError(
-                "Google service-account key file was not found at "
-                f"{self.google_service_account_json_path_resolved}."
+                f"Google service-account key at {path} is not a readable file "
+                "(missing, or a directory -- check the secret mount)."
+            )
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as e:
+            raise RuntimeError(
+                f"Google service-account key at {path} could not be read: {e.strerror}."
+            ) from e
+        try:
+            data = json.loads(raw)
+        except ValueError as e:
+            raise RuntimeError(
+                f"Google service-account key at {path} is not valid JSON."
+            ) from e
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Google service-account key at {path} is not a JSON object.")
+        missing = [k for k in ("type", "project_id", "private_key", "client_email") if not data.get(k)]
+        if missing:
+            raise RuntimeError(
+                f"Google service-account key at {path} is missing required field(s): "
+                f"{', '.join(missing)}. This does not look like a service-account key file."
+            )
+        if data.get("type") != "service_account":
+            raise RuntimeError(
+                f"Google credential at {path} has type={data.get('type')!r}, expected "
+                "'service_account' (an OAuth client-secret file will not work here)."
             )
 
     @property

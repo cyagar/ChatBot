@@ -534,11 +534,17 @@ class QueryTestRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     machine_id: int | None = None
     top_k: int = Field(default=6, ge=1, le=20)
+    # Superseded revisions are excluded from technician retrieval entirely
+    # (P1-11). This is the "explicit admin/audit flow" that can still see
+    # them -- off by default so the tester shows what a technician would
+    # actually get unless an admin deliberately asks to look wider.
+    include_superseded: bool = False
 
 
 @router.post("/query-test")
 def query_test(payload: QueryTestRequest, admin: CurrentUser = Depends(require_admin)):
-    passages = hybrid_search(payload.question, machine_id=payload.machine_id, top_k=payload.top_k)
+    passages = hybrid_search(payload.question, machine_id=payload.machine_id, top_k=payload.top_k,
+                              include_superseded=payload.include_superseded)
     return {
         "passages": [
             {

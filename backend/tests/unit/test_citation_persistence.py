@@ -110,3 +110,86 @@ def test_subset_citation_persists_and_reloads_as_exactly_that_subset(monkeypatch
     reloaded = client.get(f"/api/conversations/{conv['id']}/messages").json()
     assistant_msg = [m for m in reloaded if m["role"] == "assistant"][-1]
     assert sorted(c["chunk_id"] for c in assistant_msg["citations"]) == [2, 5]
+
+
+class _ReverseOrderCitingProvider(AIProvider):
+    """Cites excerpts in an order that deliberately disagrees with retrieval
+    order (5 before 2), so a reload that sorts by retrieval rank produces a
+    different order than the live response."""
+
+    name = "test_reverse"
+
+    def generate(self, question, machine_label, passages, history=None):
+        raw = json.dumps({
+            "is_no_answer": False,
+            "claims": [
+                {"text": "The later excerpt states the primary fact.", "cited_excerpt_numbers": [5]},
+                {"text": "The earlier excerpt adds a supporting detail.", "cited_excerpt_numbers": [2]},
+            ],
+            "steps": [], "warnings": [],
+        })
+        result = parse_and_validate(raw, passages, self.name)
+        assert result is not None
+        return result
+
+
+def test_citation_order_is_identical_live_and_after_reload(monkeypatch, six_passages):
+    """P1-7: message_sources.rank is RETRIEVAL order, but the live response
+    returns citations in PROVIDER order. Reload previously ordered by rank, so
+    a reloaded conversation could show citations in a different order than the
+    technician originally saw -- the numbering under an answer would stop
+    matching the answer's own claims. Strict list equality, not sorted()."""
+    import app.api.routes_chat as routes_chat
+
+    monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: six_passages)
+    monkeypatch.setattr(routes_chat, "get_provider", lambda: _ReverseOrderCitingProvider())
+
+    register_test_user(client, "ordertest@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+
+    ask = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "How do I fix it?"})
+    assert ask.status_code == 200
+    live_order = [c["chunk_id"] for c in ask.json()["citations"]]
+    assert live_order == [5, 2], "provider order should be preserved in the live response"
+
+    reloaded = client.get(f"/api/conversations/{conv['id']}/messages").json()
+    assistant_msg = [m for m in reloaded if m["role"] == "assistant"][-1]
+    reload_order = [c["chunk_id"] for c in assistant_msg["citations"]]
+    assert reload_order == live_order, "reload must reproduce the live citation order exactly"
+
+
+class _DuplicateCitingProvider(AIProvider):
+    """Returns the same chunk twice. Persistence keys by chunk_id, so without
+    an explicit order-preserving dedupe the duplicate would collapse on
+    reload while still appearing twice live (P1-7)."""
+
+    name = "test_duplicate"
+
+    def generate(self, question, machine_label, passages, history=None):
+        from app.providers.base import Citation
+
+        p = passages[1]
+        c = Citation(
+            chunk_id=p.chunk_id, document_id=p.document_id, filename=p.original_filename,
+            title=p.title, page_number=p.page_number, section_heading=p.section_heading,
+            revision=p.revision, excerpt=p.content[:500],
+        )
+        return GeneratedAnswer(answer="Duplicated citation answer.", citations=[c, c], provider=self.name)
+
+
+def test_duplicate_citations_are_deduplicated_consistently_live_and_on_reload(monkeypatch, six_passages):
+    import app.api.routes_chat as routes_chat
+
+    monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: six_passages)
+    monkeypatch.setattr(routes_chat, "get_provider", lambda: _DuplicateCitingProvider())
+
+    register_test_user(client, "duptest@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+
+    ask = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "How do I fix it?"})
+    live_order = [c["chunk_id"] for c in ask.json()["citations"]]
+    assert live_order == [2], "duplicate citations must collapse in the live response too"
+
+    reloaded = client.get(f"/api/conversations/{conv['id']}/messages").json()
+    assistant_msg = [m for m in reloaded if m["role"] == "assistant"][-1]
+    assert [c["chunk_id"] for c in assistant_msg["citations"]] == live_order

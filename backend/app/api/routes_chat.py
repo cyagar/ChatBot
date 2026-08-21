@@ -228,7 +228,13 @@ def _hydrate_message(conn, row) -> MessageOut:
         "FROM message_sources ms "
         "JOIN chunks c ON c.id = ms.chunk_id "
         "JOIN documents d ON d.id = c.document_id "
-        "WHERE ms.message_id = ? AND ms.is_citation = 1 ORDER BY ms.rank",
+        # Provider citation order (P1-7), NOT retrieval rank -- reload must
+        # reproduce exactly the order the technician originally saw, so the
+        # citation numbering still lines up with the answer's own claims.
+        # COALESCE keeps pre-0004 rows (citation_ordinal NULL) ordering by
+        # rank, their historical behavior, rather than arbitrarily.
+        "WHERE ms.message_id = ? AND ms.is_citation = 1 "
+        "ORDER BY COALESCE(ms.citation_ordinal, ms.rank), ms.rank",
         (row["id"],),
     ).fetchall()
     for s in src_rows:
@@ -357,6 +363,20 @@ def ask_question(
             is_no_answer=True, provider=getattr(provider, "name", "unknown"),
         )
 
+    # Order-preservingly deduplicate citations before BOTH the response and
+    # persistence (P1-7). The built-in providers already dedupe, but a
+    # duplicate chunk_id from any provider would otherwise collapse silently
+    # on the persistence side (dict keyed by chunk_id) while still appearing
+    # twice in the live response -- i.e. live and reload would disagree.
+    _seen_citation_chunks: set[int] = set()
+    _deduped_citations = []
+    for _c in result.citations:
+        if _c.chunk_id in _seen_citation_chunks:
+            continue
+        _seen_citation_chunks.add(_c.chunk_id)
+        _deduped_citations.append(_c)
+    result.citations = _deduped_citations
+
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO messages (conversation_id, role, content, is_no_answer, machine_id, "
@@ -370,14 +390,21 @@ def ask_question(
         )
         msg_id = cur.lastrowid
         citation_excerpt_by_chunk = {c.chunk_id: c.excerpt for c in result.citations}
+        # Provider citation order, not retrieval order. `rank` keeps meaning
+        # retrieval rank (for retrieval-quality auditing); citation_ordinal
+        # records the order the provider actually cited them so a reloaded
+        # conversation reproduces exactly what was displayed live -- these two
+        # orders differ, which is what P1-7 flagged.
+        citation_ordinal_by_chunk = {c.chunk_id: i for i, c in enumerate(result.citations)}
         for rank, p in enumerate(passages):
             is_citation = p.chunk_id in citation_excerpt_by_chunk
             conn.execute(
                 "INSERT INTO message_sources (message_id, chunk_id, rank, lexical_score, vector_score, "
-                "combined_score, is_citation, excerpt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "combined_score, is_citation, excerpt, citation_ordinal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     msg_id, p.chunk_id, rank, p.lexical_score, p.vector_score, p.combined_score,
                     int(is_citation), citation_excerpt_by_chunk.get(p.chunk_id),
+                    citation_ordinal_by_chunk.get(p.chunk_id),
                 ),
             )
         conn.execute("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?", (conversation_id,))

@@ -36,10 +36,14 @@ def _row_to_machine(row) -> MachineOut:
 @router.get("", response_model=list[MachineOut])
 def search_machines(q: str = "", limit: int = 25, user: CurrentUser = Depends(get_current_user)):
     """Autocomplete search across model name, family, and manufacturer. Only
-    machines that actually have at least one indexed, approved document (with
-    an approved link) are returned -- otherwise the picker would offer a
-    machine that then dead-ends into "no manuals" the moment retrieval applies
-    its own approval filter (independent follow-up review P0-6).
+    machines that actually have at least one indexed, approved, current
+    document (with an approved link) are returned -- otherwise the picker
+    would offer a machine that then dead-ends into "no manuals" the moment
+    retrieval applies its own approval/revision filters (independent
+    follow-up review P0-6, P1-6). The eligibility rules here are deliberately
+    the same set retrieval enforces, including the current-revision rule
+    (P1-11): a machine whose only manual is superseded has nothing
+    retrievable and must not appear.
 
     Requires auth: the equipment catalog is proprietary to the deployment
     (concern #20 -- this endpoint leaked it to unauthenticated requests)."""
@@ -51,6 +55,7 @@ def search_machines(q: str = "", limit: int = 25, user: CurrentUser = Depends(ge
         LEFT JOIN document_machines dm ON dm.machine_id = m.id AND dm.review_status = 'approved'
         LEFT JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial')
             AND d.deactivated_at IS NULL AND d.review_status = 'approved'
+            AND d.is_current_revision = 1
         WHERE (? = '' OR m.model_name LIKE ? OR m.family LIKE ? OR mf.name LIKE ?)
         GROUP BY m.id
         HAVING document_count > 0
@@ -75,6 +80,7 @@ def recent_machines(user: CurrentUser = Depends(get_current_user), limit: int = 
         LEFT JOIN document_machines dm ON dm.machine_id = m.id AND dm.review_status = 'approved'
         LEFT JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial')
             AND d.deactivated_at IS NULL AND d.review_status = 'approved'
+            AND d.is_current_revision = 1
         WHERE r.user_id = ?
         GROUP BY m.id
         ORDER BY r.is_favorite DESC, r.last_used_at DESC

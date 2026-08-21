@@ -232,6 +232,110 @@ done than it is.
       has the data for it (each `Citation` still corresponds to a specific
       claim/step/warning internally) but the frontend renders the same flat
       citation list as before.
+- [x] **Migrations are atomic and restart-safe** (independent follow-up
+      review P1-9). `run_migrations()` used `conn.executescript()`, which
+      issues an implicit COMMIT before running -- a migration failing
+      part-way left its earlier statements permanently applied with no
+      `schema_migrations` row to explain them, and the next start retried
+      from a schema that no longer matched what the migration expected. Each
+      migration now runs inside one explicit transaction together with its
+      own `schema_migrations` INSERT, so failure rolls the whole thing back
+      and the retry starts clean (SQLite DDL is transactional, which is what
+      makes this work). Statement splitting uses
+      `sqlite3.complete_statement` rather than splitting on `;` -- migration
+      0003's grandfathering note contains a semicolon inside a string
+      literal that a naive split would tear in half. Tests inject a
+      deliberately-failing migration and assert no partial schema and no
+      migration record survive, then that the corrected migration applies
+      cleanly on retry. The old behavior was confirmed first (an
+      `executescript` probe left the partial table behind), so the test
+      genuinely discriminates rather than passing vacuously.
+- [x] **A single oversized table row no longer bypasses the chunk limit**
+      (P1-13). The row-window arithmetic used `max(1, ...)`, guaranteeing at
+      least one row per window -- so a row larger than the whole budget still
+      produced one over-limit chunk whose tail the embedding model would
+      truncate away, making those values invisible to semantic search despite
+      being "indexed". Oversized rows are now split across cells with the
+      header repeated on each piece. Cells are never truncated: a single cell
+      that alone exceeds the budget is emitted whole on its own, because
+      silently corrupting an exact part number or measured value is worse
+      than one over-budget chunk.
+- [x] **Citation order is now identical live and after reload** (P1-7).
+      `message_sources.rank` is *retrieval* order, but the live response
+      returns citations in *provider* order (for the claims contract, the
+      order the claims appear in the answer). Reload ordered by rank, so a
+      reloaded conversation could show the same citations in a different
+      order than the technician originally saw -- the numbering under an
+      answer would stop lining up with the answer's own claims. Migration
+      0004 adds `message_sources.citation_ordinal` recording provider order
+      explicitly (`rank` keeps meaning retrieval order for retrieval-quality
+      auditing); reload orders by it, with `COALESCE(citation_ordinal, rank)`
+      so pre-0004 rows keep their historical order. Citations are also
+      order-preservingly deduplicated before *both* the response and
+      persistence -- the built-in providers already dedupe, but a duplicate
+      from any provider would otherwise collapse on the persistence side
+      (dict keyed by chunk_id) while still appearing twice live. Tests assert
+      strict list equality (`==`, not `sorted()`) between the POST response
+      and the subsequent GET; the previous test used `sorted()`, which is
+      exactly why this went unnoticed. Verified live: all 12 existing
+      citation rows in the pilot DB backfilled, none left NULL.
+- [x] **Superseded revisions are excluded from retrieval, not merely
+      rank-penalized** (P1-11). `is_current_revision` previously only applied
+      a -0.20 rerank boost, so a withdrawn revision could still surface and
+      be cited. A superseded manual isn't a weaker answer, it's a wrong one.
+      `hybrid_search`/`lexical_search`/`vector_search` now exclude
+      non-current documents by default, and the machine picker applies the
+      same rule so its counts match what retrieval will actually return. The
+      admin query tester can opt back in (`include_superseded: true`) as the
+      explicit audit flow. Verified against the live pilot DB *before*
+      changing anything: all 64 approved indexed documents are
+      `is_current_revision = 1`, so this exclusion removes nothing today and
+      acts as a forward guard -- it is not a silent corpus reduction.
+      **Not done:** the `supersedes`/`superseded_by` relationships the same
+      review item asks for are not modeled, so "which document replaced this
+      one" still can't be answered. Note the interaction: with superseded
+      documents excluded from retrieval, the revision-conflict note
+      (`detect_conflict`) can no longer fire on the technician-facing path,
+      since conflicting revisions can't co-occur in one result set any more.
+      It still applies in the admin query tester and remains in place for
+      when the relationship model lands.
+- [x] **The service-account credential is validated as a real key file, not
+      just "something exists there"** (P1-2). `validate_for_startup()` used
+      `.exists()`, which is true for a *directory* -- so the single most
+      common secret-mount misconfiguration passed startup validation and only
+      surfaced later as an ingestion failure. Startup now requires a readable
+      file that parses as JSON, is a JSON object, carries
+      `type`/`project_id`/`private_key`/`client_email`, and has
+      `type == "service_account"` (an OAuth client-secret file is rejected
+      explicitly). Error messages name only the path and the structural
+      problem -- a test asserts they never echo key material, `client_email`,
+      or `project_id`, since these surface in container logs.
+      **Deliberately not done:** no bounded live Drive connectivity/readiness
+      probe at startup. That would turn any Drive outage into a boot failure
+      and take down chat/retrieval, which don't depend on Drive at all. Live
+      reachability is therefore *not* verified at boot. The other half of
+      P1-2 ("production can boot with the wrong source") is already
+      structurally impossible: there is no `DOCUMENT_SOURCE` setting any
+      more, and `get_document_source()` can only construct a
+      `GoogleDriveSource`.
+- [ ] **Shared-tablet manual caching is implemented but not browser-tested
+      across authorization transitions** (P1-12). The service worker
+      namespaces the manual cache per user id
+      (`tma-manuals-<user_id>`), serves manual assets network-only when no
+      user is known rather than risking an unscoped cache, and purges every
+      manual cache on logout. That is a real design, not an omission -- but
+      the review's actual ask is real-browser verification of every
+      authorization transition, which was not possible in this environment.
+      **Specifically untested in a real browser:** session expiry while a
+      technician is mid-use with manuals already cached; an administrator
+      disabling the account (P0-5 `token_version` revocation) while cached
+      manuals sit on the device; switching accounts on a shared tablet; and
+      browser restart with a cache already populated. Deliberately *not*
+      disabled: offline access to previously opened manuals is a stated plan
+      requirement for technicians working in equipment rooms with poor
+      signal, and removing a working feature to satisfy a checkbox would be
+      a worse trade than documenting the gap. This needs the browser test
+      matrix before a real pilot on shared devices.
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
 

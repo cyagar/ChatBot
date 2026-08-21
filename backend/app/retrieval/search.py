@@ -67,11 +67,27 @@ def _machine_filter_sql(machine_id: int | None) -> tuple[str, list]:
     )
 
 
-def lexical_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POOL) -> list[tuple[int, float]]:
+def _revision_filter_sql(include_superseded: bool) -> str:
+    """Superseded revisions are EXCLUDED from retrieval by default, not merely
+    rank-penalized (independent follow-up review P1-11: "is_current_revision
+    receives only a ranking penalty").
+
+    A superseded manual is not a weaker answer, it's a wrong one -- a
+    technician acting on a withdrawn torque spec or an obsolete wiring
+    diagram is the exact harm this system exists to prevent, and a -0.20
+    rerank boost only makes that outcome less likely, not impossible.
+    `include_superseded=True` exists for the admin query tester, where seeing
+    what WOULD have matched is the point."""
+    return "" if include_superseded else " AND d.is_current_revision = 1 "
+
+
+def lexical_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POOL,
+                    include_superseded: bool = False) -> list[tuple[int, float]]:
     fts_query = _sanitize_fts_query(query)
     if not fts_query:
         return []
     filter_sql, filter_params = _machine_filter_sql(machine_id)
+    revision_sql = _revision_filter_sql(include_superseded)
     sql = f"""
         SELECT c.id AS chunk_id, bm25(chunks_fts) AS score
         FROM chunks_fts
@@ -81,6 +97,7 @@ def lexical_search(query: str, machine_id: int | None, limit: int = CANDIDATE_PO
           AND d.status IN ('indexed','partial')
           AND d.deactivated_at IS NULL
           AND d.review_status = 'approved'
+          {revision_sql}
           {filter_sql}
         ORDER BY score
         LIMIT ?
@@ -91,8 +108,10 @@ def lexical_search(query: str, machine_id: int | None, limit: int = CANDIDATE_PO
     return [(r["chunk_id"], -r["score"]) for r in rows]
 
 
-def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POOL) -> list[tuple[int, float]]:
+def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POOL,
+                   include_superseded: bool = False) -> list[tuple[int, float]]:
     filter_sql, filter_params = _machine_filter_sql(machine_id)
+    revision_sql = _revision_filter_sql(include_superseded)
     sql = f"""
         SELECT e.chunk_id, e.dim, e.vector
         FROM embeddings e
@@ -101,6 +120,7 @@ def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POO
         WHERE d.status IN ('indexed','partial')
           AND d.deactivated_at IS NULL
           AND d.review_status = 'approved'
+          {revision_sql}
           {filter_sql}
     """
     with get_conn() as conn:
@@ -208,9 +228,14 @@ def hybrid_search(
     query: str,
     machine_id: int | None = None,
     top_k: int = 6,
+    include_superseded: bool = False,
 ) -> list[RetrievedChunk]:
-    lexical = lexical_search(query, machine_id)
-    vector = vector_search(query, machine_id)
+    """`include_superseded` defaults to False: superseded revisions are
+    excluded from technician-facing retrieval outright (P1-11), not just
+    rank-penalized. Only the admin query tester passes True, where the point
+    is to inspect what would otherwise have matched."""
+    lexical = lexical_search(query, machine_id, include_superseded=include_superseded)
+    vector = vector_search(query, machine_id, include_superseded=include_superseded)
 
     fused = reciprocal_rank_fusion(lexical, vector)
     if not fused:

@@ -141,12 +141,52 @@ def _render_table_window(header: list[str], rows: list[list[str]], label: str | 
     return "\n".join(lines)
 
 
+def _split_oversized_row(header: list[str], row: list[str]) -> list[list[str]]:
+    """Split ONE row that is itself larger than the chunk budget into several
+    narrower rows, each carrying the same header.
+
+    Cells are kept whole and their text is never truncated -- an exact part
+    number or measured value must survive verbatim or the chunk is worse than
+    useless (independent follow-up review P1-13: "preserving headers, page,
+    row identity, and exact values"). A single cell that alone exceeds the
+    budget is still emitted whole, on its own: truncating it would silently
+    corrupt the value, and an over-budget chunk merely risks embedding
+    truncation for that one cell rather than losing data outright."""
+    groups: list[list[str]] = []
+    current = [""] * len(row)
+    current_len = 0
+    used = False
+    header_overhead = len(" | ".join(c or "" for c in header)) + 10
+
+    for i, cell in enumerate(row):
+        cell_text = cell or ""
+        cell_len = len(cell_text) + 3
+        if used and header_overhead + current_len + cell_len > MAX_TABLE_CHUNK_CHARS:
+            groups.append(current)
+            current = [""] * len(row)
+            current_len = 0
+            used = False
+        current[i] = cell_text
+        current_len += cell_len
+        used = True
+
+    if used:
+        groups.append(current)
+    return groups or [row]
+
+
 def _split_table_rows(table: ExtractedTable) -> list[str]:
     """Bound each table chunk by row windows, not raw character count alone --
     a split must never land mid-row. The header row is repeated in every
     window (independent review: 'repeat the table title and column headers')
     so each chunk is independently understandable by retrieval and by a
-    reader, instead of relying on an earlier chunk's now-truncated header."""
+    reader, instead of relying on an earlier chunk's now-truncated header.
+
+    A row that is itself over the budget is split across cells rather than
+    emitted whole: the previous `max(1, ...)` row-window floor guaranteed at
+    least one row per window, so a single huge row silently produced an
+    over-limit chunk whose tail the embedding model would truncate away
+    (independent follow-up review P1-13)."""
     if not table.rows:
         return []
     header = table.rows[0]
@@ -159,10 +199,32 @@ def _split_table_rows(table: ExtractedTable) -> list[str]:
         return [full]
 
     header_overhead = len(" | ".join(c or "" for c in header)) + 10
-    avg_row_len = max(1, (len(full) - header_overhead) // max(1, len(body)))
-    rows_per_window = max(1, MAX_TABLE_CHUNK_CHARS // avg_row_len)
+    budget = max(1, MAX_TABLE_CHUNK_CHARS - header_overhead)
 
-    windows = [body[i : i + rows_per_window] for i in range(0, len(body), rows_per_window)]
+    # Pack whole rows greedily up to the budget, splitting any row that can
+    # never fit on its own.
+    windows: list[list[list[str]]] = []
+    current: list[list[str]] = []
+    current_len = 0
+    for row in body:
+        row_len = len(" | ".join(c or "" for c in row)) + 4
+        if row_len > budget:
+            if current:
+                windows.append(current)
+                current = []
+                current_len = 0
+            for piece in _split_oversized_row(header, row):
+                windows.append([piece])
+            continue
+        if current and current_len + row_len > budget:
+            windows.append(current)
+            current = []
+            current_len = 0
+        current.append(row)
+        current_len += row_len
+    if current:
+        windows.append(current)
+
     total = len(windows)
     return [
         _render_table_window(header, window, f"(table, part {idx + 1} of {total})")

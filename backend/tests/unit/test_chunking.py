@@ -92,6 +92,46 @@ def test_large_table_is_split_into_bounded_windows_with_header_repeated():
         assert f"E{i}" in combined
 
 
+def test_single_oversized_row_is_split_across_cells_without_losing_values():
+    """P1-13 (independent follow-up review): the old row-window arithmetic used
+    `max(1, ...)`, guaranteeing at least one row per window -- so a single row
+    bigger than the whole budget still produced one over-limit chunk whose tail
+    the embedding model would truncate away. The row must now be split across
+    cells, with exact values preserved (never truncated)."""
+    header = ["Code", "Meaning", "Corrective Action"]
+    huge_cell_a = "A" * 1500 + " PARTNUM-11111"
+    huge_cell_b = "B" * 1500 + " PARTNUM-22222"
+    rows = [header, ["E99", huge_cell_a, huge_cell_b]]
+    table = ExtractedTable(page_number=1, rows=rows)
+    doc = _doc("Error Codes\nSee table below.", headings=[("Error Codes", 0)], tables=[table])
+    records = chunk_document(doc)
+    table_records = [r for r in records if "PARTNUM-" in r.content or "E99" in r.content]
+
+    assert len(table_records) > 1, "an oversized single row must be split, not emitted whole"
+    for rec in table_records:
+        assert len(rec.content) <= 1800 + 200, f"chunk still over the limit: {len(rec.content)}"
+        assert "| Code | Meaning | Corrective Action |" in rec.content, "header must repeat in every piece"
+
+    # Exact values survive verbatim -- nothing truncated mid-cell.
+    combined = "\n".join(r.content for r in table_records)
+    assert "PARTNUM-11111" in combined
+    assert "PARTNUM-22222" in combined
+    assert "E99" in combined
+
+
+def test_single_cell_larger_than_the_budget_is_kept_whole_not_truncated():
+    """A cell that alone exceeds the budget is emitted whole on its own: an
+    exact part number or measured value must never be silently corrupted by a
+    mid-cell cut, even at the cost of one over-budget chunk."""
+    header = ["Code", "Detail"]
+    monster = "X" * 4000 + " CRITICAL-VALUE-42"
+    table = ExtractedTable(page_number=1, rows=[header, ["E1", monster]])
+    doc = _doc("Error Codes\nSee table below.", headings=[("Error Codes", 0)], tables=[table])
+    records = chunk_document(doc)
+    combined = "\n".join(r.content for r in records)
+    assert "CRITICAL-VALUE-42" in combined, "an oversized cell must not be truncated"
+
+
 def test_small_table_is_not_split():
     table = ExtractedTable(page_number=1, rows=[["Part", "Qty"], ["Gasket", "1"], ["Screw", "4"]])
     doc = _doc("Parts List\nSee table below.", headings=[("Parts List", 0)], tables=[table])
