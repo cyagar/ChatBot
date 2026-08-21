@@ -1,0 +1,30 @@
+# Secrets — never bake these into an image layer.
+.env
+.env.*
+!.env.example
+
+# Runtime data — the image ships empty; real data lives in the mounted volume.
+# (The actual data/ tree lives at the repo root, outside this build context —
+# docker-compose.yml's `context: ./backend` — so it can never be COPY'd in.
+# These guard against a data/ dir appearing inside backend/ in the future.)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Local dev/test artifacts.
+tests/
+.pytest_cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Model/tooling caches that shouldn't be baked in via a stale local download.
+.cache/
+*.egg-info/
+
+# VCS/editor cruft.
+.git/
+.gitignore

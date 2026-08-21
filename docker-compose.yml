@@ -26,6 +26,11 @@ services:
       - LOCAL_STORAGE_DIR=/data/object_storage
       - LOCAL_MANUALS_DIR=/data/manuals_incoming
     restart: unless-stopped
+    # Bounds a single-instance pilot deployment; raise if ingestion/embedding
+    # gets OOM-killed under a larger corpus.
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 512
 
   # db:
   #   image: pgvector/pgvector:pg16

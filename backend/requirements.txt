@@ -37,6 +37,6 @@ httpx==0.28.1
 
 # --- Optional: enabled once a provider API key is supplied via .env ---
 anthropic==0.125.0
-# openai
+openai==2.7.1
 
 pytesseract==0.3.13
