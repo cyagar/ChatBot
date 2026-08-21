@@ -6,13 +6,28 @@ AI_PROVIDER is a one-line .env change, never a code change.
 
 from __future__ import annotations
 
-import json
-import re
-
 from app.config import get_settings
-from app.providers.base import AIProvider, Citation, GeneratedAnswer, SYSTEM_PROMPT, build_context_block
+from app.providers.base import (
+    AIProvider,
+    GeneratedAnswer,
+    ProviderError,
+    SYSTEM_PROMPT,
+    UNVERIFIED_ANSWER,
+    build_context_block,
+    build_history_messages,
+    parse_and_validate,
+)
 
 MODEL = "claude-sonnet-5"
+REQUEST_TIMEOUT_SECONDS = 30
+
+_JSON_SHAPE_INSTRUCTION = (
+    "Respond in this exact JSON shape (no markdown fence): "
+    '{"answer": "...", "is_no_answer": false, "conflict_note": null, '
+    '"safety_warnings": ["..."], "cited_excerpt_numbers": [1,2]}. '
+    'cited_excerpt_numbers must reference only the excerpt numbers shown above, '
+    "and must be non-empty unless is_no_answer is true."
+)
 
 
 class AnthropicProvider(AIProvider):
@@ -32,9 +47,9 @@ class AnthropicProvider(AIProvider):
                 "AI_PROVIDER=anthropic but the 'anthropic' package is not installed. "
                 "Uncomment it in requirements.txt and reinstall."
             ) from e
-        self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=REQUEST_TIMEOUT_SECONDS)
 
-    def generate(self, question, machine_label, passages) -> GeneratedAnswer:
+    def generate(self, question, machine_label, passages, history=None) -> GeneratedAnswer:
         if not passages:
             return GeneratedAnswer(
                 answer="No relevant manual passages were found for this question.",
@@ -46,48 +61,55 @@ class AnthropicProvider(AIProvider):
         machine_line = f"Selected machine: {machine_label}\n" if machine_label else ""
         user_message = (
             f"{machine_line}Technician question: {question}\n\n"
-            f"Manual excerpts:\n\n{context}\n\n"
-            "Respond in this exact JSON shape (no markdown fence):\n"
-            '{"answer": "...", "is_no_answer": false, "conflict_note": null, '
-            '"safety_warnings": ["..."], "cited_excerpt_numbers": [1,2]}'
+            f"Manual excerpts:\n\n{context}\n\n{_JSON_SHAPE_INSTRUCTION}"
         )
+        messages = build_history_messages(history) + [{"role": "user", "content": user_message}]
 
-        response = self._client.messages.create(
-            model=MODEL,
-            max_tokens=1200,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        raw_text = "".join(
-            block.text for block in response.content if getattr(block, "type", None) == "text"
-        )
-        return self._parse(raw_text, passages)
+        raw_text = self._call(messages)
+        result = parse_and_validate(raw_text, passages, self.name)
+        if result is not None:
+            return result
 
-    def _parse(self, raw_text: str, passages) -> GeneratedAnswer:
+        # One repair attempt: tell the model exactly what was wrong with its own
+        # output instead of silently trusting a malformed/unsupported response
+        # (concern #8 -- never widen citations on a parse failure).
+        repair_messages = messages + [
+            {"role": "assistant", "content": raw_text},
+            {
+                "role": "user",
+                "content": (
+                    "That response did not match the required JSON shape, or claimed an "
+                    "answer without citing any of the numbered excerpts. Reply again with "
+                    "ONLY valid JSON in the exact shape requested, citing real excerpt "
+                    "numbers, or set is_no_answer to true if the excerpts don't support an answer."
+                ),
+            },
+        ]
+        raw_text_2 = self._call(repair_messages)
+        result = parse_and_validate(raw_text_2, passages, self.name)
+        if result is not None:
+            return result
+
+        return GeneratedAnswer(answer=UNVERIFIED_ANSWER, is_no_answer=True, provider=self.name)
+
+    def _call(self, messages: list[dict]) -> str:
         try:
-            match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-            data = json.loads(match.group(0)) if match else {}
-        except Exception:
-            data = {}
+            import anthropic
 
-        cited_numbers = data.get("cited_excerpt_numbers") or list(range(1, len(passages) + 1))
-        citations = []
-        for n in cited_numbers:
-            if 1 <= n <= len(passages):
-                p = passages[n - 1]
-                citations.append(
-                    Citation(
-                        chunk_id=p.chunk_id, document_id=p.document_id, filename=p.original_filename,
-                        title=p.title, page_number=p.page_number, section_heading=p.section_heading,
-                        revision=p.revision, excerpt=p.content[:500],
-                    )
-                )
-
-        return GeneratedAnswer(
-            answer=data.get("answer") or raw_text or "The model returned an unparseable response.",
-            citations=citations,
-            is_no_answer=bool(data.get("is_no_answer", False)),
-            conflict_note=data.get("conflict_note"),
-            safety_warnings=data.get("safety_warnings") or [],
-            provider=self.name,
+            response = self._client.messages.create(
+                model=MODEL,
+                max_tokens=1200,
+                system=SYSTEM_PROMPT,
+                messages=messages,
+            )
+        except anthropic.APITimeoutError as e:
+            raise ProviderError("The AI provider timed out.") from e
+        except anthropic.RateLimitError as e:
+            raise ProviderError("The AI provider is rate-limited; try again shortly.") from e
+        except anthropic.APIStatusError as e:
+            raise ProviderError(f"The AI provider returned an error (status {e.status_code}).") from e
+        except anthropic.APIError as e:
+            raise ProviderError("The AI provider request failed.") from e
+        return "".join(
+            block.text for block in response.content if getattr(block, "type", None) == "text"
         )

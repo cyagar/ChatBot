@@ -95,7 +95,10 @@ def _excerpt(content: str, limit: int = 700) -> str:
 class ExtractiveProvider(AIProvider):
     name = "local_extractive"
 
-    def generate(self, question, machine_label, passages) -> GeneratedAnswer:
+    def generate(self, question, machine_label, passages, history=None) -> GeneratedAnswer:
+        # `history` is unused: this provider only ever quotes the current
+        # question's retrieved passages verbatim, so there is no synthesis step
+        # that could use prior turns even if they were provided.
         if not passages:
             return GeneratedAnswer(
                 answer=(

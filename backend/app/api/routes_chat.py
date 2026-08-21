@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+import json
+import logging
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from rapidfuzz import fuzz
 
 from app.auth.deps import CurrentUser, get_current_user
 from app.db import get_conn
+from app.providers.base import GeneratedAnswer, HistoryTurn, ProviderError
 from app.providers.factory import get_provider
 from app.rate_limit import default_limit_string, limiter
 from app.retrieval.search import hybrid_search
 
 router = APIRouter(prefix="/api", tags=["chat"])
+logger = logging.getLogger(__name__)
 
 MAX_QUESTION_LEN = 2000
+FUZZY_MACHINE_MATCH_THRESHOLD = 85
+MAX_HISTORY_TURNS = 8          # prior messages (user+assistant) sent as context
+MAX_HISTORY_TURN_CHARS = 800   # bound per-turn size so history can't dominate the prompt
 
 
 class ConversationOut(BaseModel):
@@ -48,6 +58,7 @@ class MessageOut(BaseModel):
     content: str
     is_clarifying_question: bool
     is_no_answer: bool
+    answer_status: str = "completed"  # pending | completed | failed
     citations: list[CitationOut] = []
     safety_warnings: list[str] = []
     conflict_note: str | None = None
@@ -66,18 +77,53 @@ def _machine_label(conn, machine_id: int | None) -> str | None:
     return f"{row['manufacturer']} {row['model_name']}" if row else None
 
 
+def _machine_name_variants(model_name: str) -> list[str]:
+    """'AJ/AJX Series' -> ['AJ/AJX Series', 'AJ', 'AJX Series'] so a mention of
+    just 'AJ' (a real model designator, not a random substring) still resolves
+    unambiguously -- the exact-substring-only match this replaced couldn't
+    handle a phrase like 'the AJ machine' (independent review concern #6)."""
+    parts = re.split(r"[/,]", model_name)
+    variants = [model_name] + [p.strip() for p in parts]
+    return [v for v in variants if len(v) >= 2]
+
+
 def _resolve_machine_mention(question: str) -> tuple[int | None, list[dict]]:
-    """Used only when a conversation has no machine selected yet. Looks for an
-    unambiguous model-name mention in the question; if multiple machines match,
-    returns candidates so the caller can ask a clarifying question instead of
-    guessing (plan requirement)."""
+    """Used only when a conversation has no machine selected yet. Never called
+    again once a machine is set for a conversation -- a machine change must go
+    through the explicit /machine endpoint below, never be inferred from a
+    later message (independent review concern #5/#6: no silent machine switch).
+
+    Tries an exact, word-bounded match first (on the full model name or any
+    '/'-separated component, plus any curated alias); falls back to
+    deterministic fuzzy matching only if nothing matched exactly, so a typo or
+    slightly different phrasing ('TF-DBC' vs 'TF DBC') still resolves without
+    making bare-substring matching (e.g. a 2-letter code) looser than it
+    already is."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT m.id, m.model_name, mf.name AS manufacturer FROM machines m "
+            "SELECT m.id, m.model_name, m.aliases, mf.name AS manufacturer FROM machines m "
             "JOIN manufacturers mf ON mf.id = m.manufacturer_id"
         ).fetchall()
     q_lower = question.lower()
-    matches = [r for r in rows if r["model_name"].lower() in q_lower]
+
+    exact_matches = []
+    fuzzy_matches = []
+    for r in rows:
+        try:
+            aliases = [a for a in json.loads(r["aliases"] or "[]") if isinstance(a, str)]
+        except (TypeError, ValueError):
+            aliases = []
+        names = _machine_name_variants(r["model_name"]) + aliases
+
+        if any(re.search(rf"\b{re.escape(n.lower())}\b", q_lower) for n in names):
+            exact_matches.append(r)
+            continue
+
+        best = max((fuzz.token_set_ratio(q_lower, n.lower()) for n in names), default=0)
+        if best >= FUZZY_MACHINE_MATCH_THRESHOLD:
+            fuzzy_matches.append(r)
+
+    matches = exact_matches or fuzzy_matches
     if len(matches) == 1:
         return matches[0]["id"], []
     if len(matches) > 1:
@@ -137,29 +183,75 @@ def _require_own_conversation(conn, conversation_id: int, user_id: int):
     return row
 
 
+class SetMachineRequest(BaseModel):
+    machine_id: int
+
+
+@router.post("/conversations/{conversation_id}/machine", response_model=ConversationOut)
+def set_conversation_machine(
+    conversation_id: int, payload: SetMachineRequest, user: CurrentUser = Depends(get_current_user)
+):
+    """The ONLY way a conversation's machine is set once clarification is
+    needed, or changed later ("Change machine"). This is always an explicit,
+    confirmed technician action -- never inferred from a later message body,
+    which is what let a conversation's machine silently drift in the reviewed
+    version (concern #5/#6)."""
+    with get_conn() as conn:
+        _require_own_conversation(conn, conversation_id, user.id)
+        machine = conn.execute("SELECT id FROM machines WHERE id = ?", (payload.machine_id,)).fetchone()
+        if not machine:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Machine not found.")
+        conn.execute(
+            "UPDATE conversations SET machine_id = ?, updated_at = datetime('now') WHERE id = ?",
+            (payload.machine_id, conversation_id),
+        )
+        row = conn.execute(
+            "SELECT id, machine_id, title, started_at, updated_at FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        label = _machine_label(conn, row["machine_id"])
+    return ConversationOut(
+        id=row["id"], machine_id=row["machine_id"], machine_label=label,
+        title=row["title"], started_at=row["started_at"], updated_at=row["updated_at"],
+    )
+
+
 def _hydrate_message(conn, row) -> MessageOut:
+    # Only rows the provider actually selected (is_citation=1) -- every
+    # retrieved passage is still kept in message_sources for retrieval-quality
+    # auditing, but reload must reproduce exactly what the technician saw, not
+    # every candidate that was merely retrieved (concern #7).
     citations = []
     src_rows = conn.execute(
-        "SELECT ms.chunk_id, c.document_id, d.original_filename, d.title, c.page_number, "
-        "c.section_heading, d.revision "
+        "SELECT ms.chunk_id, ms.excerpt, c.document_id, d.original_filename, d.title, "
+        "c.page_number, c.section_heading, d.revision "
         "FROM message_sources ms "
         "JOIN chunks c ON c.id = ms.chunk_id "
         "JOIN documents d ON d.id = c.document_id "
-        "WHERE ms.message_id = ? ORDER BY ms.rank",
+        "WHERE ms.message_id = ? AND ms.is_citation = 1 ORDER BY ms.rank",
         (row["id"],),
     ).fetchall()
     for s in src_rows:
-        excerpt_row = conn.execute("SELECT content FROM chunks WHERE id = ?", (s["chunk_id"],)).fetchone()
         citations.append(CitationOut(
             chunk_id=s["chunk_id"], document_id=s["document_id"], filename=s["original_filename"],
             title=s["title"], page_number=s["page_number"], section_heading=s["section_heading"],
-            revision=s["revision"], excerpt=(excerpt_row["content"][:500] if excerpt_row else ""),
+            revision=s["revision"], excerpt=s["excerpt"] or "",
         ))
+
+    try:
+        safety_warnings = json.loads(row["safety_warnings"]) if row["safety_warnings"] else []
+    except (TypeError, ValueError):
+        safety_warnings = []
+
     return MessageOut(
         id=row["id"], role=row["role"], content=row["content"],
         is_clarifying_question=bool(row["is_clarifying_question"]),
         is_no_answer=bool(row["is_no_answer"]),
-        citations=citations, created_at=row["created_at"],
+        answer_status=row["answer_status"] if "answer_status" in row.keys() else "completed",
+        citations=citations,
+        safety_warnings=safety_warnings,
+        conflict_note=row["conflict_note"] if "conflict_note" in row.keys() else None,
+        created_at=row["created_at"],
     )
 
 
@@ -168,7 +260,8 @@ def get_messages(conversation_id: int, user: CurrentUser = Depends(get_current_u
     with get_conn() as conn:
         _require_own_conversation(conn, conversation_id, user.id)
         rows = conn.execute(
-            "SELECT id, role, content, is_clarifying_question, is_no_answer, created_at "
+            "SELECT id, role, content, is_clarifying_question, is_no_answer, "
+            "safety_warnings, conflict_note, answer_status, created_at "
             "FROM messages WHERE conversation_id = ? ORDER BY id",
             (conversation_id,),
         ).fetchall()
@@ -190,6 +283,21 @@ def ask_question(
     with get_conn() as conn:
         conv = _require_own_conversation(conn, conversation_id, user.id)
         machine_id = conv["machine_id"]
+
+        # Bounded prior turns, captured before this question is inserted, so
+        # follow-ups like "what about replacing it?" have real context instead
+        # of only ever seeing the latest question in isolation (concern #5).
+        # Clarifying-question prompts are excluded -- they're navigation, not
+        # content a provider should reason about.
+        history_rows = conn.execute(
+            "SELECT role, content FROM messages WHERE conversation_id = ? "
+            "AND is_clarifying_question = 0 ORDER BY id DESC LIMIT ?",
+            (conversation_id, MAX_HISTORY_TURNS),
+        ).fetchall()
+        history = [
+            HistoryTurn(role=r["role"], content=r["content"][:MAX_HISTORY_TURN_CHARS])
+            for r in reversed(history_rows)
+        ]
 
         conn.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
@@ -229,19 +337,48 @@ def ask_question(
 
     passages = hybrid_search(question, machine_id=machine_id, top_k=6)
     provider = get_provider()
-    result = provider.generate(question, machine_label, passages)
+    answer_status = "completed"
+    try:
+        result = provider.generate(question, machine_label, passages, history=history)
+    except ProviderError as e:
+        logger.warning("Provider call failed for conversation %s: %s", conversation_id, e)
+        answer_status = "failed"
+        result = GeneratedAnswer(
+            answer=f"I couldn't reach the AI provider ({e}). Please try again in a moment.",
+            is_no_answer=True, provider=getattr(provider, "name", "unknown"),
+        )
+    except Exception:
+        # Never leak internals (concern #9) -- but do log server-side so an
+        # admin can actually diagnose what happened.
+        logger.exception("Unexpected error generating an answer for conversation %s", conversation_id)
+        answer_status = "failed"
+        result = GeneratedAnswer(
+            answer="Something went wrong while generating an answer. Please try again.",
+            is_no_answer=True, provider=getattr(provider, "name", "unknown"),
+        )
 
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, is_no_answer) VALUES (?, 'assistant', ?, ?)",
-            (conversation_id, result.answer, int(result.is_no_answer)),
+            "INSERT INTO messages (conversation_id, role, content, is_no_answer, machine_id, "
+            "safety_warnings, conflict_note, provider, answer_status) "
+            "VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                conversation_id, result.answer, int(result.is_no_answer), machine_id,
+                json.dumps(result.safety_warnings) if result.safety_warnings else None,
+                result.conflict_note, result.provider, answer_status,
+            ),
         )
         msg_id = cur.lastrowid
+        citation_excerpt_by_chunk = {c.chunk_id: c.excerpt for c in result.citations}
         for rank, p in enumerate(passages):
+            is_citation = p.chunk_id in citation_excerpt_by_chunk
             conn.execute(
-                "INSERT INTO message_sources (message_id, chunk_id, rank, lexical_score, vector_score, combined_score) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (msg_id, p.chunk_id, rank, p.lexical_score, p.vector_score, p.combined_score),
+                "INSERT INTO message_sources (message_id, chunk_id, rank, lexical_score, vector_score, "
+                "combined_score, is_citation, excerpt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    msg_id, p.chunk_id, rank, p.lexical_score, p.vector_score, p.combined_score,
+                    int(is_citation), citation_excerpt_by_chunk.get(p.chunk_id),
+                ),
             )
         conn.execute("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?", (conversation_id,))
         created_at = conn.execute("SELECT created_at FROM messages WHERE id=?", (msg_id,)).fetchone()["created_at"]
@@ -249,6 +386,7 @@ def ask_question(
     return MessageOut(
         id=msg_id, role="assistant", content=result.answer,
         is_clarifying_question=False, is_no_answer=result.is_no_answer,
+        answer_status=answer_status,
         citations=[
             CitationOut(chunk_id=c.chunk_id, document_id=c.document_id, filename=c.filename,
                         title=c.title, page_number=c.page_number, section_heading=c.section_heading,
@@ -304,7 +442,8 @@ def save_answer(message_id: int, user: CurrentUser = Depends(get_current_user)):
 def list_saved_answers(user: CurrentUser = Depends(get_current_user)):
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT m.id, m.role, m.content, m.is_clarifying_question, m.is_no_answer, m.created_at "
+            "SELECT m.id, m.role, m.content, m.is_clarifying_question, m.is_no_answer, "
+            "m.safety_warnings, m.conflict_note, m.answer_status, m.created_at "
             "FROM saved_answers sa JOIN messages m ON m.id = sa.message_id "
             "WHERE sa.user_id = ? ORDER BY sa.saved_at DESC",
             (user.id,),

@@ -1,0 +1,104 @@
+"""Concern #7 (citation persistence) covers two things that the local_extractive
+smoke test can't: (1) a provider citing a SUBSET of retrieved passages must
+persist and reload as exactly that subset, not every passage that was merely
+retrieved; (2) an answer with no valid citations and no is_no_answer flag must
+never fall back to "cite everything" -- it must be rejected outright.
+local_extractive always cites every passage it shows, so neither case is
+exercised by the live smoke test recorded in docs/PRODUCTION_READINESS.md.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.db import get_conn
+from app.main import app
+from app.providers.base import AIProvider, GeneratedAnswer, parse_and_validate
+from app.retrieval.search import RetrievedChunk
+
+client = TestClient(app)
+
+
+def _passage(chunk_id: int, document_id: int, content: str) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=chunk_id, document_id=document_id, content=content,
+        page_number=1, section_heading=None, chunk_type="text",
+        original_filename="manual.pdf", title="Manual", doc_type="service_repair",
+        revision=None, manufacturer="Bunn-O-Matic Corporation", is_current_revision=True,
+        lexical_score=1.0, vector_score=1.0, combined_score=1.0,
+    )
+
+
+def test_parse_and_validate_rejects_unsupported_answer_instead_of_citing_everything():
+    """The single most safety-critical branch: no valid citations and no
+    is_no_answer flag must return None, forcing the caller to retry/fall back
+    -- never silently mark an unsupported answer as fully cited."""
+    passages = [_passage(1, 1, "excerpt one"), _passage(2, 1, "excerpt two")]
+    raw = json.dumps({"answer": "Some confident-sounding claim.", "cited_excerpt_numbers": []})
+    assert parse_and_validate(raw, passages, "test") is None
+
+
+def test_parse_and_validate_keeps_only_the_cited_subset():
+    passages = [_passage(i, 1, f"excerpt {i}") for i in range(1, 7)]
+    raw = json.dumps({"answer": "Answer citing two of six.", "cited_excerpt_numbers": [2, 5]})
+    result = parse_and_validate(raw, passages, "test")
+    assert result is not None
+    assert [c.chunk_id for c in result.citations] == [2, 5]
+
+
+class _SubsetCitingProvider(AIProvider):
+    """Fake provider that always cites only the 2nd and 5th of whatever
+    passages it's given, via the real parse_and_validate path -- exercises
+    the same validation the real Anthropic/OpenAI providers rely on."""
+
+    name = "test_subset"
+
+    def generate(self, question, machine_label, passages, history=None):
+        raw = json.dumps({
+            "answer": "Two of the six retrieved excerpts support this.",
+            "cited_excerpt_numbers": [2, 5],
+        })
+        result = parse_and_validate(raw, passages, self.name)
+        assert result is not None
+        return result
+
+
+@pytest.fixture
+def six_passages(test_env):
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute(
+            "INSERT INTO documents (id, original_filename, storage_path, source_system, "
+            "file_type, sha256, byte_size, status) VALUES "
+            "(1, 'manual.pdf', 'manual.pdf', 'local_directory', 'pdf', 'deadbeef', 100, 'indexed')"
+        )
+        conn.execute("INSERT INTO document_machines (document_id, machine_id, confidence) VALUES (1, 1, 1.0)")
+        for i in range(1, 7):
+            conn.execute(
+                "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
+                "VALUES (?, 1, 1, 'text', ?, 20, ?)",
+                (i, f"excerpt content number {i}", i),
+            )
+    return [_passage(i, 1, f"excerpt content number {i}") for i in range(1, 7)]
+
+
+def test_subset_citation_persists_and_reloads_as_exactly_that_subset(monkeypatch, six_passages):
+    import app.api.routes_chat as routes_chat
+
+    monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: six_passages)
+    monkeypatch.setattr(routes_chat, "get_provider", lambda: _SubsetCitingProvider())
+
+    client.post("/api/auth/register", json={"email": "citetest@example.com", "password": "password123"})
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+
+    ask = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "How do I fix it?"})
+    assert ask.status_code == 200
+    body = ask.json()
+    assert sorted(c["chunk_id"] for c in body["citations"]) == [2, 5]
+
+    reloaded = client.get(f"/api/conversations/{conv['id']}/messages").json()
+    assistant_msg = [m for m in reloaded if m["role"] == "assistant"][-1]
+    assert sorted(c["chunk_id"] for c in assistant_msg["citations"]) == [2, 5]
