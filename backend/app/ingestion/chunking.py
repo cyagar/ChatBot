@@ -17,6 +17,12 @@ from app.ingestion.extracted import ExtractedDocument
 TARGET_CHARS = 1200
 MIN_CHARS = 150
 
+# Independent review concern #16: 40 chunks in the corpus exceeded 2,000
+# characters (largest over 11,000), all table/error-code chunks -- and an
+# embedding model typically truncates its input, so rows past the truncation
+# point are invisible to semantic search even though they were "indexed".
+MAX_TABLE_CHUNK_CHARS = 1800
+
 WARNING_RE = re.compile(r"^(WARNING|CAUTION|DANGER|NOTICE|IMPORTANT|LOCKOUT[/ ]TAGOUT)\b", re.IGNORECASE)
 PROCEDURE_RE = re.compile(r"^\d{1,2}[\.\)]\s+\S")
 ERROR_CODE_HEADING_RE = re.compile(
@@ -124,6 +130,46 @@ def _looks_like_error_code_table(rows: list[list[str]]) -> bool:
     return checked >= 3 and matched / checked >= 0.5
 
 
+def _render_table_window(header: list[str], rows: list[list[str]], label: str | None) -> str:
+    lines = []
+    if label:
+        lines.append(label)
+    lines.append("| " + " | ".join(c or "" for c in header) + " |")
+    lines.append("| " + " | ".join("---" for _ in header) + " |")
+    for row in rows:
+        lines.append("| " + " | ".join(c or "" for c in row) + " |")
+    return "\n".join(lines)
+
+
+def _split_table_rows(table: ExtractedTable) -> list[str]:
+    """Bound each table chunk by row windows, not raw character count alone --
+    a split must never land mid-row. The header row is repeated in every
+    window (independent review: 'repeat the table title and column headers')
+    so each chunk is independently understandable by retrieval and by a
+    reader, instead of relying on an earlier chunk's now-truncated header."""
+    if not table.rows:
+        return []
+    header = table.rows[0]
+    body = table.rows[1:]
+    if not body:
+        return [table.as_markdown()]
+
+    full = table.as_markdown()
+    if len(full) <= MAX_TABLE_CHUNK_CHARS:
+        return [full]
+
+    header_overhead = len(" | ".join(c or "" for c in header)) + 10
+    avg_row_len = max(1, (len(full) - header_overhead) // max(1, len(body)))
+    rows_per_window = max(1, MAX_TABLE_CHUNK_CHARS // avg_row_len)
+
+    windows = [body[i : i + rows_per_window] for i in range(0, len(body), rows_per_window)]
+    total = len(windows)
+    return [
+        _render_table_window(header, window, f"(table, part {idx + 1} of {total})")
+        for idx, window in enumerate(windows)
+    ]
+
+
 def _merge_small_chunks(records: list[ChunkRecord]) -> list[ChunkRecord]:
     merged: list[ChunkRecord] = []
     for rec in records:
@@ -154,15 +200,16 @@ def chunk_document(extracted: ExtractedDocument) -> list[ChunkRecord]:
 
         last_heading = page_records[-1].section_heading if page_records else None
         for table in page.tables:
-            md = table.as_markdown()
-            if not md.strip():
+            if not table.rows:
                 continue
             is_error_table = _looks_like_error_code_table(table.rows) or (
                 last_heading and ERROR_CODE_HEADING_RE.search(last_heading)
             )
             chunk_type = "error_code" if is_error_table else "table"
-            all_records.append(
-                ChunkRecord(page.page_number, last_heading, chunk_type, md)
-            )
+            for window_md in _split_table_rows(table):
+                if window_md.strip():
+                    all_records.append(
+                        ChunkRecord(page.page_number, last_heading, chunk_type, window_md)
+                    )
 
     return all_records

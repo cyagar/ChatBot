@@ -16,9 +16,29 @@ done than it is.
 - [x] Machine-scoped retrieval isolation, verified against both synthetic data
       and a real-corpus case where two different Bunn brewer manuals share
       near-identical troubleshooting-table wording.
-- [x] A real metadata-quality bug (Bunn's trademark-notice boilerplate
+- [x] ~~A real metadata-quality bug (Bunn's trademark-notice boilerplate
       causing false machine-model links across many documents) found and
-      fixed with a regression test, not just noted.
+      fixed with a regression test, not just noted.~~ **Correction (2026-08-21,
+      independent review):** that fix was incomplete. An external review
+      reproduced live wrong-machine links this trademark-strip did not catch
+      (e.g. a TF DBC brewer manual mentioning "a G9-2T DBC or MHG grinder" as
+      a compatible accessory was still linked to the Grinders machine). The
+      actual defect was structural: any pattern hit anywhere in a document's
+      first three pages was treated as equal-confidence proof of subject, with
+      no filename-priority and no way to distinguish "this document is about
+      X" from "this document mentions X as an optional accessory." Fixed in
+      `app/ingestion/metadata.py` with three changes — filename matches are
+      now tier-1/authoritative, body matches near accessory-context phrasing
+      ("used with", "compatible with", TOC dot-leader lines) are demoted and
+      require human review instead of auto-linking, and a body-only match to a
+      *different* machine than one already filename-confirmed is also demoted
+      rather than silently expanding a document's machine links. Verified
+      against all four examples the review named, plus a full 71-file corpus
+      scan (12 documents had incorrect links removed, zero legitimate
+      filename-confirmed links lost), then applied to the live database via
+      `scripts/reindex_metadata.py --apply` and re-verified with a live
+      end-to-end chat request. See `Technician_Manual_Assistant_Independent_Review.txt`
+      concern #4 for the original findings.
 - [x] Auth, roles, rate limiting, input validation, secure upload handling —
       covered by API tests including a 403-for-technician-on-admin-route case
       and an actual rate-limit-exceeded case.
@@ -48,10 +68,22 @@ done than it is.
       but doesn't get Next's component ecosystem, type safety, or
       hot-module-reload dev experience. The backend is a clean JSON API, so
       this is additive, not a rewrite.
-- [ ] **Docker Compose local dev loop** — `Dockerfile`/`docker-compose.yml`
-      exist and describe the target, but were not exercised end-to-end in
-      this environment (Docker Desktop's engine was unreliable here even
-      after install). Needs a real run-through before being trusted for CI.
+- [x] ~~**Docker Compose local dev loop** — not exercised end-to-end.~~
+      **Update (2026-08-21):** now built and run end-to-end multiple times —
+      `docker compose build && docker compose up`, healthcheck passing,
+      running as a non-root user, no `.env`/secrets baked into any image
+      layer (`docker history` verified), the embedding model baked in at
+      build time and confirmed to load with `HF_HUB_OFFLINE=1` (no network
+      access needed at runtime), and a full authenticated flow exercised
+      against the live container (register → select machine → ask a question
+      → citations returned scoped to that machine → reload reproduces the
+      same answer/citations exactly) **using the `local_extractive` provider**,
+      which is deterministic and always cites every passage it shows. The
+      subset case that concern #7 is actually about — an LLM provider citing
+      2 of 6 retrieved passages, and `is_citation` correctly distinguishing
+      them on reload — is covered by a unit test
+      (`tests/unit/test_citation_persistence.py`), not by this live smoke
+      test; no Anthropic/OpenAI key has been exercised end-to-end this pass.
 
 ## Explicitly unverified
 

@@ -10,7 +10,9 @@ half-indexed document behind.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +23,15 @@ from app.ingestion.chunking import chunk_document
 from app.ingestion.extractors import extract
 from app.ingestion.metadata import extract_metadata
 from app.ingestion.sources import DocumentSource, get_document_source
+
+logger = logging.getLogger(__name__)
+
+# Guards against two ingestion runs (e.g. an upload-triggered reindex and a
+# manual "Run re-index now" click) racing through the module-level dedup
+# caches and database writes at the same time (independent review concern
+# #14). Process-local only -- correct for the documented single-instance
+# pilot deployment, not a multi-worker/multi-process one.
+_INGEST_LOCK = threading.Lock()
 
 
 @dataclass
@@ -104,6 +115,17 @@ def _document_full_text(conn, document_id: int) -> str:
 
 
 def ingest_all(source: DocumentSource | None = None, embed: bool = True) -> IngestionReport:
+    if not _INGEST_LOCK.acquire(blocking=False):
+        raise RuntimeError(
+            "An ingestion run is already in progress. Wait for it to finish before starting another."
+        )
+    try:
+        return _ingest_all_locked(source, embed)
+    finally:
+        _INGEST_LOCK.release()
+
+
+def _ingest_all_locked(source: DocumentSource | None, embed: bool) -> IngestionReport:
     settings = get_settings()
     source = source or get_document_source(settings)
     files = source.list_files()
@@ -116,20 +138,42 @@ def ingest_all(source: DocumentSource | None = None, embed: bool = True) -> Inge
         run_id = cur.lastrowid
 
     report = IngestionReport(run_id=run_id)
+    had_error = False
 
-    for sf in files:
-        outcome = _ingest_one(run_id, source, sf)
-        report.outcomes.append(outcome)
+    try:
+        # Per-file isolation: one file raising (a corrupt PDF, an OCR crash,
+        # ...) must not abort every other file in the run, and must not leave
+        # the run stuck at status='running' forever (independent review
+        # concern #14 -- this is exactly the gap it names).
+        for sf in files:
+            try:
+                outcome = _ingest_one(run_id, source, sf)
+            except Exception as e:
+                had_error = True
+                logger.exception("Ingestion failed for %s", sf.filename)
+                with get_conn() as conn:
+                    _record_event(conn, run_id, sf.filename, "failed", f"Unhandled error: {e}", None)
+                outcome = FileOutcome(sf.filename, "failed", f"Unhandled error: {e}")
+            report.outcomes.append(outcome)
 
-    report.near_duplicate_scores = list(_NEAR_DUP_SCORES)
+        report.near_duplicate_scores = list(_NEAR_DUP_SCORES)
 
-    if embed:
-        _embed_pending_chunks()
+        if embed:
+            _embed_pending_chunks()
+    except Exception:
+        logger.exception("Ingestion run %s aborted", run_id)
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE ingestion_runs SET status='failed', finished_at=datetime('now') WHERE id = ?",
+                (run_id,),
+            )
+        raise
 
+    final_status = "completed_with_errors" if had_error else "completed"
     with get_conn() as conn:
         conn.execute(
-            "UPDATE ingestion_runs SET status='completed', finished_at=datetime('now') WHERE id = ?",
-            (run_id,),
+            "UPDATE ingestion_runs SET status=?, finished_at=datetime('now') WHERE id = ?",
+            (final_status, run_id),
         )
     return report
 

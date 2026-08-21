@@ -70,6 +70,36 @@ def test_plain_table_without_code_signals_stays_table_type():
     assert table_records and table_records[0].chunk_type == "table"
 
 
+def test_large_table_is_split_into_bounded_windows_with_header_repeated():
+    """Independent review concern #16: the corpus's largest table chunk was
+    over 11,000 characters, and an embedding model typically truncates its
+    input -- later rows were 'indexed' but invisible to semantic search."""
+    header = ["Code", "Meaning", "Corrective Action"]
+    rows = [header] + [[f"E{i}", f"Fault description number {i} " * 3, f"Corrective action steps for fault {i}"] for i in range(200)]
+    table = ExtractedTable(page_number=1, rows=rows)
+    doc = _doc("Error Codes\nSee table below.", headings=[("Error Codes", 0)], tables=[table])
+    records = chunk_document(doc)
+    table_records = [r for r in records if r.chunk_type == "error_code" and "Code" in r.content]
+
+    assert len(table_records) > 1, "a table this large must be split into more than one chunk"
+    for rec in table_records:
+        assert len(rec.content) <= 1800 + 200  # cap plus small header/label overhead
+        assert "| Code | Meaning | Corrective Action |" in rec.content, "header must repeat in every window"
+
+    # No row's data was dropped in the split.
+    combined = "\n".join(r.content for r in table_records)
+    for i in (0, 50, 150, 199):
+        assert f"E{i}" in combined
+
+
+def test_small_table_is_not_split():
+    table = ExtractedTable(page_number=1, rows=[["Part", "Qty"], ["Gasket", "1"], ["Screw", "4"]])
+    doc = _doc("Parts List\nSee table below.", headings=[("Parts List", 0)], tables=[table])
+    records = chunk_document(doc)
+    table_records = [r for r in records if "Gasket" in r.content]
+    assert len(table_records) == 1
+
+
 def test_small_adjacent_chunks_of_same_type_are_merged():
     text = "Intro\nA short line.\nB.\nAnother short one."
     doc = _doc(text, headings=[("Intro", 0)])

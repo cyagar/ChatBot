@@ -20,7 +20,20 @@ def get_model():
     from sentence_transformers import SentenceTransformer
 
     settings = get_settings()
-    return SentenceTransformer(settings.embedding_model)
+    try:
+        return SentenceTransformer(settings.embedding_model, revision=settings.embedding_model_revision)
+    except Exception as e:
+        # Surface this as a clear, actionable failure rather than whatever
+        # huggingface_hub/urllib raises three layers down -- the Docker image
+        # bakes this model in at build time specifically so this path is only
+        # ever hit by a misconfigured/offline deployment, not normal use
+        # (independent review concern #18: no silent first-use download).
+        raise RuntimeError(
+            f"Could not load embedding model {settings.embedding_model!r} "
+            f"(revision {settings.embedding_model_revision!r}). If this is a fresh "
+            "environment, the model wasn't baked into the image/cache as expected, "
+            "and this deployment has no route to download it now."
+        ) from e
 
 
 def embed_texts(texts: list[str], batch_size: int = 32) -> np.ndarray:

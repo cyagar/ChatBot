@@ -69,7 +69,14 @@ class LocalDirectorySource(DocumentSource):
                 continue
             out.append(
                 SourceFile(
-                    source_ref=str(p.resolve()),
+                    # Relative to the configured corpus root, not an absolute
+                    # path -- an absolute path is specific to one machine, so
+                    # relocating (or re-extracting) an otherwise-unchanged
+                    # corpus made every file look like a brand new source and
+                    # created a duplicate document row (independent review
+                    # concern #13, reproduced directly: moving a file created
+                    # document row 72 for the same bytes as row 71).
+                    source_ref=f"{self.source_system}:{p.relative_to(self.directory).as_posix()}",
                     filename=p.name,
                     local_path=p,
                     byte_size=p.stat().st_size,
@@ -79,7 +86,8 @@ class LocalDirectorySource(DocumentSource):
         return out
 
     def fetch(self, source_ref: str) -> Path:
-        return Path(source_ref)
+        _, _, rel = source_ref.partition(":")
+        return self.directory / rel
 
 
 def get_document_source(settings) -> DocumentSource:

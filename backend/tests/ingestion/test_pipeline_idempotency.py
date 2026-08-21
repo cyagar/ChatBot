@@ -86,19 +86,45 @@ def test_content_change_at_same_path_creates_new_current_row(test_env, make_pdf,
     ingest_all(source=source, embed=False)
 
     v2 = make_pdf(["Version two content, completely rewritten about the water filter replacement."], name="v2.pdf")
-    shutil.copy(v2, path)  # same source_ref (path), different bytes
+    shutil.copy(v2, path)  # same source_ref (path relative to the corpus root), different bytes
     ingest_all(source=source, embed=False)
 
+    source_ref = f"local_directory:{path.name}"
     from app.db import get_conn
     with get_conn() as conn:
         active = conn.execute(
-            "SELECT id FROM documents WHERE source_ref = ? AND deactivated_at IS NULL", (str(path.resolve()),)
+            "SELECT id FROM documents WHERE source_ref = ? AND deactivated_at IS NULL", (source_ref,)
         ).fetchall()
         all_rows = conn.execute(
-            "SELECT id, deactivated_at FROM documents WHERE source_ref = ?", (str(path.resolve()),)
+            "SELECT id, deactivated_at FROM documents WHERE source_ref = ?", (source_ref,)
         ).fetchall()
     assert len(active) == 1, "only the latest content for a given path should be active"
     assert len(all_rows) == 2, "the superseded version should be kept (deactivated) for audit, not deleted"
+
+
+def test_relocated_corpus_root_does_not_create_a_duplicate_row(test_env, make_pdf, tmp_path):
+    """Independent review evidence: 'A relocation test proved that moving an
+    unchanged manual to another local folder creates a new duplicate document
+    row' (71 -> 72 document rows for the same bytes). source_ref must be
+    relative to the corpus root, not an absolute path, so the same file under
+    a differently-located root is still recognized as the same document."""
+    manuals_dir = test_env.local_manuals_dir_resolved
+    pdf = make_pdf(["Content about the ice machine condenser cleaning schedule."], name="relocatable.pdf")
+    shutil.copy(pdf, manuals_dir / pdf.name)
+    ingest_all(source=LocalDirectorySource(manuals_dir), embed=False)
+
+    relocated_dir = tmp_path / "relocated_manuals_root"
+    relocated_dir.mkdir()
+    shutil.copy(pdf, relocated_dir / pdf.name)
+    second = ingest_all(source=LocalDirectorySource(relocated_dir), embed=False)
+    assert second.counts() == {"skipped_unchanged": 1}
+
+    from app.db import get_conn
+    with get_conn() as conn:
+        active_count = conn.execute(
+            "SELECT COUNT(*) c FROM documents WHERE deactivated_at IS NULL"
+        ).fetchone()["c"]
+    assert active_count == 1, "relocating the corpus root must not create a duplicate document row"
 
 
 def test_unsupported_file_retried_after_capability_change_updates_in_place(test_env, tmp_path):
