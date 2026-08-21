@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { tab: "documents", user: null, documents: [], duplicates: [], runs: [], feedback: [], unanswered: [], queryResult: null, machines: [] };
+const state = { tab: "documents", user: null, documents: [], duplicates: [], runs: [], feedback: [], unanswered: [], queryResult: null, machines: [], allMachines: [] };
 const root = document.getElementById("admin-app");
 
 async function api(path, options = {}) {
@@ -43,7 +43,10 @@ const TABS = [
 ];
 
 async function loadTab() {
-  if (state.tab === "documents") state.documents = await api("/api/admin/documents");
+  if (state.tab === "documents") {
+    state.documents = await api("/api/admin/documents");
+    if (state.allMachines.length === 0) state.allMachines = await api("/api/admin/machines");
+  }
   if (state.tab === "duplicates") state.duplicates = await api("/api/admin/duplicates");
   if (state.tab === "ingestion") state.runs = await api("/api/admin/ingestion/runs");
   if (state.tab === "feedback") {
@@ -122,6 +125,17 @@ function renderDocuments() {
                 <label>Title <input name="title" value="${esc(d.title || "")}" /></label>
                 <label>Revision <input name="revision" value="${esc(d.revision || "")}" /></label>
                 <label><input type="checkbox" name="is_current_revision" ${d.is_current_revision ? "checked" : ""} /> Current revision (preferred in search)</label>
+                <label>Machine association(s) — retrieval only ever returns a document for a machine linked here
+                  <input type="text" class="machine-filter" data-doc="${d.id}" placeholder="Filter machines…" />
+                  <div class="machine-picker" data-doc="${d.id}">
+                    ${state.allMachines.map((m) => `
+                      <label class="machine-option" data-search="${esc(`${m.manufacturer} ${m.model_name} ${m.family || ""}`).toLowerCase()}">
+                        <input type="checkbox" name="machine_ids" value="${m.id}" ${d.machine_ids.includes(m.id) ? "checked" : ""} />
+                        ${esc(m.manufacturer)} — ${esc(m.model_name)}${m.family ? ` <span style="color:var(--text-dim);">(${esc(m.family)})</span>` : ""}
+                      </label>
+                    `).join("")}
+                  </div>
+                </label>
                 <label>Reason for change (required) <textarea name="reason" required rows="2"></textarea></label>
                 <div><button type="submit" class="primary">Save correction</button></div>
               </form>
@@ -273,11 +287,21 @@ function wireTabEvents() {
         title: fd.get("title") || null,
         revision: fd.get("revision") || null,
         is_current_revision: fd.get("is_current_revision") === "on",
+        machine_ids: fd.getAll("machine_ids").map((v) => parseInt(v, 10)),
         reason: fd.get("reason"),
       };
       await api(`/api/admin/documents/${form.dataset.id}`, { method: "PATCH", body: JSON.stringify(payload) });
       state.documents = await api("/api/admin/documents");
       render();
+    });
+  });
+  root.querySelectorAll(".machine-filter").forEach((input) => {
+    input.addEventListener("input", () => {
+      const picker = root.querySelector(`.machine-picker[data-doc="${input.dataset.doc}"]`);
+      const q = input.value.trim().toLowerCase();
+      picker.querySelectorAll(".machine-option").forEach((opt) => {
+        opt.style.display = opt.dataset.search.includes(q) ? "" : "none";
+      });
     });
   });
 

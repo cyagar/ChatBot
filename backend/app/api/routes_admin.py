@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from app.auth.deps import CurrentUser, require_admin
 from app.config import get_settings
 from app.db import get_conn
-from app.ingestion.pipeline import ingest_all
+from app.ingestion.pipeline import _INGEST_LOCK, ingest_all
 from app.retrieval.search import hybrid_search
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -37,13 +37,14 @@ class DocumentOut(BaseModel):
     page_count: int | None
     is_current_revision: bool
     machines: list[str]
+    machine_ids: list[int]
     ingested_at: str | None
 
 
 def _row_to_document(conn, row) -> DocumentOut:
     machines = conn.execute(
-        "SELECT m.model_name FROM document_machines dm JOIN machines m ON m.id = dm.machine_id "
-        "WHERE dm.document_id = ?",
+        "SELECT m.id, m.model_name, dm.confidence FROM document_machines dm "
+        "JOIN machines m ON m.id = dm.machine_id WHERE dm.document_id = ? ORDER BY m.model_name",
         (row["id"],),
     ).fetchall()
     return DocumentOut(
@@ -52,9 +53,36 @@ def _row_to_document(conn, row) -> DocumentOut:
         manufacturer=row["manufacturer"], doc_type=row["doc_type"], title=row["title"],
         revision=row["revision"], doc_number=row["doc_number"], page_count=row["page_count"],
         is_current_revision=bool(row["is_current_revision"]),
-        machines=[m["model_name"] for m in machines],
+        machines=[f"{m['model_name']} ({m['confidence']:.2f})" for m in machines],
+        machine_ids=[m["id"] for m in machines],
         ingested_at=row["ingested_at"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Machine catalog (for the association editor)
+# ---------------------------------------------------------------------------
+
+class MachineOut(BaseModel):
+    id: int
+    manufacturer: str
+    model_name: str
+    family: str | None
+
+
+@router.get("/machines", response_model=list[MachineOut])
+def list_all_machines(admin: CurrentUser = Depends(require_admin)):
+    """Every machine in the catalog, unlike GET /api/machines which only
+    returns machines that already have a document linked — an admin fixing a
+    document's association needs to be able to pick a machine that has zero
+    (or wrong) links today."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT m.id, mf.name AS manufacturer, m.model_name, m.family "
+            "FROM machines m JOIN manufacturers mf ON mf.id = m.manufacturer_id "
+            "ORDER BY mf.name, m.model_name"
+        ).fetchall()
+    return [MachineOut(id=r["id"], manufacturer=r["manufacturer"], model_name=r["model_name"], family=r["family"]) for r in rows]
 
 
 @router.get("/documents", response_model=list[DocumentOut])
@@ -196,12 +224,26 @@ async def upload_document(
                 )
             out.write(chunk)
 
+    # _INGEST_LOCK is checked here, not inside the background task -- ingest_all()
+    # raises RuntimeError if it can't acquire the lock, and a background task's
+    # exception is invisible to the caller (the 202 response is already sent).
+    # Telling the admin a run started when it didn't is worse than a 409
+    # (independent review follow-up: don't let a lying success response mask a
+    # skipped re-index).
+    if _INGEST_LOCK.locked():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="An ingestion run is already in progress. The uploaded file is saved "
+            "and will be picked up by that run or the next re-index.",
+        )
     background_tasks.add_task(ingest_all)
     return {"ok": True, "stored_as": safe_name, "detail": "Uploaded; ingestion started in the background."}
 
 
 @router.post("/ingestion/reindex", status_code=status.HTTP_202_ACCEPTED)
 def trigger_reindex(background_tasks: BackgroundTasks, admin: CurrentUser = Depends(require_admin)):
+    if _INGEST_LOCK.locked():
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="An ingestion run is already in progress.")
     background_tasks.add_task(ingest_all)
     return {"ok": True, "detail": "Re-index started in the background."}
 

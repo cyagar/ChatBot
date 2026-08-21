@@ -41,3 +41,7 @@
 
 .edit-form { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .edit-form input, .edit-form select, .edit-form textarea { border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); padding: 8px; }
+
+.machine-picker { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 6px; margin-top: 4px; background: var(--bg); }
+.machine-option { display: flex; align-items: center; gap: 6px; padding: 4px 6px; font-weight: 400; min-height: auto; }
+.machine-option input { width: auto; }
