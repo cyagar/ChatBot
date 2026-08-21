@@ -21,10 +21,14 @@ services:
     volumes:
       - ./data:/data
       - ./backend/.env:/app/.env:ro
+      # Google service-account key: mounted read-only, same pattern as .env.
+      # Never baked into the image (backend/.dockerignore blocks *.json).
+      - ./backend/upheld-archway-506212-a4-3e885c6b7693.json:/app/upheld-archway-506212-a4-3e885c6b7693.json:ro
     environment:
       - DB_PATH=/data/db/app.db
       - LOCAL_STORAGE_DIR=/data/object_storage
       - LOCAL_MANUALS_DIR=/data/manuals_incoming
+      - GDRIVE_CACHE_DIR=/data/gdrive_cache
     restart: unless-stopped
     # Bounds a single-instance pilot deployment; raise if ingestion/embedding
     # gets OOM-killed under a larger corpus.

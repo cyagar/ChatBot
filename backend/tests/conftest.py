@@ -23,6 +23,15 @@ def test_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "test-secret-key")
     monkeypatch.setenv("AI_PROVIDER", "local_extractive")
     monkeypatch.setenv("TESSERACT_CMD", "")
+    # Explicit, not just relying on config.py's default -- the real .env can
+    # (and, once a production Drive folder exists, does) set
+    # DOCUMENT_SOURCE=google_drive. Without this override, any test that
+    # triggers a background ingestion task would make real network calls
+    # against the production Drive folder instead of the tmp_path fixture
+    # directory above.
+    monkeypatch.setenv("DOCUMENT_SOURCE", "local_directory")
+    monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "")
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON_PATH", "")
 
     from app.config import get_settings
     get_settings.cache_clear()

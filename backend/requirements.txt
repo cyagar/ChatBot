@@ -40,3 +40,7 @@ anthropic==0.125.0
 openai==2.7.1
 
 pytesseract==0.3.13
+
+# --- Google Drive document source (DOCUMENT_SOURCE=google_drive) ---
+google-api-python-client==2.199.0
+google-auth==2.56.3

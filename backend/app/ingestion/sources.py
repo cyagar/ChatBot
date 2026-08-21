@@ -1,20 +1,17 @@
 """Pluggable document sources.
 
 The plan's production intent is a Google Drive folder that is regularly updated
-with new manuals. Rather than build the Drive integration now (no folder to point
-at yet, and secrets aren't available), every ingestion component below talks only
-to this `DocumentSource` interface. `LocalDirectorySource` is the only
-implementation today; a future `GoogleDriveSource` need only implement the same
-three methods (list, fetch, source metadata) using the Drive API `files.list` /
-`changes.list` for incremental sync, and nothing in ingestion/pipeline.py,
-extractors.py, dedup.py, etc. would need to change. Swap it via the
-DOCUMENT_SOURCE env var and a small factory (see `get_document_source` below).
+with new manuals. Every ingestion component talks only to the `DocumentSource`
+interface below, so `GoogleDriveSource` and `LocalDirectorySource` are
+interchangeable from pipeline.py's point of view. Swap via the DOCUMENT_SOURCE
+env var and the `get_document_source` factory below.
 """
 
 from __future__ import annotations
 
 import abc
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,14 +87,118 @@ class LocalDirectorySource(DocumentSource):
         return self.directory / rel
 
 
+class GoogleDriveSource(DocumentSource):
+    """Reads manuals from a shared Google Drive folder via a service account.
+
+    Drive only exposes an md5Checksum for binary files, but the rest of the
+    pipeline (cross-source exact-duplicate detection, documents.sha256)
+    assumes real SHA-256 throughout, same as LocalDirectorySource -- so
+    list_files() downloads each file into a local cache keyed by Drive file
+    ID and hashes the cached bytes itself. A cached file whose size already
+    matches Drive's reported size is reused rather than re-downloaded, so a
+    repeat listing (e.g. from the manual "re-index now" trigger) only pays
+    the download cost for files that are new or changed.
+
+    No incremental sync (changes.list/page tokens) by design: at this corpus
+    size, a full listing every run is cheap, and idempotency is already
+    handled by the existing sha256-based skip-if-unchanged logic in
+    pipeline.py -- adding change-token bookkeeping on top would be
+    complexity without a corresponding benefit yet.
+    """
+
+    source_system = "google_drive"
+    SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+
+    def __init__(self, folder_id: str, service_account_path: Path, cache_dir: Path):
+        self.folder_id = folder_id
+        self.service_account_path = Path(service_account_path)
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._service = None
+
+    def _get_service(self):
+        if self._service is None:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+
+            creds = service_account.Credentials.from_service_account_file(
+                str(self.service_account_path), scopes=self.SCOPES
+            )
+            self._service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return self._service
+
+    def _cache_path(self, file_id: str, name: str) -> Path:
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+        return self.cache_dir / f"{file_id}__{safe_name}"
+
+    def list_files(self) -> list[SourceFile]:
+        import io
+
+        from googleapiclient.http import MediaIoBaseDownload
+
+        service = self._get_service()
+        out: list[SourceFile] = []
+        page_token = None
+        while True:
+            resp = (
+                service.files()
+                .list(
+                    q=f"'{self.folder_id}' in parents and trashed = false",
+                    fields="nextPageToken, files(id, name, size)",
+                    pageSize=100,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+            for f in resp.get("files", []):
+                file_id = f["id"]
+                name = f["name"]
+                reported_size = int(f.get("size") or 0)
+                cache_path = self._cache_path(file_id, name)
+
+                if not (cache_path.exists() and cache_path.stat().st_size == reported_size):
+                    request = service.files().get_media(fileId=file_id)
+                    buf = io.BytesIO()
+                    downloader = MediaIoBaseDownload(buf, request)
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+                    cache_path.write_bytes(buf.getvalue())
+
+                out.append(
+                    SourceFile(
+                        source_ref=f"{self.source_system}:{file_id}",
+                        filename=name,
+                        local_path=cache_path,
+                        byte_size=cache_path.stat().st_size,
+                        sha256=_sha256_of(cache_path),
+                    )
+                )
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return out
+
+    def fetch(self, source_ref: str) -> Path:
+        _, _, file_id = source_ref.partition(":")
+        matches = list(self.cache_dir.glob(f"{file_id}__*"))
+        if matches:
+            return matches[0]
+        raise FileNotFoundError(
+            f"Drive file {file_id} not found in the local cache -- list_files() "
+            "must run at least once before fetch() for a new file."
+        )
+
+
 def get_document_source(settings) -> DocumentSource:
     if settings.document_source == "local_directory":
         return LocalDirectorySource(settings.local_manuals_dir_resolved)
     if settings.document_source == "google_drive":
-        raise NotImplementedError(
-            "Google Drive source is not implemented yet. Set DOCUMENT_SOURCE=local_directory "
-            "for now. When the production Drive folder is ready, implement GoogleDriveSource "
-            "(list_files via files.list scoped to GOOGLE_DRIVE_FOLDER_ID, fetch via files.get "
-            "media download, incremental re-sync via changes.list) and register it here."
+        return GoogleDriveSource(
+            folder_id=settings.google_drive_folder_id,
+            service_account_path=settings.google_service_account_json_path_resolved,
+            cache_dir=settings.gdrive_cache_dir_resolved,
         )
     raise ValueError(f"Unknown DOCUMENT_SOURCE: {settings.document_source!r}")

@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+*.json
 
 # Runtime data — the image ships empty; real data lives in the mounted volume.
 # (The actual data/ tree lives at the repo root, outside this build context —

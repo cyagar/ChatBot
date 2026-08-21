@@ -20,7 +20,11 @@ class Settings(BaseSettings):
     document_source: str = "local_directory"
     local_manuals_dir: str = "../data/manuals_incoming"
     google_drive_folder_id: str = ""
-    google_service_account_json: str = ""
+    # Path to the downloaded service-account JSON key file, not the key
+    # content itself -- keeps a private key out of the .env file/process
+    # environment, mirroring how the key is kept out of git (see .gitignore).
+    google_service_account_json_path: str = ""
+    gdrive_cache_dir: str = "../data/gdrive_cache"
 
     ai_provider: str = "local_extractive"
     anthropic_api_key: str = ""
@@ -60,6 +64,16 @@ class Settings(BaseSettings):
                 raise RuntimeError("AI_PROVIDER=openai but OPENAI_API_KEY is not set.")
         if self.ai_provider not in {"local_extractive", "anthropic", "openai"}:
             raise RuntimeError(f"Unknown AI_PROVIDER: {self.ai_provider!r}")
+        if self.document_source == "google_drive":
+            if not self.google_drive_folder_id:
+                raise RuntimeError("DOCUMENT_SOURCE=google_drive but GOOGLE_DRIVE_FOLDER_ID is not set.")
+            if not self.google_service_account_json_path_resolved.exists():
+                raise RuntimeError(
+                    "DOCUMENT_SOURCE=google_drive but the service-account key file was not found at "
+                    f"{self.google_service_account_json_path_resolved}."
+                )
+        elif self.document_source != "local_directory":
+            raise RuntimeError(f"Unknown DOCUMENT_SOURCE: {self.document_source!r}")
 
     @property
     def db_path_resolved(self) -> Path:
@@ -74,6 +88,16 @@ class Settings(BaseSettings):
     @property
     def local_manuals_dir_resolved(self) -> Path:
         p = Path(self.local_manuals_dir)
+        return p if p.is_absolute() else (BACKEND_DIR / p).resolve()
+
+    @property
+    def google_service_account_json_path_resolved(self) -> Path:
+        p = Path(self.google_service_account_json_path)
+        return p if p.is_absolute() else (BACKEND_DIR / p).resolve()
+
+    @property
+    def gdrive_cache_dir_resolved(self) -> Path:
+        p = Path(self.gdrive_cache_dir)
         return p if p.is_absolute() else (BACKEND_DIR / p).resolve()
 
 
