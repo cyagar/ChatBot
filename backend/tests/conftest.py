@@ -13,23 +13,18 @@ def test_env(tmp_path, monkeypatch):
     (not a .env file) so tests never touch the developer's real data."""
     db_dir = tmp_path / "db"
     storage_dir = tmp_path / "storage"
-    manuals_dir = tmp_path / "manuals"
-    for d in (db_dir, storage_dir, manuals_dir):
+    for d in (db_dir, storage_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("DB_PATH", str(db_dir / "test.db"))
     monkeypatch.setenv("LOCAL_STORAGE_DIR", str(storage_dir))
-    monkeypatch.setenv("LOCAL_MANUALS_DIR", str(manuals_dir))
     monkeypatch.setenv("SECRET_KEY", "test-secret-key")
     monkeypatch.setenv("AI_PROVIDER", "local_extractive")
     monkeypatch.setenv("TESSERACT_CMD", "")
-    # Explicit, not just relying on config.py's default -- the real .env can
-    # (and, once a production Drive folder exists, does) set
-    # DOCUMENT_SOURCE=google_drive. Without this override, any test that
-    # triggers a background ingestion task would make real network calls
-    # against the production Drive folder instead of the tmp_path fixture
-    # directory above.
-    monkeypatch.setenv("DOCUMENT_SOURCE", "local_directory")
+    # Tests that exercise ingestion always pass an explicit FakeDirectorySource
+    # (tests/ingestion/fakes.py) to ingest_all(), never relying on
+    # get_document_source(settings) -- so these stay blank rather than
+    # pointing at any real Drive folder/credential.
     monkeypatch.setenv("GOOGLE_DRIVE_FOLDER_ID", "")
     monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON_PATH", "")
 
