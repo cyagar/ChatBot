@@ -128,11 +128,12 @@ def ingest_all(source: DocumentSource | None = None, embed: bool = True) -> Inge
 def _ingest_all_locked(source: DocumentSource | None, embed: bool) -> IngestionReport:
     settings = get_settings()
     source = source or get_document_source(settings)
-    files = source.list_files()
 
-    _SHINGLE_CACHE.clear()
-    _NEAR_DUP_SCORES.clear()
-
+    # Run row created BEFORE the source is listed (independent review P0-3):
+    # listing a Google Drive folder does live auth + API calls and can fail
+    # (bad credentials, revoked access, quota, network). If that happens
+    # before any run row exists, the trigger returns 202 and the admin UI
+    # shows nothing -- no evidence an ingestion was even attempted.
     with get_conn() as conn:
         cur = conn.execute("INSERT INTO ingestion_runs (status) VALUES ('running')")
         run_id = cur.lastrowid
@@ -141,6 +142,11 @@ def _ingest_all_locked(source: DocumentSource | None, embed: bool) -> IngestionR
     had_error = False
 
     try:
+        files = source.list_files()
+
+        _SHINGLE_CACHE.clear()
+        _NEAR_DUP_SCORES.clear()
+
         # Per-file isolation: one file raising (a corrupt PDF, an OCR crash,
         # ...) must not abort every other file in the run, and must not leave
         # the run stuck at status='running' forever (independent review
@@ -160,13 +166,14 @@ def _ingest_all_locked(source: DocumentSource | None, embed: bool) -> IngestionR
 
         if embed:
             _embed_pending_chunks()
-    except Exception:
+    except Exception as e:
         logger.exception("Ingestion run %s aborted", run_id)
         with get_conn() as conn:
             conn.execute(
                 "UPDATE ingestion_runs SET status='failed', finished_at=datetime('now') WHERE id = ?",
                 (run_id,),
             )
+            _record_event(conn, run_id, "(run)", "failed", f"Ingestion run aborted: {e}", None)
         raise
 
     final_status = "completed_with_errors" if had_error else "completed"
@@ -201,7 +208,15 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
     # etc.) — those get re-extracted, and the existing row is only touched if
     # the result actually changes (see stable_retry_id below), so a permanently
     # unsupported file (e.g. .indd) doesn't accumulate a new row every run.
+    # superseded_candidate_id: the currently-active row at this source_ref,
+    # when the incoming bytes differ from it. Deliberately NOT deactivated
+    # here -- independent review P0-2: retiring a working manual before its
+    # replacement has been extracted and validated means a corrupt/unreadable
+    # replacement can take down a manual technicians could otherwise still
+    # use. It's only deactivated once a validated outcome (indexed/partial/
+    # duplicate) actually exists to take its place, further down.
     stable_retry_id: int | None = None
+    superseded_candidate_id: int | None = None
     with get_conn() as conn:
         existing = conn.execute(
             "SELECT id, status, sha256 FROM documents WHERE source_ref = ? AND deactivated_at IS NULL",
@@ -218,16 +233,9 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
                                    existing["id"])
             stable_retry_id = existing["id"]
         elif existing:
-            # Content changed at this source path: a genuinely new document, so
-            # the stale row is superseded immediately (not conditionally).
-            conn.execute(
-                "UPDATE documents SET deactivated_at = datetime('now'), "
-                "status_reason = COALESCE(status_reason || ' | ', '') "
-                "|| 'Superseded: content changed at this source path.' WHERE id = ?",
-                (existing["id"],),
-            )
+            superseded_candidate_id = existing["id"]
 
-    local_path = source.fetch(sf.source_ref)
+    local_path = sf.local_path
     file_type, extracted, mismatch_note = extract(local_path, ocr_available=_ocr_available())
 
     # --- Unreadable / unsupported: still recorded, never silently dropped ---
@@ -241,6 +249,24 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
                     (extracted.status, extracted.reason, extracted.page_count or None, stable_retry_id),
                 )
                 doc_id = stable_retry_id
+            elif superseded_candidate_id is not None:
+                # The replacement failed validation -- record the attempt, but
+                # insert it already deactivated so the still-good active row
+                # at this source_ref is left untouched (P0-2).
+                reason = (f"Replacement for document {superseded_candidate_id} failed validation "
+                          f"and did not replace it: {extracted.reason}")
+                cur = conn.execute(
+                    "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+                    "file_type, sha256, byte_size, page_count, status, status_reason, ingested_at, "
+                    "deactivated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+                    (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
+                     sf.sha256, sf.byte_size, extracted.page_count or None,
+                     extracted.status, reason),
+                )
+                doc_id = cur.lastrowid
+                _record_event(conn, run_id, sf.filename, extracted.status, reason, doc_id)
+                return FileOutcome(sf.filename, extracted.status, reason, doc_id,
+                                   page_count=extracted.page_count or None)
             else:
                 cur = conn.execute(
                     "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
@@ -265,6 +291,19 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
                 "status_reason = COALESCE(status_reason || ' | ', '') "
                 "|| 'Superseded: re-processing succeeded where a prior attempt did not.' WHERE id = ?",
                 (stable_retry_id,),
+            )
+
+    # Extraction succeeded and produced usable content: the replacement is now
+    # validated, so it's safe to retire the row it's superseding (P0-2 -- this
+    # only runs once we know there's a real replacement to take its place, not
+    # before).
+    if superseded_candidate_id is not None:
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE documents SET deactivated_at = datetime('now'), "
+                "status_reason = COALESCE(status_reason || ' | ', '') "
+                "|| 'Superseded: content changed at this source path.' WHERE id = ?",
+                (superseded_candidate_id,),
             )
 
     # --- Exact duplicate of an already-stored file ---
@@ -307,18 +346,29 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
     if not chunks:
         with get_conn() as conn:
             storage_name = _store_file(local_path, sf.sha256)
-            cur = conn.execute(
-                "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
-                "file_type, sha256, byte_size, page_count, status, status_reason, ingested_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, datetime('now'))",
-                (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
-                 sf.sha256, sf.byte_size, extracted.page_count,
-                 "Text was extracted but produced no usable chunks."),
-            )
+            if superseded_candidate_id is not None:
+                reason = (f"Replacement for document {superseded_candidate_id} produced no usable "
+                          "chunks and did not replace it.")
+                cur = conn.execute(
+                    "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+                    "file_type, sha256, byte_size, page_count, status, status_reason, ingested_at, "
+                    "deactivated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, datetime('now'), "
+                    "datetime('now'))",
+                    (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
+                     sf.sha256, sf.byte_size, extracted.page_count, reason),
+                )
+            else:
+                reason = "Text was extracted but produced no usable chunks."
+                cur = conn.execute(
+                    "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+                    "file_type, sha256, byte_size, page_count, status, status_reason, ingested_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, datetime('now'))",
+                    (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
+                     sf.sha256, sf.byte_size, extracted.page_count, reason),
+                )
             doc_id = cur.lastrowid
-            _record_event(conn, run_id, sf.filename, "failed",
-                          "Text extracted but no usable chunks produced.", doc_id)
-        return FileOutcome(sf.filename, "failed", "No usable chunks produced.", doc_id)
+            _record_event(conn, run_id, sf.filename, "failed", reason, doc_id)
+        return FileOutcome(sf.filename, "failed", reason, doc_id)
 
     candidate_text = "\n".join(c.content for c in chunks)
 

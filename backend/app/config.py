@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     local_storage_dir: str = "../data/object_storage"
     db_path: str = "../data/db/app.db"
 
-    document_source: str = "local_directory"
-    local_manuals_dir: str = "../data/manuals_incoming"
+    # Google Drive is the only document source (2026-08-21: local-directory
+    # ingestion and the direct-upload path were retired entirely).
     google_drive_folder_id: str = ""
     # Path to the downloaded service-account JSON key file, not the key
     # content itself -- keeps a private key out of the .env file/process
@@ -62,18 +62,22 @@ class Settings(BaseSettings):
                 raise RuntimeError("AI_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set.")
             if self.ai_provider == "openai" and not self.openai_api_key:
                 raise RuntimeError("AI_PROVIDER=openai but OPENAI_API_KEY is not set.")
+            if not self.allowed_registration_domains:
+                raise RuntimeError(
+                    "ALLOWED_REGISTRATION_DOMAINS is not set for APP_ENV="
+                    f"{self.app_env!r} -- this leaves self-registration open to any email "
+                    "address, which is only acceptable for local development. Set it to a "
+                    "comma-separated allowlist before deploying."
+                )
         if self.ai_provider not in {"local_extractive", "anthropic", "openai"}:
             raise RuntimeError(f"Unknown AI_PROVIDER: {self.ai_provider!r}")
-        if self.document_source == "google_drive":
-            if not self.google_drive_folder_id:
-                raise RuntimeError("DOCUMENT_SOURCE=google_drive but GOOGLE_DRIVE_FOLDER_ID is not set.")
-            if not self.google_service_account_json_path_resolved.exists():
-                raise RuntimeError(
-                    "DOCUMENT_SOURCE=google_drive but the service-account key file was not found at "
-                    f"{self.google_service_account_json_path_resolved}."
-                )
-        elif self.document_source != "local_directory":
-            raise RuntimeError(f"Unknown DOCUMENT_SOURCE: {self.document_source!r}")
+        if not self.google_drive_folder_id:
+            raise RuntimeError("GOOGLE_DRIVE_FOLDER_ID is not set -- ingestion has no document source.")
+        if not self.google_service_account_json_path_resolved.exists():
+            raise RuntimeError(
+                "Google service-account key file was not found at "
+                f"{self.google_service_account_json_path_resolved}."
+            )
 
     @property
     def db_path_resolved(self) -> Path:
@@ -83,11 +87,6 @@ class Settings(BaseSettings):
     @property
     def local_storage_dir_resolved(self) -> Path:
         p = Path(self.local_storage_dir)
-        return p if p.is_absolute() else (BACKEND_DIR / p).resolve()
-
-    @property
-    def local_manuals_dir_resolved(self) -> Path:
-        p = Path(self.local_manuals_dir)
         return p if p.is_absolute() else (BACKEND_DIR / p).resolve()
 
     @property

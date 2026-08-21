@@ -90,7 +90,6 @@ def lexical_search(query: str, machine_id: int | None, limit: int = CANDIDATE_PO
 
 
 def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POOL) -> list[tuple[int, float]]:
-    qvec = embed_query(query)
     filter_sql, filter_params = _machine_filter_sql(machine_id)
     sql = f"""
         SELECT e.chunk_id, e.dim, e.vector
@@ -105,8 +104,14 @@ def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POO
         rows = conn.execute(sql, filter_params).fetchall()
 
     if not rows:
+        # No eligible chunks (empty corpus, or none for this machine) -- skip
+        # the embedding call entirely rather than loading the model just to
+        # discover there's nothing to compare against. Also means a query
+        # with no matching documents never depends on model/network
+        # availability at all (independent review P1-5/P2-1).
         return []
 
+    qvec = embed_query(query)
     dim = rows[0]["dim"]
     matrix = np.vstack([blob_to_vector(r["vector"], r["dim"]) for r in rows])
     # Vectors are stored L2-normalized, so dot product == cosine similarity.

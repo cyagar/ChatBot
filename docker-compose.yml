@@ -23,12 +23,16 @@ services:
       - ./backend/.env:/app/.env:ro
       # Google service-account key: mounted read-only, same pattern as .env.
       # Never baked into the image (backend/.dockerignore blocks *.json).
-      - ./backend/upheld-archway-506212-a4-3e885c6b7693.json:/app/upheld-archway-506212-a4-3e885c6b7693.json:ro
+      # Filename comes from the root .env (GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME,
+      # gitignored, read automatically by `docker compose`) so this file stays
+      # portable across deployments instead of hard-coding one project's key
+      # filename here.
+      - ./backend/${GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME}:/app/${GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME}:ro
     environment:
       - DB_PATH=/data/db/app.db
       - LOCAL_STORAGE_DIR=/data/object_storage
-      - LOCAL_MANUALS_DIR=/data/manuals_incoming
       - GDRIVE_CACHE_DIR=/data/gdrive_cache
+      - GOOGLE_SERVICE_ACCOUNT_JSON_PATH=/app/${GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME}
     restart: unless-stopped
     # Bounds a single-instance pilot deployment; raise if ingestion/embedding
     # gets OOM-killed under a larger corpus.

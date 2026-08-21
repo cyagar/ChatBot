@@ -52,11 +52,11 @@ done than it is.
       `data/manuals_incoming/` were confirmed byte-identical to the Drive
       folder (same 65 unique hashes on both sides) before being deleted, and
       the 71 existing `documents` rows were remapped from
-      `local_directory:<name>` to `google_drive:<file-id>` `source_ref`s in
-      place (paired by sha256, with exact-filename matching to break the 5
-      cases where multiple rows/files share a hash, and deterministic
-      arbitrary pairing for the remainder, since those are byte-identical
-      content with no functional difference either way), preserving every
+      `local_directory:<name>` to `google_drive:<file-id>` `source_ref`s
+      (paired by sha256, with exact-filename matching to break the 5 cases
+      where multiple rows/files share a hash, and deterministic-but-arbitrary
+      pairing for the remainder, since those are byte-identical content with
+      no functional difference either way), preserving every
       chunk/embedding/machine-link/audit-trail entry rather than
       re-ingesting from scratch. Verified with a real re-index run against
       live Drive afterward: 70/71 files returned `skipped_unchanged`, the
@@ -65,12 +65,52 @@ done than it is.
       unchanged (71 / 15,047) and `PRAGMA quick_check` still `ok`. The admin
       upload endpoint is gone; manuals only enter the system via the shared
       Drive folder, followed by an explicit "re-index now" (still
-      manual-trigger, no scheduler). One caveat found and fixed along the
-      way: switching `DOCUMENT_SOURCE` to `google_drive` initially leaked
-      into the test suite (an upload test's background task made real Drive
-      API calls) until `conftest.py` was made to pin
-      `DOCUMENT_SOURCE=local_directory` explicitly rather than relying on
-      the class default.
+      manual-trigger, no scheduler).
+      **Known gap (independent follow-up review, P0-4):** the remap above was
+      run as a one-off interactive script against the live DB, not checked
+      into the repo, and its output mapping files
+      (`gdrive_manifest.json`/`gdrive_remap_mapping.json`) were not kept --
+      the exact pairing decisions for the 5 shared-hash collisions are not
+      reconstructible after the fact. What *is* checked in and reproducible
+      going forward is `scripts/verify_drive_source_refs.py`, which
+      cross-checks every active document's `source_ref` against a fresh
+      Drive listing (missing file, changed content, or cosmetic rename) and
+      exits non-zero on any mismatch -- run it any time the corpus's
+      integrity needs independent verification, not just taken on faith.
+- [x] **Drive cache integrity and replacement lifecycle** (independent
+      follow-up review P0-1, P0-2, P0-3, found in the Drive implementation
+      above shortly after it shipped). `GoogleDriveSource` used to decide
+      cache reuse from file size alone and let `fetch()` pick a cache file by
+      globbing `{file_id}__*`, which could silently return a stale pre-rename
+      copy; cache validity is now keyed on Drive's `md5Checksum`
+      (`modifiedTime` as a fallback for the rare file Drive doesn't
+      checksum), tracked in a `manifest.json` in the cache directory, and
+      `fetch()`/the pipeline now use the exact path that manifest recorded
+      (`pipeline.py` uses `SourceFile.local_path` directly rather than
+      calling `fetch()` at all) -- see
+      `tests/ingestion/test_google_drive_source.py`. Google Workspace files
+      (no downloadable binary) are now skipped with a logged reason instead
+      of failing `get_media()`. Separately, `_ingest_one()` used to
+      deactivate the active document at a `source_ref` as soon as new content
+      appeared there, before the replacement was extracted/validated -- a
+      corrupt or unreadable replacement could take down a working manual.
+      The active row is now only deactivated once a validated outcome
+      (indexed/partial/duplicate) exists to replace it; a failed replacement
+      is recorded but inserted already-inactive, leaving the working document
+      untouched (`test_failed_replacement_does_not_retire_the_still_good_active_document`).
+      And `ingest_all()` used to call `source.list_files()` before the
+      `ingestion_runs` row existed, so a Drive auth/quota/network failure
+      aborted the whole run invisibly (202 returned, nothing in the admin UI);
+      the run row is now created first and a listing failure is recorded as a
+      visible `failed` run with a reason
+      (`test_listing_failure_still_produces_a_visible_failed_run`).
+      **Not done:** full source-disappearance reconciliation (quarantining a
+      document only after a *complete* successful listing shows it's really
+      gone, vs. today's simpler "still-active row is never deactivated by a
+      missing listing entry" -- true today, but not exercised by a dedicated
+      test) and a durable job queue (the run row now always exists, but a
+      process crash mid-run still leaves it stuck at `running` rather than
+      being picked up/resumed by a worker).
 - [x] Retrieval/citation evaluation report generated by running real questions
       through the real, deployed pipeline (`scripts/eval_retrieval.py`) — see
       `data/reports/retrieval_eval_report.md` for current numbers.
