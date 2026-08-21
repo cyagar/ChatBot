@@ -6,8 +6,8 @@
                      ┌────────────────────────────────────────┐
                      │            FastAPI backend              │
 DocumentSource  ──▶  │  ingestion pipeline (extract → dedup →  │
-(local dir now,      │  metadata → chunk → embed → index)      │
-Drive later)         │                                          │
+(Google Drive)       │  metadata → chunk → embed → index)      │
+                     │                                          │
                      │  SQLite (documents, chunks, FTS5,        │
                      │  embeddings, users, conversations,       │
                      │  feedback, audit trail)                  │
@@ -41,15 +41,22 @@ later without touching unrelated code:
 | Next.js/TypeScript frontend | FastAPI + Jinja2 + vanilla JS PWA | No Node.js available initially | Backend is a pure JSON API under `/api/*`; a Next.js frontend can be added as a separate service hitting the same API with zero backend changes. |
 | PostgreSQL + pgvector | SQLite + FTS5 (lexical) + brute-force cosine over float32 BLOBs (vector) | No Postgres available; at this corpus's scale (tens of docs, ~15k chunks) brute-force cosine is sub-100ms — pgvector's ANN index buys nothing yet | All DB access goes through `app/db.py`'s `get_conn()`; migrating means implementing the same shape against `psycopg` + pgvector and updating that one module, not the call sites. `docker-compose.yml` documents the target Postgres service (commented out, ready to enable). |
 | Docker Compose for local dev | Native `venv` + `pip install` | Docker Desktop's engine was unreliable (`500` errors) on this machine even after install; nothing in local development actually requires containers | `Dockerfile` + `docker-compose.yml` are included and documented as the production/CI path once Docker is confirmed working. |
-| — | Legacy `.doc` support built but effectively unused | Investigation found the corpus's apparent `.doc` files are actually **PDFs with the wrong extension** (verified via magic-byte sniffing, not trusted from the filename) | `extract_legacy_doc()` (OLE byte-scan) stays in place for real future `.doc` uploads (e.g. from Google Drive) but wasn't the corpus's actual blocker. |
+| — | Legacy `.doc` support built but effectively unused | Investigation found the corpus's apparent `.doc` files are actually **PDFs with the wrong extension** (verified via magic-byte sniffing, not trusted from the filename) | `extract_legacy_doc()` (OLE byte-scan) stays in place for real `.doc` files arriving via Drive but wasn't the original corpus's actual blocker. |
 
 ## Ingestion pipeline
 
 1. **`DocumentSource`** (`app/ingestion/sources.py`) — abstract source
-   interface (`list_files`, `fetch`). `LocalDirectorySource` is the only
-   implementation today. A future `GoogleDriveSource` (production intent: a
-   regularly-updated Drive folder) implements the same interface via
-   `files.list`/`files.get`/`changes.list` — nothing downstream changes.
+   interface (`list_files`, `fetch`). `GoogleDriveSource` is the production
+   implementation (2026-08-21): lists a shared Drive folder via a service
+   account, downloads each file into a local cache keyed by Drive file ID, and
+   hashes the cached bytes (Drive only exposes md5; the rest of the pipeline
+   assumes real SHA-256). No incremental `changes.list`/page-token sync -- a
+   full listing every re-index is cheap at this corpus size, and the existing
+   sha256 skip-if-unchanged logic already makes repeat listings idempotent.
+   `LocalDirectorySource` still exists purely as test infrastructure (synthetic
+   tmp-directory fixtures in the test suite) — no real manuals are stored
+   locally in this deployment; ingestion is Drive-only, manual-trigger (admin
+   "re-index now"), and there is no local-upload path.
 2. **Type resolution** (`extractors.py`) — trusts file *content* (magic bytes)
    over the file extension. This mattered concretely: 5 files in the corpus
    were PDFs mislabeled `.doc`/`.docx`.
@@ -174,9 +181,10 @@ reload steps.
 - Input validation: Pydantic models on every request body; FTS5 query text is
   sanitized (each term quoted as a literal) before reaching the lexical
   search engine.
-- File upload: extension allowlist, size cap, filename sanitization, files
-  served back to the browser by DB-driven content-addressed name — never by a
-  client-supplied path.
+- No direct file upload endpoint: manuals only enter the system via the
+  shared Google Drive folder, so there's exactly one place the corpus can
+  drift from. Files are served back to the browser by DB-driven
+  content-addressed name — never by a client-supplied path.
 - Secrets: `.env`-only (gitignored), `.env.example` has no real values.
 - Logging for retrieval-quality auditing: every assistant message's retrieved
   sources (chunk id, lexical/vector/combined score) are stored in

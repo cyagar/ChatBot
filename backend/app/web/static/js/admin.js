@@ -39,7 +39,6 @@ const TABS = [
   { id: "ingestion", label: "Ingestion reports" },
   { id: "query", label: "Query tester" },
   { id: "feedback", label: "Feedback & gaps" },
-  { id: "upload", label: "Upload manual" },
 ];
 
 async function loadTab() {
@@ -85,7 +84,6 @@ function renderTab() {
   if (state.tab === "ingestion") return renderIngestion();
   if (state.tab === "query") return renderQuery();
   if (state.tab === "feedback") return renderFeedback();
-  if (state.tab === "upload") return renderUpload();
   return "";
 }
 
@@ -177,7 +175,7 @@ function renderIngestion() {
     <h1>Ingestion reports</h1>
     <div class="card">
       <button id="reindex-btn" class="primary">Run re-index now</button>
-      <span style="color:var(--text-dim); margin-left:10px;">Runs in the background; refresh this tab to see progress.</span>
+      <span style="color:var(--text-dim); margin-left:10px;">Add manuals to the shared Google Drive folder first, then run this. Runs in the background; refresh this tab to see progress.</span>
     </div>
     <table class="admin-table">
       <thead><tr><th>Run</th><th>Started</th><th>Finished</th><th>Status</th><th>Event counts</th><th></th></tr></thead>
@@ -244,19 +242,6 @@ function renderFeedback() {
         <tr><td>${esc(u.created_at)}</td><td>${esc(u.question || "—")}</td></tr>
       `).join("") || `<tr><td colspan="2">No unanswered questions logged.</td></tr>`}</tbody>
     </table>
-  `;
-}
-
-// --- Upload ---
-
-function renderUpload() {
-  return `
-    <h1>Upload a manual</h1>
-    <form id="upload-form" class="edit-form" style="max-width:500px;">
-      <input type="file" name="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.indd" required />
-      <div><button type="submit" class="primary">Upload &amp; queue for ingestion</button></div>
-      <div id="upload-status" style="color:var(--text-dim);"></div>
-    </form>
   `;
 }
 
@@ -335,24 +320,6 @@ function wireTabEvents() {
       }),
     });
     render();
-  });
-
-  const uploadForm = document.getElementById("upload-form");
-  if (uploadForm) uploadForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const file = uploadForm.querySelector('input[type="file"]').files[0];
-    if (!file) return;
-    const fd = new FormData();
-    fd.append("file", file);
-    const statusEl = document.getElementById("upload-status");
-    statusEl.textContent = "Uploading…";
-    try {
-      const resp = await fetch("/api/admin/documents/upload", { method: "POST", credentials: "include", body: fd });
-      if (!resp.ok) throw new Error((await resp.json()).detail || "Upload failed");
-      statusEl.textContent = "Uploaded — ingestion started in the background.";
-    } catch (err) {
-      statusEl.textContent = "Error: " + err.message;
-    }
   });
 }
 

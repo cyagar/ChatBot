@@ -1,22 +1,14 @@
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.auth.deps import CurrentUser, require_admin
-from app.config import get_settings
 from app.db import get_conn
 from app.ingestion.pipeline import _INGEST_LOCK, ingest_all
 from app.retrieval.search import hybrid_search
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-
-ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".indd"}
-MAX_UPLOAD_BYTES = 150 * 1024 * 1024
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\- ()&,]")
 
 
 # ---------------------------------------------------------------------------
@@ -189,56 +181,12 @@ def deactivate_document(document_id: int, reason: str = "Deactivated by administ
 
 
 # ---------------------------------------------------------------------------
-# Upload + re-index
+# Re-index
 # ---------------------------------------------------------------------------
-
-@router.post("/documents/upload", status_code=status.HTTP_202_ACCEPTED)
-async def upload_document(
-    file: UploadFile,
-    background_tasks: BackgroundTasks,
-    admin: CurrentUser = Depends(require_admin),
-):
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in ALLOWED_UPLOAD_EXTENSIONS:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file extension '{ext}'. Allowed: {sorted(ALLOWED_UPLOAD_EXTENSIONS)}",
-        )
-
-    safe_name = _SAFE_NAME_RE.sub("_", Path(file.filename).name)
-    settings = get_settings()
-    dest_dir = settings.local_manuals_dir_resolved
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / safe_name
-
-    size = 0
-    with open(dest, "wb") as out:
-        while chunk := await file.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_UPLOAD_BYTES:
-                out.close()
-                dest.unlink(missing_ok=True)
-                raise HTTPException(
-                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=f"File exceeds {MAX_UPLOAD_BYTES // (1024*1024)}MB limit.",
-                )
-            out.write(chunk)
-
-    # _INGEST_LOCK is checked here, not inside the background task -- ingest_all()
-    # raises RuntimeError if it can't acquire the lock, and a background task's
-    # exception is invisible to the caller (the 202 response is already sent).
-    # Telling the admin a run started when it didn't is worse than a 409
-    # (independent review follow-up: don't let a lying success response mask a
-    # skipped re-index).
-    if _INGEST_LOCK.locked():
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail="An ingestion run is already in progress. The uploaded file is saved "
-            "and will be picked up by that run or the next re-index.",
-        )
-    background_tasks.add_task(ingest_all)
-    return {"ok": True, "stored_as": safe_name, "detail": "Uploaded; ingestion started in the background."}
-
+# Direct file upload was removed: ingestion is Drive-only now (add a manual to
+# the shared Drive folder, then trigger a re-index below) so there is exactly
+# one place manuals live, not a local upload folder that could drift out of
+# sync with Drive.
 
 @router.post("/ingestion/reindex", status_code=status.HTTP_202_ACCEPTED)
 def trigger_reindex(background_tasks: BackgroundTasks, admin: CurrentUser = Depends(require_admin)):

@@ -84,25 +84,18 @@ def test_deactivating_already_deactivated_document_404s(test_env):
     assert resp.status_code == 404
 
 
-def test_upload_rejects_disallowed_extension(test_env):
+def test_direct_upload_endpoint_removed(test_env):
+    """Ingestion is Drive-only now -- manuals go in the shared Drive folder,
+    not through a local upload endpoint that could drift out of sync with it.
+    405, not 404: PATCH /documents/{document_id} structurally matches the same
+    path shape ("upload" parses as the path param), so Starlette reports
+    method-not-allowed for POST rather than falling through to a 404."""
     _register_admin()
     resp = client.post(
         "/api/admin/documents/upload",
-        files={"file": ("malicious.exe", b"not a real exe", "application/octet-stream")},
+        files={"file": ("manual.pdf", b"%PDF-1.4 fake pdf bytes", "application/pdf")},
     )
-    assert resp.status_code == 400
-
-
-def test_upload_sanitizes_path_traversal_filename(test_env):
-    _register_admin()
-    resp = client.post(
-        "/api/admin/documents/upload",
-        files={"file": ("../../evil.pdf", b"%PDF-1.4 fake pdf bytes", "application/pdf")},
-    )
-    assert resp.status_code == 202
-    stored_as = resp.json()["stored_as"]
-    assert ".." not in stored_as
-    assert "/" not in stored_as and "\\" not in stored_as
+    assert resp.status_code == 405
 
 
 def test_query_test_endpoint_requires_admin(test_env):

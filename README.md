@@ -39,8 +39,10 @@ Edit `backend/.env`:
   generated, synthesized answers).
 - `TESSERACT_CMD` — set if you installed Tesseract and want scanned pages
   indexed.
-- `LOCAL_MANUALS_DIR` — where the ingestion pipeline looks for source
-  documents (defaults to `../data/manuals_incoming`).
+- `DOCUMENT_SOURCE` — `google_drive` in production (see below) or
+  `local_directory` for local dev without Drive access (reads from
+  `LOCAL_MANUALS_DIR`, default `../data/manuals_incoming`; used by the test
+  suite via synthetic fixtures, never real manuals).
 
 A `SECRET_KEY` is auto-generated into `.env` on first setup in this repo's
 history; if you're starting fresh, put any random 64-character string there —
@@ -48,8 +50,20 @@ history; if you're starting fresh, put any random 64-character string there —
 
 ## Indexing manuals
 
-Drop PDF/DOC/DOCX/JPG/PNG files into `data/manuals_incoming/` (or wherever
-`LOCAL_MANUALS_DIR` points), then from `backend/`:
+Manuals live in a shared Google Drive folder — that's the single source of
+truth; there is no local upload path or local manuals folder in production
+(one place for the corpus to live means it can't drift out of sync with
+itself). To point a deployment at Drive, set in `.env`:
+
+- `DOCUMENT_SOURCE=google_drive`
+- `GOOGLE_DRIVE_FOLDER_ID` — the ID from the folder's URL
+  (`drive.google.com/drive/folders/<THIS_PART>`)
+- `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` — path to a downloaded service-account
+  key file (never the key's contents inline in `.env`). Share the target
+  folder with that service account's `client_email` (Viewer is enough).
+
+Then, whenever manuals are added or changed in Drive, trigger a re-index —
+either the admin UI (`/admin` → "Ingestion reports" → "Run re-index now") or:
 
 ```bash
 python scripts/ingest.py
@@ -122,9 +136,9 @@ Two things to back up, both under `data/`:
   stopped; for a live backup use `sqlite3 app.db ".backup backup.db"`.
 - `data/object_storage/` — the stored original manual files.
 
-`data/manuals_incoming/` is the ingestion *inbox*; it doesn't need backing up
-once files are indexed (they're copied into `object_storage`), but keeping it
-costs little and lets you re-run ingestion from scratch if needed.
+`data/gdrive_cache/` is a local download cache keyed by Drive file ID, not a
+source of record — it doesn't need backing up (the manuals live in Drive;
+this is just so a repeat listing doesn't re-download unchanged files).
 
 ## Deployment
 
@@ -152,17 +166,23 @@ From `/admin`:
   passages that would be handed to the answer generator, before generation.
 - **Feedback & gaps** — technician feedback and frequently unanswered
   questions (manual-coverage gap signal).
-- **Upload manual** — add a new manual; ingestion runs automatically in the
-  background afterward.
 
-## Roadmap note: Google Drive as the production document source
+There is no in-app upload: add a manual to the shared Drive folder, then use
+"Run re-index now" above.
 
-The ZIP used to seed this corpus was a one-time snapshot. Production intent is
-a Google Drive folder that's regularly updated with new manuals. The ingestion
-pipeline is already built around a `DocumentSource` interface
-(`app/ingestion/sources.py`) specifically so this is a drop-in
-addition later: implement a `GoogleDriveSource` (list via `files.list` scoped
-to a folder id, fetch via `files.get` media download, detect changes via
-`changes.list` for incremental re-sync) and register it in
-`get_document_source()` — nothing in extraction, dedup, metadata, chunking, or
-retrieval needs to change.
+## Google Drive as the document source
+
+`GoogleDriveSource` (`app/ingestion/sources.py`) lists a shared folder via a
+service account, downloads each file into `data/gdrive_cache/` keyed by Drive
+file ID, and hashes the cached bytes (Drive only exposes an md5 checksum;
+the rest of the pipeline assumes real SHA-256 throughout). No
+`changes.list`/page-token incremental sync -- a full listing every re-index
+is cheap at this corpus size, and the existing sha256 skip-if-unchanged logic
+already makes repeat listings idempotent. Ingestion stays manual-trigger
+(admin "re-index now"), not scheduled -- add files to Drive, then trigger a
+re-index whenever you're ready.
+
+`LocalDirectorySource` still exists and is what the test suite uses (pointed
+at synthetic tmp-directory fixtures, never real manuals) so the ingestion
+pipeline can be tested without live Drive access. It's not used for any real
+corpus in this deployment.
