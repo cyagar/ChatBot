@@ -23,10 +23,19 @@ REQUEST_TIMEOUT_SECONDS = 30
 
 _JSON_SHAPE_INSTRUCTION = (
     "Respond in this exact JSON shape (no markdown fence): "
-    '{"answer": "...", "is_no_answer": false, "conflict_note": null, '
-    '"safety_warnings": ["..."], "cited_excerpt_numbers": [1,2]}. '
-    'cited_excerpt_numbers must reference only the excerpt numbers shown above, '
-    "and must be non-empty unless is_no_answer is true."
+    '{"is_no_answer": false, "no_answer_explanation": null, '
+    '"claims": [{"text": "...", "cited_excerpt_numbers": [1]}], '
+    '"steps": [{"text": "...", "cited_excerpt_numbers": [1]}], '
+    '"warnings": [{"text": "...", "cited_excerpt_numbers": [3]}]}. '
+    "If the excerpts don't support an answer, set is_no_answer to true and put your "
+    "explanation in no_answer_explanation; leave claims/steps/warnings empty. "
+    "Otherwise leave no_answer_explanation null and put every material fact in its own "
+    "claims entry, every repair/check action in its own steps entry, and every warning "
+    "(quoted verbatim from its excerpt) in its own warnings entry -- each entry's "
+    "cited_excerpt_numbers must be a non-empty list referencing only the excerpt numbers "
+    "shown above, and must be the excerpt(s) that actually contain that entry's number(s) "
+    "or wording, not just the general topic. Do not include a conflict_note field -- "
+    "revision conflicts are detected separately from excerpt metadata."
 )
 
 
@@ -78,10 +87,13 @@ class AnthropicProvider(AIProvider):
             {
                 "role": "user",
                 "content": (
-                    "That response did not match the required JSON shape, or claimed an "
-                    "answer without citing any of the numbered excerpts. Reply again with "
-                    "ONLY valid JSON in the exact shape requested, citing real excerpt "
-                    "numbers, or set is_no_answer to true if the excerpts don't support an answer."
+                    "That response did not match the required JSON shape, cited an excerpt "
+                    "number that doesn't exist, or included a claim/step/warning whose number, "
+                    "identifier, or wording is not actually present verbatim in the excerpt(s) "
+                    "it cited. Reply again with ONLY valid JSON in the exact shape requested, "
+                    "double-checking that every number and every warning you write is copied "
+                    "exactly from its cited excerpt, or set is_no_answer to true if the "
+                    "excerpts don't support an answer."
                 ),
             },
         ]

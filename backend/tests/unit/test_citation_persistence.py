@@ -33,17 +33,22 @@ def _passage(chunk_id: int, document_id: int, content: str) -> RetrievedChunk:
 
 
 def test_parse_and_validate_rejects_unsupported_answer_instead_of_citing_everything():
-    """The single most safety-critical branch: no valid citations and no
+    """The single most safety-critical branch: no claims/steps and no
     is_no_answer flag must return None, forcing the caller to retry/fall back
     -- never silently mark an unsupported answer as fully cited."""
     passages = [_passage(1, 1, "excerpt one"), _passage(2, 1, "excerpt two")]
-    raw = json.dumps({"answer": "Some confident-sounding claim.", "cited_excerpt_numbers": []})
+    raw = json.dumps({"is_no_answer": False, "claims": [], "steps": [], "warnings": []})
     assert parse_and_validate(raw, passages, "test") is None
 
 
 def test_parse_and_validate_keeps_only_the_cited_subset():
     passages = [_passage(i, 1, f"excerpt {i}") for i in range(1, 7)]
-    raw = json.dumps({"answer": "Answer citing two of six.", "cited_excerpt_numbers": [2, 5]})
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Two of the six retrieved excerpts support this.", "cited_excerpt_numbers": [2, 5]}],
+        "steps": [],
+        "warnings": [],
+    })
     result = parse_and_validate(raw, passages, "test")
     assert result is not None
     assert [c.chunk_id for c in result.citations] == [2, 5]
@@ -58,8 +63,10 @@ class _SubsetCitingProvider(AIProvider):
 
     def generate(self, question, machine_label, passages, history=None):
         raw = json.dumps({
-            "answer": "Two of the six retrieved excerpts support this.",
-            "cited_excerpt_numbers": [2, 5],
+            "is_no_answer": False,
+            "claims": [{"text": "Two of the six retrieved excerpts support this.", "cited_excerpt_numbers": [2, 5]}],
+            "steps": [],
+            "warnings": [],
         })
         result = parse_and_validate(raw, passages, self.name)
         assert result is not None

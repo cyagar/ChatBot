@@ -132,9 +132,26 @@ behind `AI_PROVIDER` in `.env`:
   text as data, not instructions, to resist prompt injection embedded in a
   manual page; say so plainly when the excerpts don't support an answer) and
   parse a structured JSON response back into the same `GeneratedAnswer` shape.
-  **Not exercised end-to-end in this build** — no API key was available in
-  this environment. The retrieval layer underneath them is fully tested; only
-  the generation step is unverified. See `docs/PRODUCTION_READINESS.md`.
+  The JSON contract requires the answer as separate `claims`/`steps`/
+  `warnings` entries, each with its own citation, rather than one free-text
+  answer with a shared citation list — `parse_and_validate`
+  (`app/providers/base.py`) checks that every number/identifier in a claim or
+  step actually appears in its cited excerpt and that every warning is
+  reproduced verbatim from its cited excerpt, rejecting the whole response
+  (triggering a repair-retry, then an explicit "could not verify" fallback)
+  if not. Revision-conflict notes are never taken from the model at all —
+  they're computed deterministically from the cited passages' own
+  document/revision metadata (`detect_conflict`, shared with
+  `local_extractive`), so an invented conflict is structurally impossible.
+  This closes the gap an independent follow-up review found: the previous
+  validation only checked that cited excerpt *numbers* existed, not that the
+  claims attributed to them were actually supported (P0-7) — see
+  `docs/PRODUCTION_READINESS.md` for the adversarial tests and live
+  verification. **Not exercised in the automated test suite** — `pytest`
+  forces `AI_PROVIDER=local_extractive` so it never makes a billed API call;
+  the claim-validation logic itself is unit-tested directly, and was
+  additionally live-verified once against the real, currently-deployed
+  `AI_PROVIDER=anthropic` (see `docs/PRODUCTION_READINESS.md`).
 
 ## Frontend
 

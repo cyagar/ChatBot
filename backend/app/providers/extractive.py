@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-from app.providers.base import AIProvider, Citation, GeneratedAnswer
+from app.providers.base import AIProvider, Citation, GeneratedAnswer, detect_conflict
 
 WARNING_RE = re.compile(r"^(WARNING|CAUTION|DANGER|NOTICE|IMPORTANT)\b.*", re.IGNORECASE | re.MULTILINE)
 
@@ -177,7 +177,7 @@ class ExtractiveProvider(AIProvider):
                 lines.append(_excerpt(p.content, 400))
 
         warnings = self._collect_warnings(passages)
-        conflict = self._detect_conflict(passages)
+        conflict = detect_conflict(passages)
 
         # citations[0] must be `top` -- the passage the answer text actually
         # quotes -- not just passages[0], which can differ (see above).
@@ -202,28 +202,6 @@ class ExtractiveProvider(AIProvider):
                 if len(text) > 15 and text not in found:
                     found.append(text[:300])
         return found[:5]
-
-    @staticmethod
-    def _detect_conflict(passages) -> str | None:
-        """Surface revision conflicts rather than silently preferring one document."""
-        by_doc: dict[int, tuple[str, str | None, bool]] = {}
-        for p in passages:
-            by_doc[p.document_id] = (p.original_filename, p.revision, p.is_current_revision)
-        if len(by_doc) < 2:
-            return None
-        superseded = [v for v in by_doc.values() if not v[2]]
-        if not superseded:
-            return None
-        names = []
-        for filename, revision, current in by_doc.values():
-            label = filename + (f" (rev {revision})" if revision else "")
-            label += " — current" if current else " — superseded"
-            names.append(label)
-        return (
-            "These passages come from more than one revision of the documentation: "
-            + "; ".join(names)
-            + ". Verify which revision matches the machine in front of you."
-        )
 
     @staticmethod
     def _citations(passages) -> list[Citation]:

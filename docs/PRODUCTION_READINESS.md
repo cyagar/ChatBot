@@ -183,6 +183,55 @@ done than it is.
       followed. `pytest` still runs entirely on `local_extractive` regardless
       of `.env` (forced in `tests/conftest.py`), so the test suite never
       makes billed API calls.
+- [x] **Citation validation now checks evidence, not just excerpt-number
+      existence** (independent follow-up review P0-7). Previously
+      `parse_and_validate` (`app/providers/base.py`) only confirmed a
+      provider's `cited_excerpt_numbers` pointed at real excerpts -- it never
+      checked whether the claim attributed to that excerpt was actually
+      supported by its text, which is exactly what let the review's
+      adversarial diagnostic (fabricated part number, fabricated voltage,
+      invented safety warning, invented revision conflict) slip through
+      unnoticed. Fixed: the provider JSON contract now requires the answer
+      as separate `claims`/`steps`/`warnings` entries, each independently
+      cited (not one citation list for a whole paragraph). Every claim/step
+      is checked for material tokens (numbers, part numbers, error codes --
+      `_material_tokens`/`_claim_supported`) that must appear verbatim in
+      its own cited excerpt; every warning must be reproduced verbatim from
+      its cited excerpt (`_warning_supported`, only a leading
+      WARNING/CAUTION/DANGER label may be stripped). Any unsupported item
+      fails the whole response, triggering the existing repair-retry /
+      "could not verify" fallback rather than silently dropping just that
+      item. `conflict_note` is no longer something a provider can report at
+      all -- it's computed deterministically from the actually-cited
+      passages' document/revision metadata (`detect_conflict`, shared by
+      `extractive.py` and both generative providers), so an invented
+      conflict is structurally impossible rather than merely validated. The
+      `answer` text shown to the technician is assembled from the validated
+      claims/steps, never taken as free prose from the model. Five
+      adversarial/positive unit tests reproduce the review's diagnostic
+      directly against `parse_and_validate`
+      (`tests/unit/test_claim_validation.py`): fabricated part number,
+      fabricated voltage, invented warning, and invented conflict all
+      correctly rejected; a genuinely-supported multi-claim answer correctly
+      accepted. Also live-verified against the real, currently-deployed
+      `AI_PROVIDER=anthropic` (not just the unit tests, which run on
+      `local_extractive` like the rest of the suite and never call a real
+      model): an honest no-answer response when the corpus didn't contain
+      the asked-about error code, and a correctly-cited, numerically-grounded
+      multi-claim/step answer (citing two different real documents) for a
+      question the corpus does answer -- confirming the stricter validation
+      doesn't regress real answers into constant "could not verify."
+      **Not done:** this is a mechanical support check (numbers/identifiers/
+      verbatim warning text), not semantic entailment -- a claim with no
+      number or identifier in it (e.g. an invented qualitative statement
+      like "do not run the pump dry" with no source excerpt saying that)
+      is not caught, since verifying that would need an actual semantic
+      judge, not regex matching against excerpt text; a claim-level citation
+      UI (showing which excerpt backs which specific sentence, rather than
+      one citation list for the whole answer) is not built -- the API now
+      has the data for it (each `Citation` still corresponds to a specific
+      claim/step/warning internally) but the frontend renders the same flat
+      citation list as before.
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
 
