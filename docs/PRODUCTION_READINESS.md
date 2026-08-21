@@ -80,10 +80,15 @@ done than it is.
       same answer/citations exactly) **using the `local_extractive` provider**,
       which is deterministic and always cites every passage it shows. The
       subset case that concern #7 is actually about — an LLM provider citing
-      2 of 6 retrieved passages, and `is_citation` correctly distinguishing
-      them on reload — is covered by a unit test
-      (`tests/unit/test_citation_persistence.py`), not by this live smoke
-      test; no Anthropic/OpenAI key has been exercised end-to-end this pass.
+      fewer than every retrieved passage, and `is_citation` correctly
+      distinguishing them on reload — is covered by a unit test
+      (`tests/unit/test_citation_persistence.py`).
+      **Update (2026-08-21, second pass):** also now verified live against a
+      real `AI_PROVIDER=anthropic` key — synthesized (non-verbatim) prose,
+      one machine-scoped citation out of the retrieved set, a safety-warning
+      field explicitly noting no warning was present in the excerpts (not
+      inventing one), and an exact reload match on citations/warnings/
+      conflict-note. OpenAI's provider remains unexercised against a live key.
 
 ## Explicitly unverified
 
