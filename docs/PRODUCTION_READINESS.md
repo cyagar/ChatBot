@@ -488,6 +488,35 @@ done than it is.
       cleanly on retry. The old behavior was confirmed first (an
       `executescript` probe left the partial table behind), so the test
       genuinely discriminates rather than passing vacuously.
+      A later pass took the review's "after every simulated
+      statement-boundary failure" more literally: the tests above prove the
+      rollback *mechanism* works using one synthetic multi-statement
+      migration, which doesn't rule out a real migration file containing
+      something that quietly defeats it (a PRAGMA that turns out not to be
+      transactional inside a BEGIN, say). `test_every_real_migration_rolls_back_and_retries_cleanly_on_failure`
+      sweeps every real migration file (0001 through 0007): applies every
+      migration before it for real, breaks its own last statement, confirms
+      the whole thing rolls back with no `schema_migrations` row, then
+      swaps in the real unmodified file and confirms it applies cleanly --
+      that retry is what would actually catch a partial application
+      surviving rollback, since the real `CREATE TABLE`/`ADD COLUMN` would
+      collide with any leftover object. Checked explicitly: 0001_init.sql
+      does contain `PRAGMA foreign_keys = ON;` mid-script, which SQLite
+      documents as a no-op inside a transaction -- harmless only because
+      `_connect()` already sets that PRAGMA outside any migration's
+      transaction, and the sweep confirms 0001 still rolls back and retries
+      cleanly regardless. Verified this sweep genuinely discriminates by
+      temporarily reintroducing an accurate simulation of the original bug
+      (per-statement auto-commit, matching what `executescript()` actually
+      did) into `run_migrations()`: 7 of 12 tests in the file failed,
+      including sweep cases for every multi-statement migration (0001-0005);
+      the two single-statement migrations (0006, 0007) correctly still
+      passed, since a migration with only one statement has no possible
+      "partial" state to leave behind. Reverted immediately after
+      confirming; `git diff` on `app/db.py` shows no residual change. No
+      production code changed by this pass -- test-only strengthening of
+      already-shipped, already-correct behavior, so no Docker rebuild was
+      needed. 199 tests pass (was 192 entering this item).
 - [x] **A single oversized table row no longer bypasses the chunk limit**
       (P1-13). The row-window arithmetic used `max(1, ...)`, guaranteeing at
       least one row per window -- so a row larger than the whole budget still

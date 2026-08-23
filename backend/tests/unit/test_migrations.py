@@ -8,12 +8,15 @@ These tests prove each migration is now all-or-nothing and retries cleanly.
 """
 from __future__ import annotations
 
+import shutil
 import sqlite3
 
 import pytest
 
 from app import db as db_module
 from app.db import get_conn, run_migrations, split_sql_statements
+
+_REAL_MIGRATION_PATHS = sorted(db_module.MIGRATIONS_DIR.glob("*.sql"))
 
 
 def _table_exists(conn, name: str) -> bool:
@@ -102,3 +105,70 @@ def test_migration_applies_cleanly_on_retry_after_being_fixed(test_env, tmp_path
 def test_rerunning_migrations_is_idempotent(test_env):
     """test_env already ran migrations; a second call must apply nothing."""
     assert run_migrations() == []
+
+
+def _fresh_unmigrated_db(tmp_path, monkeypatch):
+    """Unlike test_env, does NOT call run_migrations() first -- the sweep
+    below needs a DB that has never seen ANY migration, so the real version
+    names (e.g. '0001_init') aren't already in schema_migrations. If they
+    were, run_migrations() would just skip them as already-applied and every
+    case below would pass without ever exercising the rollback path."""
+    db_dir = tmp_path / "db"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("DB_PATH", str(db_dir / "sweep.db"))
+    monkeypatch.setenv("SECRET_KEY", "test-secret-key")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("target_index", range(len(_REAL_MIGRATION_PATHS)))
+def test_every_real_migration_rolls_back_and_retries_cleanly_on_failure(target_index, tmp_path, monkeypatch):
+    """P1-9's own wording: 'retry successfully after every simulated
+    statement-boundary failure.' The tests above prove the rollback
+    MECHANISM works in principle using a synthetic migration; this sweeps
+    every REAL migration file to prove none of them contains a statement
+    that defeats it -- e.g. a PRAGMA that turns out not to be transactional.
+    (0001_init.sql contains `PRAGMA foreign_keys = ON;`, which SQLite's own
+    docs say is a no-op inside a transaction; harmless here only because
+    _connect() already sets it outside any migration's transaction, but
+    that's exactly the kind of thing worth a real assertion rather than a
+    docstring's say-so.)
+
+    For each real migration, every migration BEFORE it is applied for real
+    (so it sees the schema it actually expects), its OWN last statement is
+    replaced with a guaranteed failure, and the whole thing must roll back
+    with no schema_migrations row -- then swapping in the real, unmodified
+    file must apply cleanly. That last step is what actually catches a
+    partial application that survived rollback: the real migration's own
+    CREATE TABLE/ADD COLUMN would collide with any leftover object from the
+    failed attempt."""
+    _fresh_unmigrated_db(tmp_path, monkeypatch)
+
+    target_path = _REAL_MIGRATION_PATHS[target_index]
+    target_stem = target_path.stem
+    real_statements = split_sql_statements(target_path.read_text(encoding="utf-8"))
+
+    mig_dir = tmp_path / "migrations_sweep"
+    mig_dir.mkdir()
+    for path in _REAL_MIGRATION_PATHS[:target_index]:
+        shutil.copy(path, mig_dir / path.name)
+
+    broken_sql = "\n".join(real_statements[:-1]) + (
+        "\nINSERT INTO definitely_not_a_table__p1_9_sweep (x) VALUES (1);\n"
+    )
+    (mig_dir / target_path.name).write_text(broken_sql, encoding="utf-8")
+
+    monkeypatch.setattr(db_module, "MIGRATIONS_DIR", mig_dir)
+
+    with pytest.raises(sqlite3.Error):
+        db_module.run_migrations()
+
+    with get_conn() as conn:
+        recorded = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?", (target_stem,)
+        ).fetchone()
+    assert recorded is None, f"{target_stem} must not be recorded as applied after failing part-way through"
+
+    shutil.copy(target_path, mig_dir / target_path.name)
+    applied = db_module.run_migrations()
+    assert target_stem in applied, f"{target_stem} did not apply cleanly on retry after its own rollback"
