@@ -517,6 +517,65 @@ done than it is.
       and the subsequent GET; the previous test used `sorted()`, which is
       exactly why this went unnoticed. Verified live: all 12 existing
       citation rows in the pilot DB backfilled, none left NULL.
+- [x] **Clarification candidates now persist and survive reload with exact
+      live-versus-reload equality** (P1-7's other half -- the citation-order
+      fix above only ever addressed the dedup/ordering wording, not "persist
+      clarification candidates/pending question"). The live `POST /messages`
+      response for an ambiguous machine mention includes the specific
+      candidate machines found (`clarifying_options`), but that list was
+      never persisted -- only `is_clarifying_question` and the prompt text
+      were. Migration 0007 adds `messages.clarifying_options` (JSON); it's
+      populated at insert time and read back on reload the same way
+      `safety_warnings` already was. `backend/tests/api/test_clarification_persistence.py`
+      (new) proves byte-for-byte equality between the live response and the
+      reloaded message, for both the multi-candidate and zero-candidate
+      cases.
+      An advisor review caught a second, more serious bug entangled with
+      this one: when `clarifying_options` was empty (no persisted candidates
+      to render as tappable buttons), the frontend fell back to a generic
+      "Choose a machine" button that opened the ordinary machine picker --
+      which always calls `POST /api/conversations` and starts a **brand-new
+      conversation**, never `POST /conversations/{id}/machine`. That
+      abandons the pending question in the old, now-orphaned conversation
+      permanently -- not a reload-only bug, reachable live any time a
+      question doesn't name a machine at all (a common case: the app has an
+      explicit "Skip -- I'll say which machine in my question" entry point).
+      Fixed with a `state.pickerMode` flag (`app/web/static/js/app.js`): the
+      clarify fallback's "Choose a machine" button sets `pickerMode =
+      "resume"` before opening the picker; `selectMachine()` checks it and,
+      when resuming, calls `confirmMachine()` (which resumes the pending
+      question via `POST /conversations/{id}/machine`) instead of
+      `startConversation()`.
+      A second advisor pass on that fix caught a shared-tablet cross-user
+      hazard (same threat model as P1-12/concern #21): `pickerMode` is only
+      reset inside `selectMachine()` and the explicit "skip" handler, so a
+      technician who opened the clarify fallback and then signed out
+      mid-flow would leave `pickerMode = "resume"` (and the stale
+      `conversationId`) in place for whoever logs in next on the same
+      tablet -- their first machine pick would silently call
+      `confirmMachine()` against the *previous* technician's conversation.
+      Fixed by resetting `pickerMode`, `conversationId`, `messages`, and
+      `machine` in `logout()`; added defensive resets in the "Change
+      machine" and "New conversation" header handlers too, though tracing
+      showed neither was actually reachable in a stale-resume state.
+      **Verification note:** the backend half (persistence, exact-equality,
+      pending-question resumption) is covered by real API tests and passed.
+      The frontend `pickerMode` wiring has no browser test -- there is no JS
+      test harness in this repo (vanilla JS, no build step) and no browser
+      automation tool available in this environment -- so it was verified by
+      careful code trace of every entry point into the picker screen
+      (`boot()`, `change-machine`, the clarify fallback, `logout()`), not by
+      clicking through it. Said explicitly rather than claiming a browser
+      test that didn't happen.
+      Verified live: rebuilt the container, confirmed `Applied migrations:
+      ['0007_clarifying_options']`, and confirmed all 46 pre-existing
+      message rows in the pilot DB read back `clarifying_options = NULL` ->
+      `[]` through the real `get_messages` code path with no error (no
+      migration backfill needed -- unlike citation_ordinal above, an old
+      clarifying message with no persisted candidates degrading to the
+      generic "Choose a machine" button, which now correctly resumes rather
+      than abandons, is an acceptable historical gap, not a live bug).
+      192 tests pass (was 189 entering this item).
 - [x] **Superseded revisions are excluded from retrieval, not merely
       rank-penalized** (P1-11). `is_current_revision` previously only applied
       a -0.20 rerank boost, so a withdrawn revision could still surface and

@@ -13,6 +13,13 @@ const state = {
   messages: [],
   machineResults: [],
   recentMachines: [],
+  // "new" (default): picking a machine starts a fresh conversation, as from
+  // the login/new-conversation/change-machine entry points. "resume": the
+  // picker was opened from a clarifying message's fallback "Choose a
+  // machine" button (no specific candidates to tap) -- picking a machine
+  // must resume THIS conversation's pending question via confirmMachine
+  // (P1-7/P1-8), not silently abandon it by starting a new one.
+  pickerMode: "new",
   searchQuery: "",
   searchCursor: null, // caret position to restore after a re-render replaces the search <input>
   sending: false,
@@ -96,7 +103,17 @@ async function boot() {
 async function logout() {
   await api("/api/auth/logout", { method: "POST" });
   notifyServiceWorker({ type: "LOGOUT" });
-  state.user = null; state.screen = "auth"; render();
+  state.user = null; state.screen = "auth";
+  // Shared-tablet safety (concern #21/P1-12): without this, a technician who
+  // opened the clarify fallback (pickerMode = "resume") and then signed out
+  // mid-flow would leave the next technician's first machine pick on this
+  // tablet routed through confirmMachine() against the PREVIOUS technician's
+  // conversationId -- a cross-user write, not just a UI glitch.
+  state.pickerMode = "new";
+  state.conversationId = null;
+  state.messages = [];
+  state.machine = null;
+  render();
 }
 
 // --- Auth -----------------------------------------------------------------
@@ -251,13 +268,27 @@ function renderPicker() {
     btn.addEventListener("click", () => selectMachine(parseInt(btn.dataset.machineId, 10)));
   });
 
-  document.getElementById("skip-machine").addEventListener("click", () => startConversation(null));
+  document.getElementById("skip-machine").addEventListener("click", () => {
+    // "Skip" always starts fresh, even in resume mode -- the /machine
+    // endpoint requires a machine_id, so there is no "skip" action to
+    // forward a pending clarification into. Reset the mode so it can't leak
+    // into a later, unrelated picker visit.
+    state.pickerMode = "new";
+    startConversation(null);
+  });
 }
 
 async function selectMachine(machineId) {
   const all = [...state.machineResults, ...state.recentMachines];
-  state.machine = all.find((m) => m.id === machineId) || null;
+  const resuming = state.pickerMode === "resume";
+  state.pickerMode = "new";
   api(`/api/machines/${machineId}/touch`, { method: "POST" }).catch(() => {});
+  if (resuming) {
+    state.screen = "chat";
+    await confirmMachine(machineId);
+    return;
+  }
+  state.machine = all.find((m) => m.id === machineId) || null;
   await startConversation(machineId);
 }
 
@@ -322,9 +353,15 @@ function renderChat() {
   `;
 
   document.getElementById("change-machine").addEventListener("click", () => {
+    // Always the "start fresh" path, never a resume -- defensive reset in
+    // case pickerMode was ever left stale by an earlier interrupted flow.
+    state.pickerMode = "new";
     state.screen = "picker"; state.searchQuery = ""; render();
   });
-  document.getElementById("new-conversation").addEventListener("click", () => startConversation(state.machine?.id ?? null));
+  document.getElementById("new-conversation").addEventListener("click", () => {
+    state.pickerMode = "new";
+    startConversation(state.machine?.id ?? null);
+  });
   document.getElementById("logout-btn").addEventListener("click", logout);
 
   document.getElementById("composer-form").addEventListener("submit", async (e) => {
@@ -470,7 +507,10 @@ function wireMessageActions() {
     });
   });
   root.querySelectorAll(".clarify-pick-btn").forEach((btn) => {
-    btn.addEventListener("click", () => { state.screen = "picker"; state.searchQuery = ""; render(); });
+    btn.addEventListener("click", () => {
+      state.pickerMode = "resume";
+      state.screen = "picker"; state.searchQuery = ""; render();
+    });
   });
   root.querySelectorAll(".retry-btn").forEach((btn) => {
     btn.addEventListener("click", () => {

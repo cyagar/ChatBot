@@ -454,6 +454,13 @@ def _hydrate_message(conn, row) -> MessageOut:
     except (TypeError, ValueError):
         safety_warnings = []
 
+    clarifying_options = []
+    if "clarifying_options" in row.keys() and row["clarifying_options"]:
+        try:
+            clarifying_options = json.loads(row["clarifying_options"])
+        except (TypeError, ValueError):
+            clarifying_options = []
+
     return MessageOut(
         id=row["id"], role=row["role"], content=row["content"],
         is_clarifying_question=bool(row["is_clarifying_question"]),
@@ -462,6 +469,7 @@ def _hydrate_message(conn, row) -> MessageOut:
         citations=citations,
         safety_warnings=safety_warnings,
         conflict_note=row["conflict_note"] if "conflict_note" in row.keys() else None,
+        clarifying_options=clarifying_options,
         created_at=row["created_at"],
     )
 
@@ -472,7 +480,7 @@ def get_messages(conversation_id: int, user: CurrentUser = Depends(get_current_u
         _require_own_conversation(conn, conversation_id, user.id)
         rows = conn.execute(
             "SELECT id, role, content, is_clarifying_question, is_no_answer, "
-            "safety_warnings, conflict_note, answer_status, created_at "
+            "safety_warnings, conflict_note, answer_status, clarifying_options, created_at "
             "FROM messages WHERE conversation_id = ? ORDER BY id",
             (conversation_id,),
         ).fetchall()
@@ -532,9 +540,9 @@ def ask_question(
                     )
                 )
                 cur = conn.execute(
-                    "INSERT INTO messages (conversation_id, role, content, is_clarifying_question) "
-                    "VALUES (?, 'assistant', ?, 1)",
-                    (conversation_id, clarifying_text),
+                    "INSERT INTO messages (conversation_id, role, content, is_clarifying_question, "
+                    "clarifying_options) VALUES (?, 'assistant', ?, 1, ?)",
+                    (conversation_id, clarifying_text, json.dumps(candidates)),
                 )
                 msg_id = cur.lastrowid
                 conn.execute(
