@@ -106,11 +106,72 @@ done than it is.
       (`test_listing_failure_still_produces_a_visible_failed_run`).
       **Not done:** full source-disappearance reconciliation (quarantining a
       document only after a *complete* successful listing shows it's really
-      gone, vs. today's simpler "still-active row is never deactivated by a
-      missing listing entry" -- true today, but not exercised by a dedicated
-      test) and a durable job queue (the run row now always exists, but a
-      process crash mid-run still leaves it stuck at `running` rather than
-      being picked up/resumed by a worker).
+      gone, staged/candidate activation, etc. -- see the review's fuller
+      design for this, lines 191-194 of the follow-up assessment). Today's
+      simpler behavior -- a document is never deactivated just because one
+      listing didn't mention it, since there's no way yet to tell a real
+      removal apart from an outage or a partial listing -- is now covered by
+      a dedicated regression test
+      (`test_document_missing_from_a_later_listing_is_not_deactivated`,
+      added under P1-1). That closes the "not exercised by a dedicated test"
+      gap this entry used to note, but the actual quarantine/staged-activation
+      feature itself remains unbuilt. Also still not done: a durable job
+      queue (the run row now always exists, but a process crash mid-run still
+      leaves it stuck at `running` rather than being picked up/resumed by a
+      worker).
+- [x] **`GoogleDriveSource` now has fake-service contract test coverage**
+      (independent follow-up review P1-1: "the new production source has no
+      automated test coverage" -- previously true; `tests/ingestion` had
+      exactly the P0-1 cache-bug regression tests and nothing broader).
+      `tests/ingestion/test_google_drive_source.py` now also covers: the
+      exact `q`/`fields`/`supportsAllDrives`/`includeItemsFromAllDrives`
+      kwargs sent to `files().list()` (shared-folder support depends on the
+      last two); multi-page listings via `nextPageToken`; subfolders and
+      shortcuts being skipped like Workspace docs (they share the same
+      `application/vnd.google-apps.*` mimeType prefix, so this was already
+      true, just unpinned by a test); and, most importantly, the real
+      `_download()` method itself -- every other test in the file
+      monkeypatches `_download()` away entirely, so its actual
+      streaming/retry/atomic-rename logic had zero coverage. New tests drive
+      it through a fake `MediaIoBaseDownload` (`_ScriptedDownloader`):
+      a successful download leaves no `.dl` temp file behind, a transient
+      failure retries and then succeeds, and exhausting all 3 attempts raises
+      `RuntimeError` naming the file id and leaves no partial file in the
+      cache directory. Two tests close the "errors" and "restart" items
+      explicitly: `test_listing_error_mid_pagination_propagates_and_a_retry_still_converges`
+      proves a page-2 listing failure propagates (so `ingest_all` records a
+      visible failed run) and that a subsequent full listing still converges
+      on the correct file set -- while documenting, not hiding, that the
+      failed attempt's already-downloaded file gets needlessly re-downloaded
+      next time, since `_save_manifest()` only runs after the whole page loop
+      completes; `test_fresh_instance_after_restart_reuses_the_persisted_manifest`
+      constructs a brand-new `GoogleDriveSource` over the same `cache_dir`
+      (simulating a process restart) and confirms it reads the persisted
+      manifest and re-downloads nothing. A separately gated, read-only
+      sandbox integration test
+      (`tests/ingestion/test_google_drive_live_sandbox.py`, `live_drive`
+      marker) exists for exercising a real Drive folder by hand; it is
+      skipped unconditionally unless `TMA_LIVE_DRIVE_TEST=1` is set together
+      with its own `TMA_LIVE_DRIVE_TEST_FOLDER_ID`/
+      `TMA_LIVE_DRIVE_TEST_CREDENTIALS_PATH` -- deliberately *not* the app's
+      own `GOOGLE_DRIVE_FOLDER_ID`/`GOOGLE_SERVICE_ACCOUNT_JSON_PATH`
+      settings, so this test can never reach the real production folder just
+      because a developer's `.env` happens to be configured for it. Verified:
+      a full `pytest tests/` run shows it `SKIPPED`, not silently absent from
+      collection, and the rest of the suite makes no network calls (155
+      passed, 1 skipped).
+      **Not done:** export-behavior tests for Google Workspace documents,
+      because there is no export behavior yet to test -- Workspace files are
+      currently skipped outright rather than fetched via `export_media`, and
+      deciding whether that should change is P1-3's scope ("file-type,
+      folder, and download-capability policy is undefined"), not this item's.
+      `fetch()` itself is exercised by these tests since it's part of the
+      public `DocumentSource` contract, but it currently has no production
+      caller -- `pipeline.py` uses `SourceFile.local_path` directly -- so an
+      orphaned `manifest.json` entry for a file that later disappears from
+      Drive (the manifest is only ever added to, never pruned) is a latent
+      gap noted here, not fixed, since nothing in the running app can reach
+      it today.
 - [x] **Registration is closed and documents require explicit approval**
       (independent follow-up review P0-5, P0-6). Public self-registration is
       gone: `POST /api/auth/register` now requires a valid, unexpired,

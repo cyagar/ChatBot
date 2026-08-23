@@ -134,6 +134,41 @@ def test_relocated_corpus_root_does_not_create_a_duplicate_row(test_env, make_pd
     assert active_count == 1, "relocating the corpus root must not create a duplicate document row"
 
 
+def test_document_missing_from_a_later_listing_is_not_deactivated(test_env, make_pdf, manuals_dir):
+    """Independent follow-up review P0-2/P1-1: the pipeline iterates whatever
+    files a listing happens to return but has no reconciliation step for
+    active rows a listing doesn't mention -- documented in
+    PRODUCTION_READINESS.md as 'true today, but not exercised by a dedicated
+    test' until this one. A manual temporarily absent from a source listing
+    (Drive outage, a partial page, a file briefly unshared) must not be
+    deactivated just because one run's listing didn't include it -- there is
+    no 'complete, verified listing' concept implemented to safely tell that
+    apart from a real removal, so the current, deliberately conservative
+    behavior is: never deactivate on absence alone."""
+    pdf = make_pdf(["Content about the fryer oil filtration schedule."], name="fryer.pdf")
+    shutil.copy(pdf, manuals_dir / pdf.name)
+    source = FakeDirectorySource(manuals_dir)
+    first = ingest_all(source=source, embed=False)
+    assert first.counts() == {"indexed": 1}
+
+    from app.db import get_conn
+    with get_conn() as conn:
+        original_id = conn.execute("SELECT id FROM documents WHERE deactivated_at IS NULL").fetchone()["id"]
+
+    (manuals_dir / pdf.name).unlink()  # the file disappears from the next listing
+    second = ingest_all(source=source, embed=False)
+    assert second.counts() == {}, "an empty listing must not itself produce any outcome for the missing file"
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, deactivated_at FROM documents WHERE id = ?", (original_id,)
+        ).fetchone()
+    assert row["deactivated_at"] is None, (
+        "a document absent from one listing must stay active -- there is no safe way yet to "
+        "distinguish a real removal from an outage or a partial listing"
+    )
+
+
 def test_failed_replacement_does_not_retire_the_still_good_active_document(test_env, make_pdf, manuals_dir):
     """Independent follow-up review P0-2: the active row used to be deactivated
     the moment content changed at a source_ref, before the replacement was
