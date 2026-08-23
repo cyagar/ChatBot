@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -31,7 +33,23 @@ async def lifespan(_app: FastAPI):
     applied = run_migrations()
     if applied:
         print(f"Applied migrations: {applied}")
+
+    # Automated corpus freshness (P1-4): only started when Drive is actually
+    # configured -- get_document_source() itself would raise RuntimeError
+    # otherwise, and this avoids that error firing on every tick in any
+    # environment (including the test suite) that leaves Drive unconfigured.
+    sync_task: asyncio.Task | None = None
+    from app.ingestion import scheduler as _scheduler
+
+    if _scheduler.is_enabled():
+        sync_task = asyncio.create_task(_scheduler.run_scheduled_sync_loop())
+
     yield
+
+    if sync_task is not None:
+        sync_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sync_task
 
 
 app = FastAPI(title="Technician Manual Assistant", version="0.1.0", lifespan=lifespan)

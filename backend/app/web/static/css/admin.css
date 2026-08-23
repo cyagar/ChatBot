@@ -1,3 +1,6 @@
+.banner.ok { background: var(--surface); border-color: var(--border); color: var(--text-dim); }
+.banner { margin-bottom: 16px; }
+
 .admin-shell { display: flex; min-height: 100vh; }
 
 .admin-nav {

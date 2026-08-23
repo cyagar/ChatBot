@@ -33,6 +33,29 @@ def test_full_run_indexes_every_file_exactly_once(test_env, make_pdf, manuals_di
     assert counts.get("indexed", 0) == len(list(manuals_dir.glob("*.pdf")))
 
 
+def test_ingest_all_records_which_trigger_started_the_run(test_env, make_pdf, manuals_dir):
+    """P1-4: distinguishes a scheduler-started run from an admin's manual
+    'Run re-index now' click, so the admin UI can show the scheduler is
+    actually running rather than taking it on faith. Default stays 'manual'
+    -- callers that don't pass trigger explicitly (e.g. the reindex endpoint)
+    must not be silently miscategorized as 'scheduled'."""
+    pdf = make_pdf(["Content about the espresso group head gasket."], name="espresso.pdf")
+    shutil.copy(pdf, manuals_dir / pdf.name)
+    source = FakeDirectorySource(manuals_dir)
+
+    manual_report = ingest_all(source=source, embed=False)
+    scheduled_report = ingest_all(source=source, embed=False, trigger="scheduled")
+
+    from app.db import get_conn
+    with get_conn() as conn:
+        triggers = {
+            r["id"]: r["trigger"]
+            for r in conn.execute("SELECT id, trigger FROM ingestion_runs ORDER BY id").fetchall()
+        }
+    assert triggers[manual_report.run_id] == "manual"
+    assert triggers[scheduled_report.run_id] == "scheduled"
+
+
 def test_second_run_skips_unchanged_files(test_env, make_pdf, manuals_dir):
     pdf = make_pdf(["Some manual content about replacing the inlet valve."])
     shutil.copy(pdf, manuals_dir / pdf.name)

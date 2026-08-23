@@ -218,6 +218,56 @@ done than it is.
       remain unimplemented by design (see above) -- if either policy ever
       needs to change, that decision and its tests belong here, not folded
       into an unrelated change later.
+- [x] **Corpus freshness no longer depends solely on an admin remembering to
+      reindex** (independent follow-up review P1-4). A push-triggered sync
+      (a Drive `changes.watch` webhook) would need a publicly reachable
+      HTTPS endpoint and channel-renewal bookkeeping this single-instance
+      pilot deployment doesn't have; a time-based background loop
+      (`app/ingestion/scheduler.py`) is the proportionate mechanism instead
+      -- it calls the exact same `ingest_all()` path "Run re-index now"
+      already uses, including its existing per-file isolation, idempotent
+      skip-if-unchanged logic, and `_INGEST_LOCK`. Runs every
+      `INGESTION_SYNC_INTERVAL_MINUTES` (default 360 = 6h); manual
+      triggering remains as an override, not the only freshness mechanism,
+      per the review's own wording. The loop is only started when
+      `GOOGLE_DRIVE_FOLDER_ID` is actually configured (`scheduler.is_enabled()`,
+      shared by `main.py`'s startup gate and the status endpoint below so
+      the two can never disagree) and is cancelled cleanly on shutdown.
+      Deliberately sleeps a full interval BEFORE its first sync rather than
+      syncing immediately on startup: this loop starts on every container
+      restart, and an immediate sync would turn every restart -- including a
+      crash-loop -- into an unconditional live Drive listing/download. This
+      was an explicit user decision made mid-implementation after a review
+      caught the original immediate-sync design; the tradeoff is at most one
+      interval of extra staleness after a fresh deploy, in exchange for never
+      hammering Drive on restart.
+      A new `ingestion_runs.trigger` column (`'manual' | 'scheduled'`,
+      migration 0006) records which mechanism started each run, and
+      `GET /api/admin/ingestion/status` gives the admin UI the "visible
+      last-success timestamp/source snapshot" and stale-corpus alert the
+      review asked for: last successful sync time/run/trigger, hours since
+      then, current active document count, and `is_stale` computed against
+      a configurable operational SLA (`INGESTION_STALENESS_THRESHOLD_HOURS`,
+      default 48h). The "Ingestion reports" admin tab now shows this as a
+      banner -- red when stale, with the reason, otherwise a quiet summary
+      line. `completed_with_errors` runs count as a freshness success (Drive
+      *was* reconciled, even if individual files failed); only a run that
+      never finished (`status='failed'`) does not.
+      Verified live against the pilot deployment (which has Drive genuinely
+      configured, unlike every other environment in this project so far):
+      rebuilt the container, confirmed `Applied migrations:
+      ['0006_ingestion_trigger']`, confirmed `scheduler.is_enabled()` returns
+      `True` and the new settings load with their documented defaults, and
+      confirmed the sleep-first design held -- no new `ingestion_runs` row
+      and no change to the 71 active documents appeared right after restart,
+      proving the scheduler didn't fire an unplanned sync against the real
+      corpus during verification.
+      **Not done:** the scheduler is in-process -- it dies with the
+      container and has no restart recovery of its own, the same durable-job
+      gap P0-3's entry above already names for manual runs. "Automated sync"
+      here means "doesn't depend on a human remembering," not "survives a
+      crash and resumes" -- if the container is down, no sync happens until
+      it's back up, same as manual triggering would be.
 - [x] **Registration is closed and documents require explicit approval**
       (independent follow-up review P0-5, P0-6). Public self-registration is
       gone: `POST /api/auth/register` now requires a valid, unexpired,

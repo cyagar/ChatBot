@@ -114,28 +114,33 @@ def _document_full_text(conn, document_id: int) -> str:
     return "\n".join(r["content"] for r in rows)
 
 
-def ingest_all(source: DocumentSource | None = None, embed: bool = True) -> IngestionReport:
+def ingest_all(
+    source: DocumentSource | None = None, embed: bool = True, trigger: str = "manual"
+) -> IngestionReport:
     if not _INGEST_LOCK.acquire(blocking=False):
         raise RuntimeError(
             "An ingestion run is already in progress. Wait for it to finish before starting another."
         )
     try:
-        return _ingest_all_locked(source, embed)
+        return _ingest_all_locked(source, embed, trigger)
     finally:
         _INGEST_LOCK.release()
 
 
-def _ingest_all_locked(source: DocumentSource | None, embed: bool) -> IngestionReport:
+def _ingest_all_locked(source: DocumentSource | None, embed: bool, trigger: str) -> IngestionReport:
     settings = get_settings()
     source = source or get_document_source(settings)
 
     # Run row created BEFORE the source is listed (independent review P0-3):
     # listing a Google Drive folder does live auth + API calls and can fail
     # (bad credentials, revoked access, quota, network). If that happens
-    # before any run row exists, the trigger returns 202 and the admin UI
-    # shows nothing -- no evidence an ingestion was even attempted.
+    # before any run row exists, the reindex endpoint returns 202 and the
+    # admin UI shows nothing -- no evidence an ingestion was even attempted.
+    # `trigger` ('manual' | 'scheduled', P1-4) records who started this run,
+    # so an admin can see the scheduler is actually running rather than
+    # taking it on faith.
     with get_conn() as conn:
-        cur = conn.execute("INSERT INTO ingestion_runs (status) VALUES ('running')")
+        cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', ?)", (trigger,))
         run_id = cur.lastrowid
 
     report = IngestionReport(run_id=run_id)

@@ -11,6 +11,7 @@ from app.auth.security import generate_invitation_token
 from app.config import get_settings
 from app.db import get_conn
 from app.ingestion.pipeline import _INGEST_LOCK, ingest_all
+from app.ingestion.scheduler import is_enabled as scheduler_is_enabled
 from app.retrieval.search import hybrid_search
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -471,7 +472,8 @@ def trigger_reindex(background_tasks: BackgroundTasks, admin: CurrentUser = Depe
 def list_ingestion_runs(admin: CurrentUser = Depends(require_admin), limit: int = 10):
     with get_conn() as conn:
         runs = conn.execute(
-            "SELECT id, started_at, finished_at, status FROM ingestion_runs ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT id, started_at, finished_at, status, trigger FROM ingestion_runs ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         out = []
         for r in runs:
@@ -480,9 +482,57 @@ def list_ingestion_runs(admin: CurrentUser = Depends(require_admin), limit: int 
             ).fetchall()
             out.append({
                 "id": r["id"], "started_at": r["started_at"], "finished_at": r["finished_at"],
-                "status": r["status"], "counts": {c["event"]: c["c"] for c in counts},
+                "status": r["status"], "trigger": r["trigger"], "counts": {c["event"]: c["c"] for c in counts},
             })
     return out
+
+
+@router.get("/ingestion/status")
+def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
+    """P1-4: "visible last-success timestamp/source snapshot" and a
+    stale-corpus alert against the configured operational SLA, so freshness
+    doesn't depend on an admin remembering to check the run list and do the
+    staleness math themselves."""
+    settings = get_settings()
+    with get_conn() as conn:
+        # completed_with_errors still means Drive was successfully listed and
+        # reconciled -- individual file failures don't mean the sync itself
+        # failed. Only a run that never finished (status='failed', e.g. an
+        # auth/quota error before any file was even seen) is not a success.
+        last_success = conn.execute(
+            "SELECT id, finished_at, trigger FROM ingestion_runs "
+            "WHERE status IN ('completed', 'completed_with_errors') "
+            "ORDER BY finished_at DESC LIMIT 1"
+        ).fetchone()
+        last_attempt = conn.execute(
+            "SELECT id, started_at, finished_at, status, trigger FROM ingestion_runs "
+            "ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        active_document_count = conn.execute(
+            "SELECT COUNT(*) c FROM documents WHERE deactivated_at IS NULL"
+        ).fetchone()["c"]
+
+    hours_since_last_success = None
+    is_stale = True
+    if last_success is not None:
+        finished = datetime.fromisoformat(last_success["finished_at"]).replace(tzinfo=timezone.utc)
+        hours_since_last_success = (datetime.now(timezone.utc) - finished).total_seconds() / 3600
+        is_stale = hours_since_last_success > settings.ingestion_staleness_threshold_hours
+
+    return {
+        "last_success_run_id": last_success["id"] if last_success else None,
+        "last_success_at": last_success["finished_at"] if last_success else None,
+        "last_success_trigger": last_success["trigger"] if last_success else None,
+        "hours_since_last_success": hours_since_last_success,
+        "last_attempt_run_id": last_attempt["id"] if last_attempt else None,
+        "last_attempt_started_at": last_attempt["started_at"] if last_attempt else None,
+        "last_attempt_status": last_attempt["status"] if last_attempt else None,
+        "active_document_count": active_document_count,
+        "sync_interval_minutes": settings.ingestion_sync_interval_minutes,
+        "scheduler_enabled": scheduler_is_enabled(settings),
+        "staleness_threshold_hours": settings.ingestion_staleness_threshold_hours,
+        "is_stale": is_stale,
+    }
 
 
 @router.get("/ingestion/runs/{run_id}/report")

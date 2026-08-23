@@ -33,6 +33,18 @@ class Settings(BaseSettings):
     # been removed -- see GoogleDriveSource's docstring for why that's
     # deliberately not done.
     max_drive_file_size_mb: int = 200
+    # Automated corpus freshness (independent follow-up review P1-4: "corpus
+    # freshness depends on an admin remembering to reindex"). A background
+    # loop calls ingest_all() every N minutes so a manual "Run re-index now"
+    # click is an override, not the only freshness mechanism. 0 disables it
+    # (e.g. local dev without a configured Drive folder); the loop also never
+    # starts unless google_drive_folder_id is set, so tests -- which always
+    # leave that blank -- never start it regardless of this default.
+    ingestion_sync_interval_minutes: int = 360  # 6 hours
+    # The operational SLA the review asked for: how long the corpus can go
+    # without a successful sync before the admin UI flags it as stale. Well
+    # above the sync interval so one or two missed/slow ticks don't alarm.
+    ingestion_staleness_threshold_hours: int = 48
 
     ai_provider: str = "local_extractive"
     anthropic_api_key: str = ""

@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { tab: "documents", user: null, documents: [], duplicates: [], runs: [], feedback: [], unanswered: [], queryResult: null, machines: [], allMachines: [], reviewQueue: [], invitations: [], lastInvite: null };
+const state = { tab: "documents", user: null, documents: [], duplicates: [], runs: [], ingestionStatus: null, feedback: [], unanswered: [], queryResult: null, machines: [], allMachines: [], reviewQueue: [], invitations: [], lastInvite: null };
 const root = document.getElementById("admin-app");
 
 async function api(path, options = {}) {
@@ -50,7 +50,10 @@ async function loadTab() {
     if (state.allMachines.length === 0) state.allMachines = await api("/api/admin/machines");
   }
   if (state.tab === "duplicates") state.duplicates = await api("/api/admin/duplicates");
-  if (state.tab === "ingestion") state.runs = await api("/api/admin/ingestion/runs");
+  if (state.tab === "ingestion") {
+    state.runs = await api("/api/admin/ingestion/runs");
+    state.ingestionStatus = await api("/api/admin/ingestion/status");
+  }
   if (state.tab === "access") state.invitations = await api("/api/admin/invitations");
   if (state.tab === "feedback") {
     state.feedback = await api("/api/admin/feedback");
@@ -263,24 +266,51 @@ function renderDuplicates() {
 
 // --- Ingestion reports ---
 
+function renderIngestionStatusBanner() {
+  const s = state.ingestionStatus;
+  if (!s) return "";
+
+  if (s.is_stale) {
+    const since = s.last_success_at
+      ? `${Math.round(s.hours_since_last_success)}h ago (run #${s.last_success_run_id}, ${esc(s.last_success_trigger)})`
+      : "never";
+    return `
+      <div class="banner error">
+        <strong>Corpus is stale.</strong> Last successful sync: ${since}.
+        This exceeds the ${s.staleness_threshold_hours}h freshness SLA.
+        ${s.scheduler_enabled ? "" : " The automated scheduler is currently disabled -- only manual re-index will refresh the corpus."}
+      </div>`;
+  }
+  return `
+    <div class="banner ok">
+      Corpus last synced ${Math.round(s.hours_since_last_success * 10) / 10}h ago
+      (run #${s.last_success_run_id}, ${esc(s.last_success_trigger)}) -- ${s.active_document_count} active manuals.
+      ${s.scheduler_enabled
+        ? `Automated sync runs every ${Math.round(s.sync_interval_minutes / 60 * 10) / 10}h.`
+        : "Automated sync is disabled; manual re-index is the only freshness mechanism right now."}
+    </div>`;
+}
+
 function renderIngestion() {
   return `
     <h1>Ingestion reports</h1>
+    ${renderIngestionStatusBanner()}
     <div class="card">
       <button id="reindex-btn" class="primary">Run re-index now</button>
       <span style="color:var(--text-dim); margin-left:10px;">Add manuals to the shared Google Drive folder first, then run this. Runs in the background; refresh this tab to see progress.</span>
     </div>
     <table class="admin-table">
-      <thead><tr><th>Run</th><th>Started</th><th>Finished</th><th>Status</th><th>Event counts</th><th></th></tr></thead>
+      <thead><tr><th>Run</th><th>Started</th><th>Finished</th><th>Trigger</th><th>Status</th><th>Event counts</th><th></th></tr></thead>
       <tbody>
         ${state.runs.map((r) => `
           <tr>
             <td>#${r.id}</td><td>${esc(r.started_at)}</td><td>${esc(r.finished_at || "—")}</td>
+            <td>${esc(r.trigger || "manual")}</td>
             <td>${esc(r.status)}</td>
             <td>${Object.entries(r.counts).map(([k, v]) => `${k}: ${v}`).join(", ")}</td>
             <td><button class="ghost view-report-btn" data-run="${r.id}">View report</button></td>
           </tr>
-          <tr class="report-row" data-report-for="${r.id}" style="display:none;"><td colspan="6"></td></tr>
+          <tr class="report-row" data-report-for="${r.id}" style="display:none;"><td colspan="7"></td></tr>
         `).join("")}
       </tbody>
     </table>
