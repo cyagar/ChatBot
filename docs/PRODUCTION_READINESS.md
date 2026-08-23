@@ -268,6 +268,48 @@ done than it is.
       here means "doesn't depend on a human remembering," not "survives a
       crash and resumes" -- if the container is down, no sync happens until
       it's back up, same as manual triggering would be.
+- [x] **A no-document query never loads the embedding model, and a model
+      failure never surfaces as an unhandled 500** (independent follow-up
+      review P1-5). Two claims: `vector_search()` in `app/retrieval/search.py`
+      already queried eligible chunk rows first and returned `[]` before
+      calling `embed_query()` when none existed -- fixed in a prior session,
+      confirmed still true here, and now covered by dedicated fast (non-slow)
+      regression tests that monkeypatch `embed_query` to raise if called at
+      all, so the guarantee can't silently regress unnoticed. The second
+      claim, that the API must return an honest response even when the model
+      is unavailable, was a genuine gap: `hybrid_search()`'s call site in
+      `routes_chat.py` had no exception handling at all, so a retrieval-layer
+      failure (most notably the embedding model failing to load) would
+      propagate as an unhandled exception.
+      An advisor review of the first pass at this fix caught a scope problem:
+      wrapping only `hybrid_search()` at the API layer and refusing outright
+      on any exception would throw away a perfectly working *lexical* (FTS)
+      result set whenever only the *vector* half failed, even though FTS has
+      no model dependency at all -- stricter than the review asked for, and
+      the same failure mode the P1-2 fix already established a "labeled
+      lexical-only degraded mode" precedent for. Fixed at the source instead:
+      `vector_search()` now catches an `embed_query()` failure itself, logs
+      it, and returns `[]` -- `hybrid_search()`'s existing reciprocal-rank
+      fusion handles an empty vector list fine, so a technician still gets
+      real, citable lexical results when only the embedding model is down.
+      `routes_chat.py`'s `_generate_and_persist_answer()` keeps its own
+      try/except around `hybrid_search()` as the remaining backstop, for
+      retrieval failing more fundamentally (a corrupted FTS index, an
+      unexpected bug in fusion/hydration) -- that produces a distinct,
+      honest, persisted no-answer message ("I couldn't search the manuals
+      right now due to a temporary technical problem...") that deliberately
+      avoids "no relevant passages were found," since that specific wording
+      would falsely claim a search ran and concluded rather than that it
+      broke.
+      Verified live: rebuilt the container, confirmed it starts `healthy` and
+      `/healthz` responds -- this change touches no schema and no new
+      endpoint, so container-boot + health is the applicable verification
+      here, same as any other retrieval-path change without a migration.
+      **Not done:** the admin query tester is intentionally left as-is (an
+      unhandled exception there still surfaces the real stack trace) --
+      degrading it the same way as the technician-facing chat path would hide
+      the exact failure an admin needs to see to diagnose a broken
+      deployment.
 - [x] **Registration is closed and documents require explicit approval**
       (independent follow-up review P0-5, P0-6). Public self-registration is
       gone: `POST /api/auth/register` now requires a valid, unexpired,

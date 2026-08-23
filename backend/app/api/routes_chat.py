@@ -234,27 +234,53 @@ def _generate_and_persist_answer(
                 "UPDATE messages SET resolved_query = ? WHERE id = ?", (resolved_query, user_message_id)
             )
 
-    passages = hybrid_search(resolved_query, machine_id=machine_id, top_k=6)
-    provider = get_provider()
-    answer_status = "completed"
+    # Retrieval itself can fail independently of the provider call below.
+    # vector_search() already skips embed_query() entirely when there are no
+    # eligible chunks (P1-5's first half), and separately swallows an
+    # embed_query() failure (e.g. the embedding model not loading -- a
+    # misconfigured or offline deployment; see get_model()'s docstring) to
+    # degrade to lexical-only results rather than raising, so that specific
+    # case never reaches here at all. This is the backstop for retrieval
+    # failing more fundamentally than that (e.g. the FTS index itself, or an
+    # unexpected bug in fusion/hydration) -- it must not become an unhandled
+    # 500 that leaves the technician's question answered by nothing. It gets
+    # the same honest, no-answer treatment as a provider failure below, not a
+    # misleading "no relevant passages were found" (that specific wording
+    # would claim a search concluded when one never ran) and not a stack
+    # trace (concern #9).
     try:
-        result = provider.generate(question, machine_label, passages, history=history)
-    except ProviderError as e:
-        logger.warning("Provider call failed for conversation %s: %s", conversation_id, e)
-        answer_status = "failed"
-        result = GeneratedAnswer(
-            answer=f"I couldn't reach the AI provider ({e}). Please try again in a moment.",
-            is_no_answer=True, provider=getattr(provider, "name", "unknown"),
-        )
+        passages = hybrid_search(resolved_query, machine_id=machine_id, top_k=6)
     except Exception:
-        # Never leak internals (concern #9) -- but do log server-side so an
-        # admin can actually diagnose what happened.
-        logger.exception("Unexpected error generating an answer for conversation %s", conversation_id)
+        logger.exception("Retrieval failed for conversation %s", conversation_id)
+        passages = []
         answer_status = "failed"
         result = GeneratedAnswer(
-            answer="Something went wrong while generating an answer. Please try again.",
-            is_no_answer=True, provider=getattr(provider, "name", "unknown"),
+            answer="I couldn't search the manuals right now due to a temporary technical "
+            "problem. Please try again in a moment, or contact an administrator if this "
+            "keeps happening.",
+            is_no_answer=True, provider="none",
         )
+    else:
+        provider = get_provider()
+        answer_status = "completed"
+        try:
+            result = provider.generate(question, machine_label, passages, history=history)
+        except ProviderError as e:
+            logger.warning("Provider call failed for conversation %s: %s", conversation_id, e)
+            answer_status = "failed"
+            result = GeneratedAnswer(
+                answer=f"I couldn't reach the AI provider ({e}). Please try again in a moment.",
+                is_no_answer=True, provider=getattr(provider, "name", "unknown"),
+            )
+        except Exception:
+            # Never leak internals (concern #9) -- but do log server-side so an
+            # admin can actually diagnose what happened.
+            logger.exception("Unexpected error generating an answer for conversation %s", conversation_id)
+            answer_status = "failed"
+            result = GeneratedAnswer(
+                answer="Something went wrong while generating an answer. Please try again.",
+                is_no_answer=True, provider=getattr(provider, "name", "unknown"),
+            )
 
     # Order-preservingly deduplicate citations before BOTH the response and
     # persistence (P1-7). The built-in providers already dedupe, but a

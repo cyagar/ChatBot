@@ -11,6 +11,7 @@ cannot reach the answer generator at all.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
@@ -19,6 +20,8 @@ import numpy as np
 from app.config import get_settings
 from app.db import get_conn
 from app.retrieval.embeddings import blob_to_vector, embed_query
+
+logger = logging.getLogger(__name__)
 
 RRF_K = 60          # reciprocal-rank-fusion damping constant
 CANDIDATE_POOL = 50
@@ -134,7 +137,21 @@ def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POO
         # availability at all (independent review P1-5/P2-1).
         return []
 
-    qvec = embed_query(query)
+    try:
+        qvec = embed_query(query)
+    except Exception:
+        # The embedding model failing to load (misconfigured/offline deployment;
+        # see get_model()'s docstring) must degrade search, not break it. Lexical
+        # (FTS) search has no model dependency at all, so hybrid_search() can
+        # still return real, citable results from it -- refusing outright here
+        # would throw away a working result set over an unrelated component
+        # being down (independent follow-up review P1-5, same precedent as the
+        # P1-2 fix's "labeled lexical-only degraded mode"). routes_chat.py's
+        # honest-failure-message path remains the backstop for when even
+        # lexical_search / the fusion below can't produce anything.
+        logger.exception("Embedding model unavailable; falling back to lexical-only search")
+        return []
+
     dim = rows[0]["dim"]
     matrix = np.vstack([blob_to_vector(r["vector"], r["dim"]) for r in rows])
     # Vectors are stored L2-normalized, so dot product == cosine similarity.

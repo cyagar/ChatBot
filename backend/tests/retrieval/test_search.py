@@ -62,6 +62,149 @@ def _embed_seeded_chunks():
             )
 
 
+# --- P1-5: a no-document query must never load the embedding model -------
+# Deliberately NOT @pytest.mark.slow: the whole point is proving embed_query
+# is never called, so these must never load the real model either.
+
+def test_vector_search_never_calls_embed_query_when_no_eligible_chunks(test_env, monkeypatch):
+    """Independent follow-up review P1-5: 'query eligible rows first and
+    return [] before embed_query() when none exist.' An empty corpus (or one
+    with nothing for the given machine) must resolve without ever touching
+    the embedding model -- loading it just to discover there's nothing to
+    compare against wastes time and makes an otherwise-instant 'nothing
+    here' answer depend on model/network availability for no reason."""
+    from app.retrieval import search as search_module
+
+    def exploding_embed_query(text):
+        raise AssertionError("embed_query() must not be called when there are no eligible chunks")
+
+    monkeypatch.setattr(search_module, "embed_query", exploding_embed_query)
+
+    assert search_module.vector_search("anything", machine_id=None) == []
+    assert search_module.vector_search("anything", machine_id=999) == []
+
+
+def test_vector_search_calls_embed_query_when_eligible_chunks_exist(test_env, monkeypatch):
+    """The complement of the test above: once there IS something eligible to
+    compare against, embed_query() must actually run -- proving the early
+    return is scoped to the true no-document case, not disabling vector
+    search generally."""
+    import numpy as np
+
+    from app.retrieval import search as search_module
+    from app.retrieval.embeddings import vector_to_blob
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute(
+            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
+        )
+        conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 1, 'approved')")
+        conn.execute(
+            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 1, 1, 'text', 'Some manual content here.', 25, 0)"
+        )
+        conn.execute(
+            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, 'test-model', 2, ?)",
+            (vector_to_blob(np.array([1.0, 0.0], dtype=np.float32)),),
+        )
+
+    calls = []
+
+    def fake_embed_query(text):
+        calls.append(text)
+        return np.array([1.0, 0.0], dtype=np.float32)
+
+    monkeypatch.setattr(search_module, "embed_query", fake_embed_query)
+
+    result = search_module.vector_search("anything", machine_id=1)
+
+    assert calls == ["anything"]
+    assert len(result) == 1
+    assert result[0][0] == 1
+    # dim=2 here is arbitrary -- chosen for a trivial fake vector, not the real
+    # model's 384. vector_search reads dim per-row, so this is not a bug.
+
+
+def test_vector_search_returns_empty_list_without_raising_when_embedding_model_fails(test_env, monkeypatch):
+    """Advisor-caught gap in the first pass at P1-5: the review's ask was an
+    honest not_found response when the model is unavailable, but throwing away
+    a whole hybrid_search() call (including a perfectly working lexical result)
+    over the *vector* half failing was stricter than necessary -- and the
+    P1-2 fix already established the precedent of degrading to a labeled
+    lexical-only mode rather than refusing outright. vector_search() must
+    swallow an embed_query() failure and return [] so hybrid_search() (below)
+    can still return real, citable lexical results."""
+    import numpy as np
+
+    from app.retrieval import search as search_module
+    from app.retrieval.embeddings import vector_to_blob
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute(
+            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
+        )
+        conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 1, 'approved')")
+        conn.execute(
+            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 1, 1, 'text', 'Some manual content here.', 25, 0)"
+        )
+        conn.execute(
+            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, 'test-model', 2, ?)",
+            (vector_to_blob(np.array([1.0, 0.0], dtype=np.float32)),),
+        )
+
+    def exploding_embed_query(text):
+        raise RuntimeError("Could not load embedding model (simulated).")
+
+    monkeypatch.setattr(search_module, "embed_query", exploding_embed_query)
+
+    assert search_module.vector_search("anything", machine_id=1) == []
+
+
+def test_hybrid_search_returns_lexical_only_results_when_embedding_model_fails(test_env, monkeypatch):
+    """The end-to-end version of the test above: with the embedding model down
+    but FTS-matchable content present, hybrid_search() must still return
+    citable results (from lexical search alone) rather than degrading all the
+    way to routes_chat's refusal message -- that refusal is meant for when
+    retrieval genuinely has nothing, not for a single subsystem being down."""
+    from app.retrieval import search as search_module
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute(
+            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
+        )
+        conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 1, 'approved')")
+        conn.execute(
+            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 1, 4, 'text', 'Axiom brewer heating element error E4 means the thermistor circuit is open.', 90, 0)"
+        )
+        conn.execute("INSERT INTO chunks_fts (rowid, content) SELECT id, content FROM chunks")
+
+    def exploding_embed_query(text):
+        raise RuntimeError("Could not load embedding model (simulated).")
+
+    monkeypatch.setattr(search_module, "embed_query", exploding_embed_query)
+
+    results = search_module.hybrid_search("error code E4", machine_id=1, top_k=6)
+
+    assert len(results) == 1
+    assert results[0].chunk_id == 1
+    assert results[0].vector_score == 0.0
+    assert results[0].lexical_score != 0.0
+
+
 @pytest.mark.slow
 def test_machine_filter_excludes_other_models_chunks(test_env):
     with get_conn() as conn:
