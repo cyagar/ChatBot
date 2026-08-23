@@ -11,12 +11,21 @@ test_google_drive_live_sandbox.py -- never run by default (see pytest.ini's
 Covers, per the review's own list: query/fields/pagination/shared-folder
 support, caching (P0-1's original bug -- cache validity from size alone),
 streaming download + retry (exercising the real `_download()`, not the
-monkeypatched fake most other tests use), checksums, exports (the current
-explicit contract: Workspace docs/folders/shortcuts are skipped, not
-exported -- P1-3 territory if that policy ever changes), unsupported files,
+monkeypatched fake most other tests use), checksums, unsupported files,
 errors (a mid-pagination listing failure, and a subsequent retry converging),
 and restart (a brand-new instance over the same cache_dir picking up the
-persisted manifest, never re-downloading unchanged content)."""
+persisted manifest, never re-downloading unchanged content).
+
+P1-3 ("file-type, folder, and download-capability policy is undefined") adds
+its own coverage below: subfolders/shortcuts get distinct, actionable skip
+reasons rather than the generic Workspace-export message; Google Workspace
+documents are confirmed skipped, not exported (the deliberate flat,
+binary-only contract -- see GoogleDriveSource's class docstring for why);
+oversized files are rejected before download using Drive's reported size
+(deliberately no file-count limit -- see the same docstring for why that
+would be unsafe); and every one of those skips is asserted to actually reach
+pop_skipped(), which is how pipeline.py now reports them as normal
+ingestion_events rows instead of only a server log line."""
 
 from __future__ import annotations
 
@@ -68,11 +77,12 @@ class _FakeService:
         return self._files
 
 
-def _make_source(tmp_path, pages, downloads: dict[str, bytes]):
+def _make_source(tmp_path, pages, downloads: dict[str, bytes], **source_kwargs):
     source = GoogleDriveSource(
         folder_id="fake-folder",
         service_account_path=tmp_path / "unused-key.json",
         cache_dir=tmp_path / "cache",
+        **source_kwargs,
     )
     fake_service = _FakeService(pages)
     source._service = fake_service
@@ -389,3 +399,75 @@ def test_fresh_instance_after_restart_reuses_the_persisted_manifest(tmp_path):
     assert calls2 == [], "a restarted process must not re-download a file whose checksum hasn't changed"
     assert files[0].sha256 == __import__("hashlib").sha256(b"AAA").hexdigest()
     assert source2.fetch("google_drive:f1").read_bytes() == b"AAA"
+
+
+# --- P1-3: per-file size limit, and every skip is reported ----------------
+#
+# Deliberately no file-COUNT limit test here: a count cap would make
+# list_files() return a partial listing once a folder passes it, which is
+# indistinguishable from files having actually been removed from Drive --
+# exactly the ambiguity the review (P0-2) warns must never feed removal
+# reconciliation. See GoogleDriveSource's class docstring for the full
+# reasoning; only the per-file size limit is implemented.
+
+def test_oversized_file_is_skipped_before_download_and_reported(tmp_path):
+    """A file over the configured per-file size limit must never be
+    downloaded (the limit is checked against Drive's reported size, before
+    any bytes are fetched) and must show up via pop_skipped()."""
+    huge_size = 5 * 1024 * 1024  # 5 MB
+    page = {"files": [{"id": "f1", "name": "huge.pdf", "size": str(huge_size),
+                        "mimeType": "application/pdf", "md5Checksum": "c1"}]}
+    source, _, calls = _make_source(tmp_path, [page], {}, max_file_size_bytes=1024 * 1024)
+
+    files = source.list_files()
+
+    assert calls == [], "an oversized file must never be downloaded"
+    assert files == []
+    skips = source.pop_skipped()
+    assert len(skips) == 1
+    assert skips[0].filename == "huge.pdf"
+    assert "MB" in skips[0].reason
+
+
+def test_file_exactly_at_the_size_limit_is_not_skipped(tmp_path):
+    """The check is strictly '>', not '>=' -- a file exactly at the
+    configured limit must pass. Pinned explicitly so a future '>=' change
+    fails a named assertion instead of looking like a harmless rounding
+    tweak."""
+    page = {"files": [{"id": "f1", "name": "ok.pdf", "size": "1024",
+                        "mimeType": "application/pdf", "md5Checksum": "c1"}]}
+    source, _, calls = _make_source(tmp_path, [page], {"f1": b"A" * 1024}, max_file_size_bytes=1024)
+
+    files = source.list_files()
+
+    assert calls == ["f1"], "a file exactly at the limit must still be downloaded, not skipped"
+    assert len(files) == 1
+    assert source.pop_skipped() == []
+
+
+def test_pop_skipped_drains_and_resets_between_listings(tmp_path):
+    """Skips must be reported once per run, not accumulate forever or leak
+    into the next list_files() call's report."""
+    pages = [{"files": [
+        {"id": "doc1", "name": "Untitled document", "mimeType": "application/vnd.google-apps.document"},
+    ]}]
+    source, _, _ = _make_source(tmp_path, pages, {})
+
+    source.list_files()
+    first_skips = source.pop_skipped()
+    assert len(first_skips) == 1
+    assert source.pop_skipped() == [], "a second pop_skipped() call without a new listing must be empty"
+
+    source_no_skips, _, _ = _make_source(tmp_path, [{"files": []}], {})
+    source_no_skips.list_files()
+    assert source_no_skips.pop_skipped() == []
+
+
+def test_base_document_source_reports_no_skips_by_default():
+    """FakeDirectorySource (and any other source that never overrides
+    pop_skipped()) must not be forced to implement skip tracking just to
+    satisfy the interface."""
+    from tests.ingestion.fakes import FakeDirectorySource
+
+    source = FakeDirectorySource(directory=__import__("pathlib").Path("."))
+    assert source.pop_skipped() == []

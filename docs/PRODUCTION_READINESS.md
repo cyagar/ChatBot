@@ -172,6 +172,52 @@ done than it is.
       Drive (the manifest is only ever added to, never pruned) is a latent
       gap noted here, not fixed, since nothing in the running app can reach
       it today.
+- [x] **File-type, folder, and download-capability policy is now an explicit,
+      tested decision instead of undefined behavior** (independent follow-up
+      review P1-3). The chosen contract, recorded in `GoogleDriveSource`'s
+      class docstring: flat and binary-only. Subfolders are not recursed
+      into, shortcuts are not followed, and Google Workspace documents
+      (Docs/Sheets/Slides/Forms) are not exported via `export_media` -- each
+      now gets its own explicit, actionable skip reason (previously
+      subfolders and shortcuts were silently lumped into the generic
+      "Google Workspace files have no downloadable binary" message, which is
+      technically true but not useful to whoever put a folder or shortcut in
+      the manuals folder). File TYPE is deliberately *not* filtered at the
+      Drive-listing stage: `extractors.py` already corrects a wrong file
+      extension against the real magic-byte content after download (e.g. a
+      PDF saved with a `.doc` extension is still processed as a PDF) and
+      already reports anything genuinely unsupported as a normal
+      `unsupported` document; pre-filtering by extension before download
+      would block that correction for files whose Drive-visible extension
+      doesn't match their real content, for no corresponding benefit, since
+      unsupported types are already fully reported once downloaded. A new
+      per-file size limit (`MAX_DRIVE_FILE_SIZE_MB`, default 200) rejects an
+      oversized file using Drive's reported size, before any bytes are
+      fetched.
+      Every one of these skips (Workspace doc, subfolder, shortcut,
+      no-download-permission, oversized) now reaches the same visibility
+      every other ingestion outcome gets: `DocumentSource.pop_skipped()`
+      returns a `SkippedFile(filename, reason)` list that `ingest_all()`
+      records as normal `ingestion_events` rows (`event='skipped'`) and
+      `FileOutcome`s -- previously these only ever reached a server log an
+      admin would never see. Verified live: rebuilt the container,
+      `max_drive_file_size_mb` reads `200` from `get_settings()` inside the
+      running app.
+      **Deliberately not implemented: a file-COUNT limit.** One was built,
+      tested, then removed after review during this same pass: capping
+      `list_files()` at N files makes it return a *partial* listing once a
+      folder passes N, and a partial listing is indistinguishable from files
+      having actually been removed from Drive -- exactly the ambiguity
+      P0-2's still-unbuilt removal-reconciliation half must never be fed
+      (see that entry above). The per-file size limit doesn't have this
+      problem, since it rejects individual files rather than truncating the
+      listing itself, so it's the only limit kept. A folder holding an
+      unreasonable number of files is still bounded by the size limit on
+      each file within it, just not by count.
+      **Not done:** recursion into subfolders and Workspace-document export
+      remain unimplemented by design (see above) -- if either policy ever
+      needs to change, that decision and its tests belong here, not folded
+      into an unrelated change later.
 - [x] **Registration is closed and documents require explicit approval**
       (independent follow-up review P0-5, P0-6). Public self-registration is
       gone: `POST /api/auth/register` now requires a valid, unexpired,

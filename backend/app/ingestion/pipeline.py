@@ -37,7 +37,7 @@ _INGEST_LOCK = threading.Lock()
 @dataclass
 class FileOutcome:
     filename: str
-    status: str          # indexed | duplicate | partial | failed | unsupported | skipped_unchanged
+    status: str          # indexed | duplicate | partial | failed | unsupported | skipped_unchanged | skipped
     detail: str | None
     document_id: int | None = None
     chunk_count: int = 0
@@ -143,6 +143,15 @@ def _ingest_all_locked(source: DocumentSource | None, embed: bool) -> IngestionR
 
     try:
         files = source.list_files()
+
+        # Items the source noticed but couldn't/wouldn't include (P1-3: "report
+        # every skipped item") get the same visibility as every other outcome
+        # -- an ingestion_events row and a FileOutcome -- instead of only ever
+        # reaching a server log.
+        for skipped in source.pop_skipped():
+            with get_conn() as conn:
+                _record_event(conn, run_id, skipped.filename, "skipped", skipped.reason, None)
+            report.outcomes.append(FileOutcome(skipped.filename, "skipped", skipped.reason))
 
         _SHINGLE_CACHE.clear()
         _NEAR_DUP_SCORES.clear()

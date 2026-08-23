@@ -35,6 +35,19 @@ class SourceFile:
     sha256: str
 
 
+@dataclass(frozen=True)
+class SkippedFile:
+    """An item a DocumentSource noticed but did not include in list_files()'s
+    result, with a human-readable reason -- independent follow-up review
+    P1-3: "apply file count/size/type limits and report every skipped item."
+    Skips used to only reach a server log, invisible to an admin; pipeline.py
+    now records one of these as a normal ingestion_events row per skip, the
+    same visibility every other outcome (indexed/duplicate/failed/...) gets."""
+
+    filename: str
+    reason: str
+
+
 class DocumentSource(abc.ABC):
     source_system: str
 
@@ -46,6 +59,14 @@ class DocumentSource(abc.ABC):
         """Return a local path for the given source_ref (downloading/caching first
         if needed)."""
         raise NotImplementedError
+
+    def pop_skipped(self) -> list[SkippedFile]:
+        """Items noticed but not returned by the most recent list_files() call,
+        with a reason -- drained (returned and cleared) so each skip is
+        reported at most once. Default: nothing to report (e.g.
+        FakeDirectorySource, which never skips anything a directory scan
+        turns up)."""
+        return []
 
 
 def _sha256_of(path: Path) -> str:
@@ -84,6 +105,32 @@ class GoogleDriveSource(DocumentSource):
     can't download (capabilities.canDownload = false) are skipped the same
     way.
 
+    Contract decision (independent follow-up review P1-3, "file-type, folder,
+    and download-capability policy is undefined"): this is a FLAT,
+    binary-only source. The query only ever sees the configured folder's
+    immediate children -- subfolders are not recursed into, shortcuts are not
+    followed, and Google Workspace documents are not exported (export_media
+    would need a new extraction path for each Workspace type; nothing in
+    the corpus today is a native Workspace doc). Every one of those, plus
+    anything over the configured per-file size limit, is reported via
+    pop_skipped() rather than silently dropped -- see SkippedFile. File TYPE
+    is deliberately not filtered here: rejecting by extension before download
+    would also block the magic-byte-based extension-mismatch correction
+    extractors.py already does after download (a real PDF saved with the
+    wrong extension is still processed correctly today; pre-filtering by
+    extension would break that for no real benefit, since unsupported types
+    are already fully reported -- as 'unsupported' documents in the normal
+    review/ingestion-events flow -- once downloaded).
+
+    Deliberately NOT limited: file COUNT. A cap here would make list_files()
+    return a partial listing whenever a folder grows past it, with no way to
+    tell that apart from files having actually disappeared -- exactly the
+    ambiguity the review (P0-2, lines 191/410) warns must never feed removal
+    reconciliation once that's built. The size limit doesn't have this
+    problem (it rejects individual files, not the listing itself) so it's
+    kept; an unbounded folder is bounded by the size limit on each of its
+    files, not by how many there are.
+
     No incremental sync (changes.list/page tokens) by design: at this corpus
     size, a full listing every run is cheap, and idempotency is already
     handled by the existing sha256-based skip-if-unchanged logic in
@@ -94,18 +141,29 @@ class GoogleDriveSource(DocumentSource):
     source_system = "google_drive"
     SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
     _WORKSPACE_MIME_PREFIX = "application/vnd.google-apps."
+    _FOLDER_MIME = "application/vnd.google-apps.folder"
+    _SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
     _LIST_FIELDS = (
         "nextPageToken, files(id, name, size, mimeType, md5Checksum, "
         "modifiedTime, capabilities(canDownload))"
     )
+    DEFAULT_MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024
 
-    def __init__(self, folder_id: str, service_account_path: Path, cache_dir: Path):
+    def __init__(
+        self,
+        folder_id: str,
+        service_account_path: Path,
+        cache_dir: Path,
+        max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
+    ):
         self.folder_id = folder_id
         self.service_account_path = Path(service_account_path)
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._manifest_path = self.cache_dir / "manifest.json"
         self._service = None
+        self.max_file_size_bytes = max_file_size_bytes
+        self._pending_skips: list[SkippedFile] = []
 
     def _get_service(self):
         if self._service is None:
@@ -172,6 +230,7 @@ class GoogleDriveSource(DocumentSource):
     def list_files(self) -> list[SourceFile]:
         service = self._get_service()
         manifest = self._load_manifest()
+        self._pending_skips = []
         out: list[SourceFile] = []
         page_token = None
         while True:
@@ -192,18 +251,48 @@ class GoogleDriveSource(DocumentSource):
                 name = f["name"]
                 mime_type = f.get("mimeType", "")
 
+                # Flat, binary-only contract (P1-3): subfolders and shortcuts
+                # get their own explicit, actionable reasons rather than being
+                # lumped into the generic Workspace-export message below.
+                if mime_type == self._FOLDER_MIME:
+                    logger.info("Skipping Drive item %s (%r): subfolders are not scanned.", file_id, name)
+                    self._pending_skips.append(SkippedFile(
+                        name, "Subfolder -- nested folders are not scanned. Move manuals into "
+                        "the top-level shared folder."))
+                    continue
+                if mime_type == self._SHORTCUT_MIME:
+                    logger.info("Skipping Drive item %s (%r): shortcuts are not followed.", file_id, name)
+                    self._pending_skips.append(SkippedFile(
+                        name, "Shortcut -- shortcuts are not followed. Share or move the actual "
+                        "file directly into this folder."))
+                    continue
                 if mime_type.startswith(self._WORKSPACE_MIME_PREFIX):
                     logger.info("Skipping Drive file %s (%r): Google Workspace files have no "
                                 "downloadable binary.", file_id, name)
+                    self._pending_skips.append(SkippedFile(
+                        name, "Google Workspace document (Docs/Sheets/Slides/Forms) -- these have "
+                        "no downloadable binary and are not exported. Download it as PDF/DOCX/XLSX "
+                        "from Drive and place that exported file in this folder instead."))
                     continue
                 if f.get("capabilities", {}).get("canDownload") is False:
                     logger.warning("Skipping Drive file %s (%r): service account lacks download "
                                     "permission.", file_id, name)
+                    self._pending_skips.append(SkippedFile(
+                        name, "The service account does not have permission to download this file."))
                     continue
 
                 md5 = f.get("md5Checksum")
                 modified_time = f.get("modifiedTime")
                 reported_size = int(f.get("size") or 0)
+
+                if reported_size > self.max_file_size_bytes:
+                    logger.warning("Skipping Drive file %s (%r): %d bytes exceeds the %d byte limit.",
+                                    file_id, name, reported_size, self.max_file_size_bytes)
+                    self._pending_skips.append(SkippedFile(
+                        name, f"File is {reported_size / (1024 * 1024):.1f} MB, exceeding the "
+                        f"{self.max_file_size_bytes // (1024 * 1024)} MB per-file limit."))
+                    continue
+
                 cache_path = self._cache_path(file_id, name)
 
                 entry = manifest.get(file_id)
@@ -249,6 +338,10 @@ class GoogleDriveSource(DocumentSource):
         self._save_manifest(manifest)
         return out
 
+    def pop_skipped(self) -> list[SkippedFile]:
+        skips, self._pending_skips = self._pending_skips, []
+        return skips
+
     def fetch(self, source_ref: str) -> Path:
         _, _, file_id = source_ref.partition(":")
         entry = self._load_manifest().get(file_id)
@@ -272,4 +365,5 @@ def get_document_source(settings) -> DocumentSource:
         folder_id=settings.google_drive_folder_id,
         service_account_path=settings.google_service_account_json_path_resolved,
         cache_dir=settings.gdrive_cache_dir_resolved,
+        max_file_size_bytes=settings.max_drive_file_size_mb * 1024 * 1024,
     )

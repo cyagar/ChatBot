@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     # environment, mirroring how the key is kept out of git (see .gitignore).
     google_service_account_json_path: str = ""
     gdrive_cache_dir: str = "../data/gdrive_cache"
+    # Guardrail against a pathological single file (independent follow-up
+    # review P1-3: "apply file count/size/type limits") -- generously above
+    # any real manual, just bounds a stray multi-GB file. No file-COUNT
+    # limit: capping list_files() at N files would make it return a partial
+    # listing once a folder passes N, indistinguishable from files having
+    # been removed -- see GoogleDriveSource's docstring for why that's
+    # deliberately not done.
+    max_drive_file_size_mb: int = 200
 
     ai_provider: str = "local_extractive"
     anthropic_api_key: str = ""

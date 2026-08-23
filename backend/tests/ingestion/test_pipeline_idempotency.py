@@ -247,6 +247,38 @@ def test_listing_failure_still_produces_a_visible_failed_run(test_env, manuals_d
     assert "simulated Drive auth failure" in event["detail"]
 
 
+def test_source_level_skips_are_recorded_as_visible_ingestion_events(test_env, make_pdf, manuals_dir):
+    """Independent follow-up review P1-3: 'report every skipped item.' A
+    DocumentSource can report items it noticed but didn't return from
+    list_files() (e.g. GoogleDriveSource skipping an oversized file or a
+    Google Workspace document) via pop_skipped(); ingest_all() must surface
+    each one as a normal ingestion_events row and FileOutcome, not only a
+    server log line an admin never sees."""
+    from app.ingestion.sources import SkippedFile
+
+    class SourceWithSkips(FakeDirectorySource):
+        def pop_skipped(self):
+            return [SkippedFile("huge_manual.pdf", "File is 350.0 MB, exceeding the 200 MB per-file limit.")]
+
+    pdf = make_pdf(["Content about the walk-in cooler thermostat."], name="cooler.pdf")
+    shutil.copy(pdf, manuals_dir / pdf.name)
+
+    report = ingest_all(source=SourceWithSkips(manuals_dir), embed=False)
+
+    assert report.counts().get("skipped") == 1
+    assert report.counts().get("indexed") == 1
+
+    from app.db import get_conn
+    with get_conn() as conn:
+        event = conn.execute(
+            "SELECT original_filename, event, detail, document_id FROM ingestion_events "
+            "WHERE run_id = ? AND event = 'skipped'", (report.run_id,),
+        ).fetchone()
+    assert event["original_filename"] == "huge_manual.pdf"
+    assert "350.0 MB" in event["detail"]
+    assert event["document_id"] is None, "a skip never produced a document row"
+
+
 def test_unsupported_file_retried_after_capability_change_updates_in_place(test_env, manuals_dir):
     """Simulates a file that is unsupported on first pass (e.g. no OCR) and
     becomes indexable later without any bytes changing (e.g. OCR configured) —
