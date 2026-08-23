@@ -318,6 +318,60 @@ done than it is.
       structurally impossible: there is no `DOCUMENT_SOURCE` setting any
       more, and `get_document_source()` can only construct a
       `GoogleDriveSource`.
+- [x] **Follow-up questions now retrieve on a resolved standalone query, and
+      confirming a machine resumes the original stored question instead of
+      requiring a duplicate resend** (P1-8, partial -- see "Not done" below).
+      Two independent gaps, both fixed:
+      (1) `hybrid_search` has no conversational reasoning, so a follow-up like
+      "What about replacing it?" retrieved on its own literal (and mostly
+      empty) wording and could never find the passage its antecedent actually
+      referred to. `app/retrieval/query_resolution.py` deterministically
+      appends content words pulled from the most recent assistant answer (and,
+      secondarily, the most recent user turn) to build a retrieval-only query,
+      stored in the new `messages.resolved_query` column (migration 0005) for
+      auditability. The provider itself still receives the technician's
+      original wording plus full bounded history -- an LLM can resolve a
+      pronoun from context the same way a person would; only retrieval, which
+      can't, needs the rewritten query. A live end-to-end test proves the
+      actual retrieval-quality change, not just that a column got populated:
+      the literal follow-up wording doesn't lexically match the correct
+      passage, but the resolved query (carrying forward terms from the first
+      answer) surfaces it.
+      (2) Confirming a machine after a clarifying question previously required
+      the frontend to resubmit the original question as a brand-new user
+      turn -- doubling the provider call and leaving two near-duplicate user
+      messages in history. `conversations.pending_message_id` (migration 0005)
+      now points at the stored question a clarification is waiting on;
+      `POST /conversations/{id}/machine` resumes and answers that exact
+      message server-side. A new question always supersedes a stale pending
+      clarification rather than leaving it to resume later unexpectedly.
+      Verified live against the pilot DB (71 real documents, 1 real admin
+      user): registered a throwaway invited user, ran clarify -> confirm
+      machine -> resumed answer through the running container, confirmed
+      exactly one user message and two assistant messages (clarify + resumed
+      answer) in the conversation, then deleted every row the smoke test
+      created, leaving the pilot DB unchanged.
+      **Found and fixed during this pass, not part of the original review
+      item:** the first version of the resumption endpoint read
+      `pending_message_id` without atomically claiming it, so a double-tap on
+      a clarify-option button (an easy tablet interaction) could fire two
+      concurrent requests that both read the same pending question and both
+      called the provider -- two assistant answers for one question. Fixed
+      with a `WHERE id = ? AND pending_message_id = ?` claim UPDATE before
+      generating; only the request whose UPDATE actually matches a row
+      proceeds. Regression-tested with two real concurrent threads hitting
+      the same conversation through the FastAPI test client.
+      **Not done:** the review's own wording for this item also asks for "an
+      idempotent answer-attempt endpoint" for *retry*, replacing
+      insert-a-duplicate-user-turn semantics on retry/double-tap-send. That
+      was not built this pass -- the retry button in `app.js` still calls the
+      same `sendQuestion()` path as a fresh question, so retrying a failed
+      answer still inserts a new user turn and re-triggers a full provider
+      call. This is the one piece of "P1-8 -- multi-turn and retry semantics"
+      that remains open.
+      **Also not done:** `resolved_query` is persisted but not surfaced
+      anywhere in the API response or admin UI -- the only way to see what a
+      follow-up actually retrieved on today is a direct database query.
 - [ ] **Shared-tablet manual caching is implemented but not browser-tested
       across authorization transitions** (P1-12). The service worker
       namespaces the manual cache per user id

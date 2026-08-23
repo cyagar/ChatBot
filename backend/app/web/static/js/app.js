@@ -371,7 +371,7 @@ function renderMessage(m) {
     // Tappable, not "type the machine name again" -- carries the canonical
     // machine ID straight to the confirm endpoint (concern #6).
     parts.push(`<div class="clarify-options">${m.clarifying_options.map((o) =>
-      `<button class="ghost clarify-option-btn" data-machine-id="${o.id}">${escapeHtml(o.label)}</button>`
+      `<button class="ghost clarify-option-btn" data-machine-id="${o.id}" ${state.sending ? "disabled" : ""}>${escapeHtml(o.label)}</button>`
     ).join("")}</div>`);
   } else if (m.is_clarifying_question) {
     parts.push(`<div class="clarify-options"><button class="ghost clarify-pick-btn">Choose a machine</button></div>`);
@@ -438,28 +438,35 @@ function previousUserQuestion(messageId) {
   return null;
 }
 
-async function confirmMachine(machineId, resendQuestion) {
+async function confirmMachine(machineId) {
+  // If a clarifying question was pending on this conversation, the backend
+  // resumes and answers the ORIGINAL stored question as soon as the machine
+  // is set (P1-8) -- it does not need to be resent as a new user turn.
+  // Reload messages so the resumed answer (if any) appears; this also
+  // covers the plain "change machine mid-conversation" case, where reload
+  // just returns the same messages unchanged.
+  state.sending = true;
+  render();
   try {
     const conv = await api(`/api/conversations/${state.conversationId}/machine`, {
       method: "POST",
       body: JSON.stringify({ machine_id: machineId }),
     });
     state.machine = { id: conv.machine_id, label: conv.machine_label };
-    if (resendQuestion) {
-      await sendQuestion(resendQuestion);
-    } else {
-      render();
-    }
+    state.messages = await api(`/api/conversations/${state.conversationId}/messages`);
   } catch (err) {
     alert("Could not set the machine: " + err.message);
+  } finally {
+    state.sending = false;
+    render();
   }
 }
 
 function wireMessageActions() {
   root.querySelectorAll(".clarify-option-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const messageId = btn.closest(".msg")?.dataset.messageId;
-      confirmMachine(parseInt(btn.dataset.machineId, 10), previousUserQuestion(messageId));
+      if (state.sending) return;
+      confirmMachine(parseInt(btn.dataset.machineId, 10));
     });
   });
   root.querySelectorAll(".clarify-pick-btn").forEach((btn) => {

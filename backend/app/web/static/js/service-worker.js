@@ -17,7 +17,7 @@
 // exists at all -- app.js/app.css changing on disk alone does nothing, since
 // cache-first means an already-registered service worker keeps serving the
 // stale cached copies indefinitely otherwise.
-const SHELL_CACHE = "tma-shell-v5";
+const SHELL_CACHE = "tma-shell-v6";
 const MANUAL_CACHE_PREFIX = "tma-manuals-";
 
 // Proprietary manuals must not survive a logout or a different technician
