@@ -310,6 +310,45 @@ done than it is.
       degrading it the same way as the technician-facing chat path would hide
       the exact failure an admin needs to see to diagnose a broken
       deployment.
+- [x] **The machine picker counts eligible documents, not inactive links, and
+      the search and recent-machines endpoints apply the same eligibility
+      rules** (independent follow-up review P1-6). The
+      `COUNT(DISTINCT dm.document_id)` this endpoint originally used counted
+      a column from the `document_machines` side of a `LEFT JOIN`, which
+      stays non-`NULL` even when the paired `documents` row fails the
+      eligibility `ON`-clause (wrong status, deactivated, unapproved,
+      superseded) -- so an inactive link still inflated the count. This was
+      already fixed to `COUNT(DISTINCT d.id)` (the documents side, `NULL`
+      whenever the join's conditions aren't met) in an earlier session's
+      P0-6/P1-11 follow-on work, but had no dedicated regression coverage;
+      `backend/tests/api/test_machines.py` (new) closes that -- reverting the
+      query to the old `COUNT(DISTINCT dm.document_id)` form and re-running
+      confirmed 5 of its 6 original tests fail under the bug and pass under
+      the fix, so the coverage genuinely discriminates rather than just
+      re-asserting current behavior.
+      An advisor review of that verification pass caught a second, real gap
+      the review's "consistently to search and recent machines" wording
+      exists to catch: `search_machines()` (`/api/machines`) already had
+      `HAVING document_count > 0`, but `recent_machines()`
+      (`/api/machines/recent`) did not -- so a machine a technician favorited
+      or recently viewed, whose only manual was later deactivated,
+      unapproved, or superseded, still surfaced in the recents list with
+      `document_count: 0` even though the search picker correctly hid the
+      same machine. Verified directly against a fresh DB before fixing:
+      touching a machine, then deactivating its only document, returned it
+      from `/api/machines/recent` with `document_count: 0` while
+      `/api/machines` correctly returned `[]`. Fixed by adding the same
+      `HAVING document_count > 0` to `recent_machines()`'s query, with a new
+      regression test
+      (`test_recent_machines_drops_a_favorite_whose_only_manual_went_away`)
+      that fails without the clause and passes with it. The tradeoff is
+      explicit and intentional: a favorited-but-now-empty machine disappears
+      from recents instead of dead-ending into "no manuals" -- this matches
+      what the search picker already did, not a new UX decision made here.
+      189 tests pass (was 182 entering this item). Verified live: rebuilt the
+      container (this item touches real query logic, unlike P1-5's test-only
+      half), confirmed `healthy` status, `/healthz` responds, and clean
+      startup logs with no errors.
 - [x] **Registration is closed and documents require explicit approval**
       (independent follow-up review P0-5, P0-6). Public self-registration is
       gone: `POST /api/auth/register` now requires a valid, unexpired,

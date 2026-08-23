@@ -70,6 +70,17 @@ def search_machines(q: str = "", limit: int = 25, user: CurrentUser = Depends(ge
 
 @router.get("/recent", response_model=list[MachineOut])
 def recent_machines(user: CurrentUser = Depends(get_current_user), limit: int = 10):
+    """Applies the exact same eligibility rules and `HAVING document_count > 0`
+    as `search_machines()` above -- a machine a technician favorited or
+    recently used, whose only manual has since been deactivated/unapproved/
+    superseded, is dropped rather than shown with `document_count: 0`
+    (independent follow-up review P1-6's "apply the rules consistently to
+    search and recent machines": found, during this pass, that this endpoint
+    was missing the `HAVING` clause `search_machines()` already had, so a
+    dead manual could resurface here even though the picker correctly hid
+    it). The tradeoff is explicit: a favorited-but-now-empty machine
+    disappears from recents instead of dead-ending into "no manuals" --
+    consistent with what the picker already does, not a new UX decision."""
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
                COUNT(DISTINCT d.id) AS document_count,
@@ -83,6 +94,7 @@ def recent_machines(user: CurrentUser = Depends(get_current_user), limit: int = 
             AND d.is_current_revision = 1
         WHERE r.user_id = ?
         GROUP BY m.id
+        HAVING document_count > 0
         ORDER BY r.is_favorite DESC, r.last_used_at DESC
         LIMIT ?
     """
