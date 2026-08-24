@@ -1125,12 +1125,27 @@ done than it is.
       native to this codebase, not a new one. "Preserve attempt history" is
       a count (`retry_count`), not a log of each prior attempt's content --
       a genuinely bigger feature (what would show it, how far back) that
-      wasn't scoped by the review's own reproduction. **Not verified in a
-      real browser** (no browser-automation tooling available in this
-      environment) -- `node --check` confirms the JS is syntactically
-      valid and the endpoint's response shape was verified end-to-end via
-      the real HTTP API, but the actual retry button click, in a real
-      browser, against the running app, was not clicked. Same category of
+      wasn't scoped by the review's own reproduction.
+      **Verified live against the pilot DB and the real running container**
+      (rebuilt, migration 0009 applied cleanly on startup with no errors):
+      a throwaway technician account was created directly (no real
+      password needed to verify -- a session token was minted server-side
+      the same way login does), a real conversation was started against a
+      real machine, a real question was asked through the actual live
+      provider, and retrying that answer correctly returned 409 "Only a
+      failed answer can be retried" once the live answer came back
+      `completed` -- proving the guard logic runs correctly against
+      production code and the real database, not just the test suite.
+      Every row the throwaway account created (user, conversation,
+      messages, message_sources) was deleted afterward; confirmed
+      unchanged before/after: 1 real user, 71 real documents, the
+      pre-existing real conversation count.
+      **Still not verified in a real browser** (no browser-automation
+      tooling available in this environment) -- the actual retry *button*,
+      clicked in a real browser against the running app, was not exercised;
+      `node --check` confirms the JS is syntactically valid and the live
+      HTTP check above confirms the endpoint it calls behaves correctly,
+      but the click-through UI path itself is unverified. Same category of
       gap as the shared-tablet caching item above.
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
