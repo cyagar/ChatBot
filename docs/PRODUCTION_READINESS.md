@@ -698,6 +698,72 @@ done than it is.
       **Also not done:** `resolved_query` is persisted but not surfaced
       anywhere in the API response or admin UI -- the only way to see what a
       follow-up actually retrieved on today is a direct database query.
+- [x] **`reindex_metadata.py` now matches its own docstring** (independent
+      follow-up review P1-10). The docstring always promised re-syncing
+      manufacturer/doc_type/title/revision/doc_number *and* machine links,
+      but the code only ever touched machine links -- given the review's own
+      explicit either/or ("make it accurately machine-link-only, or
+      implement the rest"), the user chose the full implementation.
+      Per-field, not per-document: a document with a human-corrected
+      `machine_links` override still gets its `doc_number` refreshed and its
+      stale notes cleared; a document with a corrected `title` still gets
+      its machine links re-synced. Reuses the existing
+      `metadata_overrides` table (already written by
+      `PATCH /api/admin/documents/{id}`) to check per field, not per
+      document, whether a human has already corrected it -- `doc_number` has
+      no override mechanism in that endpoint at all, so it's always
+      refreshed regardless of what else on the document is locked. Stale
+      "needs admin review" notes are cleared from `status_reason` once no
+      longer reproduced by the current extraction, but only entries matching
+      metadata extraction's own recognizable note formats -- `status_reason`
+      is a single shared flat string also written by ingestion and by admin
+      deactivation, so an unrelated note living in the same field is never
+      touched. `reindex_documents()` was extracted out of `main()` (CLI
+      parsing/printing) specifically so it could be unit-tested directly.
+      `backend/tests/unit/test_reindex_metadata.py` (16 tests, new) covers
+      every promised field twice each (updates when not overridden,
+      preserved when overridden), `doc_number` always refreshing even when
+      every other field is locked, stale-note clearing, non-metadata
+      `status_reason` content surviving untouched, dry-run making zero
+      database writes, and one document's extraction failure not blocking
+      another's update.
+      **A real, unrelated finding surfaced while trying to verify this
+      live, not a defect in this fix:** running a full-corpus dry run inside
+      the live pilot container (`mem_limit: 2g`) was attempted twice and
+      both times the script was silently OOM-killed partway through (exit
+      137, no output -- Python only flushes buffered stdout on a clean
+      exit). A follow-up diagnostic pass, printing peak RSS per document,
+      showed why: `extract()` (OCR via Tesseract on scanned pages) drives
+      real, substantial memory growth per document -- 142MB after document 1
+      climbing to 921MB by document 15 of 64, with the biggest jumps on the
+      slowest (OCR-heavy) documents -- and the diagnostic itself was
+      silently killed at the same point, confirming it's a memory ceiling,
+      not a fluke. This growth pattern comes from `app/ingestion/extractors.py`'s
+      existing `extract()`, called identically by the *original*
+      `reindex_metadata.py` before this pass -- it predates this fix and
+      isn't something the new field-diffing logic introduced. It just was
+      never previously exercised by scanning every document in one
+      long-lived process. Checked before and after each attempt: the
+      documents/document_machines checksum
+      (71 documents, 65 links, unchanged) confirms no partial writes ever
+      landed, consistent with `--apply` never having been passed.
+      **Verification, stated plainly:** the field-level logic is proven
+      correct by the 16 unit tests above, each against realistic seeded
+      data with mocked extraction. Full-corpus live verification (running
+      the real dry run against all 71 real documents) was not completed --
+      the user chose to ship on the unit tests alone rather than raise the
+      container's memory limit or restart the live pilot container twice to
+      force it through. The container itself stayed healthy throughout (own
+      process never killed, only the exec'd script), so this did not affect
+      the technician actually using the app during the first attempt.
+      **Not done:** `--apply` was never run against the live corpus, by
+      design -- an admin should review a real dry-run diff (once one can
+      complete) before any field gets rewritten on production documents.
+      The OOM ceiling itself is also not fixed here -- it's a pre-existing,
+      separate operational gap (full-corpus scans need either more
+      container memory or per-document/batched invocation instead of one
+      long-lived process) worth its own pass, not folded into this item's
+      scope.
 - [ ] **Shared-tablet manual caching is implemented but not browser-tested
       across authorization transitions** (P1-12). The service worker
       namespaces the manual cache per user id
