@@ -10,6 +10,8 @@ from app.auth.deps import CurrentUser, require_admin
 from app.auth.security import generate_invitation_token
 from app.config import get_settings
 from app.db import get_conn
+from app.ingestion.chunking import CURRENT_CHUNKING_VERSION
+from app.ingestion.extractors import CURRENT_EXTRACTION_VERSION
 from app.ingestion.pipeline import _INGEST_LOCK, ingest_all
 from app.ingestion.scheduler import is_enabled as scheduler_is_enabled
 from app.retrieval.search import hybrid_search
@@ -39,6 +41,7 @@ class DocumentOut(BaseModel):
     ingested_at: str | None
     review_status: str
     reviewed_at: str | None
+    needs_reprocessing: bool
 
 
 def _row_to_document(conn, row) -> DocumentOut:
@@ -58,6 +61,15 @@ def _row_to_document(conn, row) -> DocumentOut:
         ingested_at=row["ingested_at"],
         review_status=row["review_status"],
         reviewed_at=row["reviewed_at"],
+        # Independent follow-up review 2026-08-24 P0-7: surfaces documents
+        # whose content is unchanged but were extracted/chunked at an older
+        # pipeline version -- see the needs_reprocessing outcome in
+        # pipeline.py._ingest_one for how this is detected at ingest time.
+        needs_reprocessing=(
+            row["status"] in ("indexed", "partial")
+            and (row["extraction_version"] != CURRENT_EXTRACTION_VERSION
+                 or row["chunking_version"] != CURRENT_CHUNKING_VERSION)
+        ),
     )
 
 

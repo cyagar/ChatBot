@@ -19,8 +19,8 @@ from pathlib import Path
 from app.config import get_settings
 from app.db import get_conn
 from app.ingestion import dedup
-from app.ingestion.chunking import chunk_document
-from app.ingestion.extractors import extract
+from app.ingestion.chunking import CURRENT_CHUNKING_VERSION, chunk_document
+from app.ingestion.extractors import CURRENT_EXTRACTION_VERSION, extract
 from app.ingestion.metadata import extract_metadata
 from app.ingestion.sources import DocumentSource, get_document_source
 
@@ -267,23 +267,47 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
     # since. The idempotency/resume check below always compares against the
     # most recently ingested one, not an arbitrary one, and matches on it by
     # id explicitly rather than assuming source_ref alone is unique.
+    # needs_reprocessing (independent follow-up review 2026-08-24 P0-7):
+    # unchanged bytes used to be skipped unconditionally -- so a document
+    # extracted/chunked before a pipeline-logic fix shipped would never
+    # receive it, silently, forever, since nothing ever re-examined it once
+    # its content stopped changing. 'indexed'/'partial' rows now also compare
+    # extraction_version/chunking_version against the code's current
+    # versions; a mismatch is reported (not skipped_unchanged) so the gap is
+    # visible instead of invisible. Not auto-reprocessed this run -- see
+    # DocumentOut.needs_reprocessing in routes_admin.py and
+    # docs/PRODUCTION_READINESS.md for what's built and what isn't.
     stable_retry_id: int | None = None
     superseded_candidate_id: int | None = None
     with get_conn() as conn:
         existing = conn.execute(
-            "SELECT id, status, sha256 FROM documents WHERE source_ref = ? AND deactivated_at IS NULL "
-            "ORDER BY ingested_at DESC, id DESC LIMIT 1",
+            "SELECT id, status, sha256, extraction_version, chunking_version FROM documents "
+            "WHERE source_ref = ? AND deactivated_at IS NULL ORDER BY ingested_at DESC, id DESC LIMIT 1",
             (sf.source_ref,),
         ).fetchone()
 
         if existing and existing["sha256"] == sf.sha256:
-            if existing["status"] in ("indexed", "partial", "duplicate"):
+            stale_pipeline_version = (
+                existing["status"] in ("indexed", "partial")
+                and (existing["extraction_version"] != CURRENT_EXTRACTION_VERSION
+                     or existing["chunking_version"] != CURRENT_CHUNKING_VERSION)
+            )
+            if existing["status"] in ("indexed", "partial", "duplicate") and not stale_pipeline_version:
                 _record_event(conn, run_id, sf.filename, "skipped_unchanged",
                               f"Unchanged since document {existing['id']} was last processed "
                               f"(status={existing['status']}).", existing["id"])
                 return FileOutcome(sf.filename, "skipped_unchanged",
                                    f"Unchanged since document {existing['id']} was last processed.",
                                    existing["id"])
+            if stale_pipeline_version:
+                detail = (
+                    f"Content unchanged, but document {existing['id']} was extracted/chunked at an "
+                    f"older pipeline version (extraction v{existing['extraction_version']}, "
+                    f"chunking v{existing['chunking_version']} vs current v{CURRENT_EXTRACTION_VERSION}/"
+                    f"v{CURRENT_CHUNKING_VERSION}). Not reprocessed automatically this run."
+                )
+                _record_event(conn, run_id, sf.filename, "needs_reprocessing", detail, existing["id"])
+                return FileOutcome(sf.filename, "needs_reprocessing", detail, existing["id"])
             stable_retry_id = existing["id"]
         elif existing:
             superseded_candidate_id = existing["id"]
@@ -447,12 +471,13 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
         cur = conn.execute(
             "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
             "file_type, sha256, byte_size, page_count, manufacturer_id, doc_type, title, revision, "
-            "doc_number, status, status_reason, ingested_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            "doc_number, status, status_reason, extraction_version, chunking_version, ingested_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
             (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
              sf.sha256, sf.byte_size, extracted.page_count, manu_id, meta.doc_type,
              meta.title, meta.revision, meta.doc_number, status,
-             " | ".join(status_reason_parts) if status_reason_parts else None),
+             " | ".join(status_reason_parts) if status_reason_parts else None,
+             CURRENT_EXTRACTION_VERSION, CURRENT_CHUNKING_VERSION),
         )
         doc_id = cur.lastrowid
 

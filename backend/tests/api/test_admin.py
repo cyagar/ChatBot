@@ -40,6 +40,31 @@ def test_list_documents_returns_seeded_document(test_env):
     assert any(d["id"] == doc_id for d in body)
 
 
+def test_document_at_current_pipeline_version_does_not_need_reprocessing(test_env):
+    """Migration 0008 defaults extraction_version/chunking_version to 1,
+    matching CURRENT_EXTRACTION_VERSION/CURRENT_CHUNKING_VERSION today -- the
+    existing corpus must not be retroactively flagged as stale on upgrade."""
+    with get_conn() as conn:
+        doc_id = _seed_document(conn)
+    _register_admin()
+
+    doc = next(d for d in client.get("/api/admin/documents").json() if d["id"] == doc_id)
+    assert doc["needs_reprocessing"] is False
+
+
+def test_document_at_a_stale_pipeline_version_needs_reprocessing(test_env):
+    """Independent follow-up review 2026-08-24 P0-7 (bounded slice): a
+    document's pipeline version is now visible via the same listing an admin
+    already uses to review documents, not buried only in ingestion_events."""
+    with get_conn() as conn:
+        doc_id = _seed_document(conn)
+        conn.execute("UPDATE documents SET chunking_version = 0 WHERE id = ?", (doc_id,))
+    _register_admin()
+
+    doc = next(d for d in client.get("/api/admin/documents").json() if d["id"] == doc_id)
+    assert doc["needs_reprocessing"] is True
+
+
 def test_metadata_correction_updates_and_logs_audit_trail(test_env):
     with get_conn() as conn:
         doc_id = _seed_document(conn)

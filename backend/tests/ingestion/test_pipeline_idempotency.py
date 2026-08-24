@@ -69,6 +69,39 @@ def test_second_run_skips_unchanged_files(test_env, make_pdf, manuals_dir):
     assert second.counts() == {"skipped_unchanged": 1}
 
 
+def test_unchanged_file_at_a_stale_pipeline_version_is_flagged_not_silently_skipped(
+    test_env, make_pdf, manuals_dir, monkeypatch
+):
+    """Independent follow-up review 2026-08-24 P0-7: 'unchanged manuals don't
+    receive new pipeline logic.' A document whose bytes never change used to
+    be skipped forever regardless of whether extraction/chunking logic
+    changed since it was last processed. Simulates a pipeline version bump
+    (CURRENT_CHUNKING_VERSION going from 1 to 2) and confirms an otherwise-
+    unchanged file is reported as needs_reprocessing, not silently absorbed
+    into skipped_unchanged -- and that it is NOT auto-reprocessed (the
+    document's chunking_version in the DB stays at what actually produced its
+    current chunks, not the new code's version, since nothing re-chunked it)."""
+    pdf = make_pdf(["Content about the ice cream machine compressor cycle."])
+    shutil.copy(pdf, manuals_dir / pdf.name)
+    source = FakeDirectorySource(manuals_dir)
+
+    first = ingest_all(source=source, embed=False)
+    assert first.counts().get("indexed") == 1
+
+    import app.ingestion.pipeline as pipeline_module
+    monkeypatch.setattr(pipeline_module, "CURRENT_CHUNKING_VERSION", 2)
+
+    second = ingest_all(source=source, embed=False)
+    assert second.counts() == {"needs_reprocessing": 1}
+
+    with get_conn() as conn:
+        doc = conn.execute(
+            "SELECT chunking_version, status FROM documents WHERE status = 'indexed'"
+        ).fetchone()
+    assert doc["chunking_version"] == 1, "not auto-reprocessed -- version stays at what actually produced its chunks"
+    assert doc["status"] == "indexed", "the document itself is untouched, only flagged"
+
+
 def test_third_consecutive_run_still_stable(test_env, make_pdf, manuals_dir):
     """The real acceptance criterion: indexing must be idempotent across
     repeated runs, not just the second one."""

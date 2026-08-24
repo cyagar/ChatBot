@@ -20,6 +20,15 @@ from app.ingestion.extracted import ExtractedDocument, ExtractedPage, ExtractedT
 MIN_CHARS_PER_PAGE_FOR_TEXT_LAYER = 20
 OCR_RENDER_DPI = 300
 
+# Independent follow-up review 2026-08-24 P0-7: bump this whenever extraction
+# logic changes materially (a new file type, a fixed text-layer heuristic, a
+# different OCR trigger). documents.extraction_version records which version
+# actually produced a document's current content -- a mismatch against this
+# constant is what lets _ingest_one detect an already-ingested, unchanged
+# document whose extraction predates a since-shipped fix (see
+# DocumentOut.needs_reprocessing in routes_admin.py).
+CURRENT_EXTRACTION_VERSION = 1
+
 
 def _configure_tesseract() -> bool:
     """Points pytesseract at the configured binary. Returns False (and leaves OCR

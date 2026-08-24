@@ -17,6 +17,13 @@ from app.ingestion.extracted import ExtractedDocument
 TARGET_CHARS = 1200
 MIN_CHARS = 150
 
+# Independent follow-up review 2026-08-24 P0-7: bump this whenever chunking
+# logic changes materially (boundary detection, size caps, table handling).
+# documents.chunking_version records which version actually produced a
+# document's current chunks -- see extractors.py's CURRENT_EXTRACTION_VERSION
+# for the matching mechanism on the extraction side.
+CURRENT_CHUNKING_VERSION = 1
+
 # Independent review concern #16: 40 chunks in the corpus exceeded 2,000
 # characters (largest over 11,000), all table/error-code chunks -- and an
 # embedding model typically truncates its input, so rows past the truncation

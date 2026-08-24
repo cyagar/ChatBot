@@ -995,6 +995,53 @@ done than it is.
       upgraded now. `_INGEST_LOCK` remains a single-process lock, correct
       for this pilot's single-instance deployment and explicitly not
       multi-replica-safe.
+- [x] **Unchanged manuals no longer silently outlive the pipeline logic that
+      produced them** (2026-08-24 independent follow-up review, P0-7,
+      bounded slice). A document whose bytes (sha256) never change was
+      always skipped by `_ingest_one`'s idempotency check, regardless of
+      whether `extractors.py`/`chunking.py`'s logic had changed since it was
+      last processed -- a parsing or chunking fix could ship and silently
+      never reach a single already-ingested document, with no way for an
+      admin to even know that had happened.
+      New migration `0008_pipeline_versioning.sql` adds
+      `documents.extraction_version`/`chunking_version` (default 1, matching
+      today's code -- the existing corpus is not retroactively flagged on
+      upgrade). `extractors.py`/`chunking.py` each now export a
+      `CURRENT_EXTRACTION_VERSION`/`CURRENT_CHUNKING_VERSION` constant,
+      bumped whenever that stage's logic changes materially; every freshly
+      (re)indexed document is stamped with the versions that actually
+      produced it. `_ingest_one`'s unchanged-bytes check now also compares
+      the existing row's stored versions against the current constants --
+      a mismatch returns a new `needs_reprocessing` outcome (visible via
+      `ingestion_events`/run counts, the same visibility every other
+      outcome gets) instead of being silently folded into
+      `skipped_unchanged`. Also surfaced where an admin already looks:
+      `DocumentOut.needs_reprocessing` (`GET /api/admin/documents`) computes
+      the same comparison, so a stale document shows up in the listing an
+      admin already reviews documents through, not only in a run log.
+      3 new tests: a simulated version bump on an otherwise-unchanged file
+      is reported as `needs_reprocessing` (not `skipped_unchanged`) and
+      leaves the document's stored version/status untouched (proving it's
+      detection, not silent auto-reprocessing); the existing-corpus-not-
+      flagged-on-upgrade default; and the API-level flag flips correctly.
+      Full backend suite (234 passed, 1 skipped) re-run clean.
+      **Not done, and stated plainly so this isn't mistaken for closing the
+      gap:** this is detection/reporting only -- nothing automatically
+      re-extracts or re-chunks a flagged document this pass. Advisor
+      framing for this slice was "record versions so a mismatch can force
+      reprocessing"; what's built here forces *visibility*, not automatic
+      reprocessing. Automatically reprocessing a flagged document in place
+      (replacing its chunks without resetting `review_status`/losing
+      approval history -- a materially different, riskier operation than
+      the version-bump detection above) was judged too large and too risky
+      to build and land untested in one pass against a live 71-document
+      corpus; the precedent for that kind of in-place refresh is
+      `scripts/reindex_metadata.py` (P1-10 above), which took its own
+      dedicated pass with 16 tests for metadata fields alone. A
+      `chunking`/`extraction`-equivalent reprocessing script is a natural,
+      scoped follow-up, not built here. Also not built: a dependency graph
+      across pipeline stages (the review's fuller ask) -- two flat version
+      numbers, not a graph, as scoped going in.
 - [ ] **Shared-tablet manual caching is implemented but not browser-tested
       across authorization transitions** (P1-12). The service worker
       namespaces the manual cache per user id
