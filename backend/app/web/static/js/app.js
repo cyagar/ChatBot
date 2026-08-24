@@ -4,7 +4,7 @@
 
 const state = {
   user: null,
-  screen: "loading", // loading | auth | picker | chat
+  screen: "loading", // loading | auth | picker | chat | history | saved
   authMode: "login", // login | register
   inviteToken: null,
   inviteEmail: null,
@@ -13,6 +13,9 @@ const state = {
   messages: [],
   machineResults: [],
   recentMachines: [],
+  conversations: [], // GET /api/conversations, for the history/resume screen (P1-3)
+  savedAnswers: [], // GET /api/saved-answers
+  historySearchQuery: "",
   // "new" (default): picking a machine starts a fresh conversation, as from
   // the login/new-conversation/change-machine entry points. "resume": the
   // picker was opened from a clarifying message's fallback "Choose a
@@ -88,16 +91,39 @@ async function boot() {
 
   try {
     state.user = await api("/api/auth/me");
-    state.screen = "picker";
     // Tells the worker which user's manual cache to read/write from now on --
     // it has no other way to know (concern #21: a shared tablet must not mix
     // one technician's cached manuals into another's session).
     notifyServiceWorker({ type: "SET_USER", userId: state.user.id });
     await loadRecentMachines();
+    // P1-3 (2026-08-24 independent follow-up review): boot used to always
+    // land on the machine picker, with no way to see or resume a prior
+    // conversation -- GET /api/conversations existed but nothing called it
+    // at boot. A returning technician with conversation history now lands
+    // on that history list instead; someone with none goes straight to the
+    // picker, since an empty history screen has nothing useful to show.
+    await loadConversations();
+    state.screen = state.conversations.length ? "history" : "picker";
   } catch (e) {
     state.screen = "auth";
   }
   render();
+}
+
+async function loadConversations() {
+  try {
+    state.conversations = await api("/api/conversations");
+  } catch (_) {
+    state.conversations = [];
+  }
+}
+
+async function loadSavedAnswers() {
+  try {
+    state.savedAnswers = await api("/api/saved-answers");
+  } catch (_) {
+    state.savedAnswers = [];
+  }
 }
 
 async function logout() {
@@ -113,6 +139,12 @@ async function logout() {
   state.conversationId = null;
   state.messages = [];
   state.machine = null;
+  // Same shared-tablet boundary (concern #21) applies to history/saved
+  // answers -- the next technician on this tablet must never see the
+  // previous one's conversation list or saved answers, even for a moment.
+  state.conversations = [];
+  state.savedAnswers = [];
+  state.historySearchQuery = "";
   render();
 }
 
@@ -221,6 +253,7 @@ function renderPicker() {
       <header class="app-header">
         <div class="brand">🔧 Technician Manual Assistant</div>
         <div class="header-actions">
+          <button id="view-history" class="ghost">🕘 Conversations</button>
           ${state.user?.role === "administrator" ? `<a href="/admin"><button class="ghost">Admin</button></a>` : ""}
           <button id="logout-btn" class="ghost">Sign out</button>
         </div>
@@ -249,6 +282,15 @@ function renderPicker() {
   `;
 
   document.getElementById("logout-btn").addEventListener("click", logout);
+  document.getElementById("view-history").addEventListener("click", () => {
+    // The picker can be reached mid-clarify ("Choose a machine" -> resume
+    // mode); navigating away here does not lose anything server-side --
+    // pending_message_id stays set on the conversation until a machine is
+    // actually confirmed, so resuming that same conversation later from
+    // history still works.
+    state.pickerMode = "new";
+    goToHistory();
+  });
 
   const searchInput = document.getElementById("machine-search");
   searchInput.addEventListener("input", debounce((e) => {
@@ -307,6 +349,186 @@ async function startConversation(machineId) {
   }
 }
 
+// --- History / resume / saved answers (P1-3) -------------------------------
+// 2026-08-24 independent follow-up review: "The web UI still does not list
+// or resume prior conversations... Build a tablet-friendly history/resume
+// view, saved-answer view, searchable recent jobs, and clear machine/
+// conversation boundaries." GET /api/conversations and the save/feedback
+// endpoints already existed server-side; nothing in the frontend ever called
+// the former, and the latter had no view to read saved answers back from.
+//
+// NOTE: this screen has not been exercised in a real browser (no
+// browser-automation tooling in this environment) -- endpoint contracts are
+// covered by backend tests and `node --check` confirms this file is
+// syntactically valid, but layout, touch targets, and the actual
+// click-through flow on a tablet are unverified. Same caveat as the retry
+// button shipped earlier this session.
+
+function formatDateTime(sqliteUtcString) {
+  // SQLite's datetime('now') returns "YYYY-MM-DD HH:MM:SS" in UTC with no
+  // timezone marker -- most browsers parse that as LOCAL time if handed to
+  // Date() directly, silently showing the wrong time. Converting to real
+  // ISO-8601 UTC first makes parsing unambiguous everywhere.
+  try {
+    const d = new Date(sqliteUtcString.replace(" ", "T") + "Z");
+    if (isNaN(d.getTime())) return sqliteUtcString;
+    return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  } catch (_) {
+    return sqliteUtcString;
+  }
+}
+
+function matchesHistorySearch(text) {
+  const q = state.historySearchQuery.trim().toLowerCase();
+  if (!q) return true;
+  return (text || "").toLowerCase().includes(q);
+}
+
+function conversationListItem(c) {
+  const title = c.title || "New conversation";
+  return `
+    <li>
+      <button class="machine-option" data-conversation-id="${c.id}">
+        <span class="model">${escapeHtml(title)}</span>
+        <span class="meta">${escapeHtml(c.machine_label || "No machine selected")} · ${escapeHtml(formatDateTime(c.updated_at))}</span>
+      </button>
+    </li>
+  `;
+}
+
+function renderHistory() {
+  const filtered = state.conversations.filter(
+    (c) => matchesHistorySearch(c.title) || matchesHistorySearch(c.machine_label)
+  );
+  root.innerHTML = `
+      <header class="app-header">
+        <div class="brand">🔧 Technician Manual Assistant</div>
+        <div class="header-actions">
+          <button id="view-saved" class="ghost">☆ Saved answers</button>
+          ${state.user?.role === "administrator" ? `<a href="/admin"><button class="ghost">Admin</button></a>` : ""}
+          <button id="logout-btn" class="ghost">Sign out</button>
+        </div>
+      </header>
+      <main>
+        ${!state.online ? `<div class="banner offline">You're offline. Starting a new question or resuming an old one needs a live connection.</div>` : ""}
+        <div class="picker-card">
+          <h1>Your conversations</h1>
+          <p class="subtitle">Resume a prior job, or start a new one.</p>
+          <div class="search-row">
+            <input id="history-search" type="search" placeholder="Search by machine or question"
+                   value="${escapeHtml(state.historySearchQuery)}" autocomplete="off" aria-label="Search conversation history" />
+          </div>
+          <ul class="machine-list">
+            ${filtered.map(conversationListItem).join("") || `<li class="empty-state">No matching conversations.</li>`}
+          </ul>
+          <button id="new-conversation-from-history" class="primary">+ New conversation</button>
+        </div>
+      </main>
+  `;
+
+  document.getElementById("logout-btn").addEventListener("click", logout);
+  document.getElementById("view-saved").addEventListener("click", goToSaved);
+  document.getElementById("new-conversation-from-history").addEventListener("click", () => {
+    state.pickerMode = "new";
+    state.screen = "picker";
+    state.searchQuery = "";
+    render();
+  });
+
+  const searchInput = document.getElementById("history-search");
+  searchInput.addEventListener("input", (e) => {
+    state.historySearchQuery = e.target.value;
+    render();
+  });
+  const caretPos = searchInput.selectionStart ?? searchInput.value.length;
+  searchInput.focus();
+  searchInput.setSelectionRange(caretPos, caretPos);
+
+  root.querySelectorAll(".machine-option[data-conversation-id]").forEach((btn) => {
+    btn.addEventListener("click", () => resumeConversation(parseInt(btn.dataset.conversationId, 10)));
+  });
+}
+
+async function goToHistory() {
+  await loadConversations();
+  state.screen = "history";
+  render();
+}
+
+async function goToSaved() {
+  await loadSavedAnswers();
+  state.screen = "saved";
+  render();
+}
+
+async function resumeConversation(id) {
+  // Clear machine/conversation boundary (part of P1-3's ask): resuming
+  // always restores the MACHINE STORED ON THAT CONVERSATION, never carries
+  // over whatever machine happened to be selected in this session before --
+  // the same "never silently switch machines" rule the picker/clarify flow
+  // already follows for concern #5/#6.
+  const conv = state.conversations.find((c) => c.id === id);
+  try {
+    const messages = await api(`/api/conversations/${id}/messages`);
+    state.conversationId = id;
+    state.machine = conv && conv.machine_id != null
+      ? { id: conv.machine_id, label: conv.machine_label }
+      : null;
+    state.messages = messages;
+    state.screen = "chat";
+    render();
+  } catch (err) {
+    alert("Could not open that conversation: " + err.message);
+  }
+}
+
+function savedAnswerItem(entry) {
+  const m = entry.answer;
+  return `
+    <div class="msg assistant" data-message-id="${m.id}">
+      <div class="bubble">
+        <div style="font-size:0.85rem; color:var(--text-dim); margin-bottom:6px;">
+          ${escapeHtml(entry.machine_label || "No machine selected")}
+          ${entry.question ? " · " + escapeHtml(entry.question) : ""}
+        </div>
+        ${renderMarkdownish(m.content)}
+      </div>
+      ${m.citations && m.citations.length
+        ? `<div class="citations">${m.citations.map(renderCitation).join("")}</div>`
+        : ""}
+      <div class="msg-actions">
+        <button class="ghost open-conversation-btn" data-conversation-id="${entry.conversation_id}">Open conversation</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderSaved() {
+  root.innerHTML = `
+      <header class="app-header">
+        <button id="back-to-history" class="ghost" aria-label="Back to conversations">← Conversations</button>
+        <div class="header-actions">
+          ${state.user?.role === "administrator" ? `<a href="/admin"><button class="ghost">Admin</button></a>` : ""}
+          <button id="logout-btn" class="ghost">Sign out</button>
+        </div>
+      </header>
+      <main>
+        <div class="chat-log">
+          <h1 style="padding: 0 4px;">Saved answers</h1>
+          ${state.savedAnswers.length
+            ? state.savedAnswers.map(savedAnswerItem).join("")
+            : `<div class="empty-state">Nothing saved yet -- tap ☆ Save on any answer to keep it here.</div>`}
+        </div>
+      </main>
+  `;
+
+  document.getElementById("logout-btn").addEventListener("click", logout);
+  document.getElementById("back-to-history").addEventListener("click", goToHistory);
+  root.querySelectorAll(".open-conversation-btn").forEach((btn) => {
+    btn.addEventListener("click", () => resumeConversation(parseInt(btn.dataset.conversationId, 10)));
+  });
+}
+
 // --- Chat -----------------------------------------------------------------
 
 function machineDisplayLabel(m) {
@@ -322,6 +544,7 @@ function renderChat() {
           <span class="machine-pill-text">${escapeHtml(machineDisplayLabel(state.machine))}</span>
         </button>
         <div class="header-actions">
+          <button id="view-history" class="ghost">🕘 Conversations</button>
           <button id="new-conversation" class="ghost">New conversation</button>
           ${state.user?.role === "administrator" ? `<a href="/admin"><button class="ghost">Admin</button></a>` : ""}
           <button id="logout-btn" class="ghost">Sign out</button>
@@ -362,6 +585,7 @@ function renderChat() {
     state.pickerMode = "new";
     startConversation(state.machine?.id ?? null);
   });
+  document.getElementById("view-history").addEventListener("click", goToHistory);
   document.getElementById("logout-btn").addEventListener("click", logout);
 
   document.getElementById("composer-form").addEventListener("submit", async (e) => {
@@ -653,6 +877,8 @@ function render() {
   if (state.screen === "auth") return renderAuth();
   if (state.screen === "picker") return renderPicker();
   if (state.screen === "chat") return renderChat();
+  if (state.screen === "history") return renderHistory();
+  if (state.screen === "saved") return renderSaved();
   root.innerHTML = `<div class="empty-state">Loading…</div>`;
 }
 

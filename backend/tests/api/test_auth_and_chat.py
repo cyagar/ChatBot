@@ -208,7 +208,29 @@ def test_save_and_list_saved_answer_roundtrip(test_env):
     list_resp = client.get("/api/saved-answers")
     assert list_resp.status_code == 200
     saved = list_resp.json()
-    assert any(m["id"] == msg["id"] for m in saved)
+    entry = next((s for s in saved if s["answer"]["id"] == msg["id"]), None)
+    assert entry is not None
+    # P1-3: a saved answer must carry enough context to resume from -- which
+    # conversation it belongs to and the question that produced it, not just
+    # the bare answer text.
+    assert entry["conversation_id"] == conv["id"]
+    assert entry["question"] == "test question"
+
+
+def test_list_conversations_derives_a_title_from_the_first_user_message(test_env):
+    """P1-3: conversations.title is never written anywhere in the codebase --
+    without a derived fallback, every row in a history list would render
+    blank. Also covers a conversation with no messages yet (title None)."""
+    _register("tech8@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    empty_conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    long_question = "Why does the brewer keep tripping the breaker " + ("x" * 80)
+    client.post(f"/api/conversations/{conv['id']}/messages", json={"content": long_question})
+
+    listed = {c["id"]: c for c in client.get("/api/conversations").json()}
+    assert listed[conv["id"]]["title"].startswith("Why does the brewer keep tripping the breaker")
+    assert len(listed[conv["id"]]["title"]) <= 80
+    assert listed[empty_conv["id"]]["title"] is None
 
 
 def test_confirm_machine_endpoint_sets_and_persists_machine(test_env):

@@ -1248,7 +1248,16 @@ done than it is.
       skipping no-answer turns entirely, and falls back to the technician's
       own original wording (unchanged) when no such turn exists anywhere in
       history -- retrieving on the technician's own words is safer than
-      retrieving on noise. This IS the module's confidence model: resolved
+      retrieving on noise. Verified `is_no_answer` is the correct single
+      signal to key off: every place `_generate_and_persist_answer` sets
+      `answer_status = 'failed'` (routes_chat.py:265, 285, 294) sets
+      `is_no_answer=True` on the same `GeneratedAnswer` in the same branch,
+      and the transient `'retrying'` state (P1-1) never touches
+      `is_no_answer` mid-flight -- it stays whatever it already was (1, from
+      the original failure) until a new result is persisted. So there is no
+      reachable state where a failed/retrying turn has `is_no_answer=0` and
+      slips past the resolver's skip check. This IS the module's confidence
+      model: resolved
       (an antecedent was found) vs. unresolved (returned unchanged, already
       observable via `!= question`, unchanged from before this pass). Three
       new negative/multi-turn tests added to
@@ -1276,6 +1285,79 @@ done than it is.
       resolved-vs-unresolved signal; building a technician-facing
       clarification flow would overlap with the P1-3 history/resume UI work
       and was left there rather than half-built in this item.
+- [x] **History/resume view, saved-answer view, and searchable recent jobs
+      built** (2026-08-24 independent follow-up review, P1-3). Before this:
+      `GET /api/conversations` existed server-side but nothing in
+      `app.js` ever called it -- boot always landed on the machine picker,
+      and there was no way to see or reopen a prior conversation short of
+      querying the DB directly; `GET /api/saved-answers` existed but had no
+      view to read it back from either. Backend changes, each covered by a
+      new test: (1) `conversations.title` is never written anywhere in the
+      codebase (grepped for every `UPDATE conversations SET title` -- none
+      exist), so a bare history list would render every row blank; a new
+      `_conversation_title()` derives one from the conversation's first
+      user message (truncated to 80 chars) when no stored title exists.
+      (2) `GET /api/saved-answers` used to return a bare `list[MessageOut]`
+      with no way to tell which conversation or machine an answer came
+      from, making a saved-answer view useless for its actual purpose
+      ("go back to that job") -- it now returns
+      `[{conversation_id, machine_label, question, answer}]`, looking up
+      each answer's preceding user question the same way `retry_answer`
+      already does. Frontend: two new screens, `history` (list of
+      conversations, each showing derived title / machine / last-updated,
+      with a client-side search-as-you-type filter over title and machine
+      -- "searchable recent jobs") and `saved` (saved answers with their
+      originating machine/question and an "Open conversation" button back
+      into the source conversation). Boot now loads conversations first and
+      lands on `history` when any exist, `picker` when none do (a
+      first-time user with nothing to resume). A "🕘 Conversations" button
+      was added to both the picker and chat headers so history is reachable
+      from anywhere, not just at boot. "Clear machine/conversation
+      boundaries": resuming a conversation from history always restores
+      *that conversation's own* stored machine (never whatever machine
+      happened to be selected in the current session before), the same
+      never-silently-switch rule the clarify flow already followed for
+      concern #5/#6; logout clears the in-memory conversation/saved-answer
+      lists the same way it already clears everything else, so a shared
+      tablet can't leak one technician's job history to the next (concern
+      #21). `node --check` passes; full backend suite (262 passed, 1
+      skipped) re-run clean. **Live-verified against the real running pilot
+      container**, not just temp-DB tests: rebuilt the image
+      (`docker compose up --build`), created a throwaway technician
+      directly in the production DB, minted a session token, and drove the
+      actual `app.main` FastAPI object (not a test fixture) through
+      `TestClient` against the live `/data/db/app.db` -- confirmed
+      `GET /api/conversations` returns `[]` for a new user, confirmed the
+      derived title matches the first question asked, and confirmed
+      `GET /api/saved-answers` returns the new `conversation_id`/
+      `machine_label`/`question` shape correctly joined from real rows.
+      Full cleanup afterward (FK-safe delete order, plus clearing
+      `conversations.pending_message_id` first -- it self-references
+      `messages(id)`, which the earlier P1-1 cleanup script didn't need to
+      touch since that verification never left a message pending);
+      confirmed 0 residual rows for the throwaway user and unchanged real
+      counts before/after (1 real user, 71 real documents).
+      **Not done, and this is the important caveat:** the two new screens
+      have **not been exercised in a real browser**. No browser-automation
+      tooling exists in this environment. What was verified: the API
+      contracts these screens depend on (via the live check above),
+      `node --check` syntactic validity, and that the existing screens'
+      behavior (picker, chat, retry, machine confirm) still passes their
+      own tests unchanged. What was NOT verified: layout on an actual
+      tablet viewport, touch-target sizing, whether the search input's
+      caret/focus behavior works as intended across browsers, or the
+      click-through flow a technician would actually experience. This is a
+      materially bigger gap than the retry button's same caveat earlier in
+      this session, since the retry button was one control added to an
+      already-shipped, presumably-exercised screen -- these are two entire
+      new screens. Also not done: pagination for the conversation/saved-
+      answer lists (`GET /api/conversations` already accepts a `limit`
+      param, default 20, unused by the new UI beyond that default) and any
+      server-side search (the "searchable" part is a client-side filter
+      over already-fetched rows, bounded by that same 20-row default, not
+      a new search endpoint) -- reasonable for the pilot's current scale,
+      would need revisiting if a technician's history routinely exceeds one
+      page.
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
 

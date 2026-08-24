@@ -158,6 +158,26 @@ def create_conversation(payload: CreateConversationRequest, user: CurrentUser = 
     )
 
 
+def _conversation_title(conn, conversation_id: int, stored_title: str | None) -> str | None:
+    """P1-3 (2026-08-24 independent follow-up review): nothing writes
+    conversations.title -- it has always been NULL for every conversation
+    that exists, which would make a history list unusable (every row blank).
+    Derive one from the first user message when no stored title exists,
+    rather than building a title-generation feature that isn't what this
+    item asked for."""
+    if stored_title:
+        return stored_title
+    row = conn.execute(
+        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' "
+        "ORDER BY id ASC LIMIT 1",
+        (conversation_id,),
+    ).fetchone()
+    if not row:
+        return None
+    content = row["content"].strip()
+    return content if len(content) <= 80 else content[:79].rstrip() + "…"
+
+
 @router.get("/conversations", response_model=list[ConversationOut])
 def list_conversations(user: CurrentUser = Depends(get_current_user), limit: int = 20):
     with get_conn() as conn:
@@ -171,7 +191,8 @@ def list_conversations(user: CurrentUser = Depends(get_current_user), limit: int
             label = _machine_label(conn, r["machine_id"])
             out.append(ConversationOut(
                 id=r["id"], machine_id=r["machine_id"], machine_label=label,
-                title=r["title"], started_at=r["started_at"], updated_at=r["updated_at"],
+                title=_conversation_title(conn, r["id"], r["title"]),
+                started_at=r["started_at"], updated_at=r["updated_at"],
             ))
     return out
 
@@ -702,14 +723,42 @@ def save_answer(message_id: int, user: CurrentUser = Depends(get_current_user)):
     return {"ok": True}
 
 
-@router.get("/saved-answers", response_model=list[MessageOut])
+class SavedAnswerOut(BaseModel):
+    conversation_id: int
+    machine_label: str | None
+    question: str | None
+    answer: MessageOut
+
+
+@router.get("/saved-answers", response_model=list[SavedAnswerOut])
 def list_saved_answers(user: CurrentUser = Depends(get_current_user)):
+    """P1-3 (2026-08-24 independent follow-up review): a saved-answer view is
+    useless without knowing which conversation/machine/question it came from
+    -- MessageOut alone (the old response shape) carries none of that. Each
+    entry now also names which conversation it can be resumed from, so the
+    UI can offer "Open conversation" rather than showing an orphaned answer."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT m.id, m.role, m.content, m.is_clarifying_question, m.is_no_answer, "
-            "m.safety_warnings, m.conflict_note, m.answer_status, m.created_at "
-            "FROM saved_answers sa JOIN messages m ON m.id = sa.message_id "
+            "m.safety_warnings, m.conflict_note, m.answer_status, m.retry_count, m.created_at, "
+            "m.conversation_id, c.machine_id "
+            "FROM saved_answers sa "
+            "JOIN messages m ON m.id = sa.message_id "
+            "JOIN conversations c ON c.id = m.conversation_id "
             "WHERE sa.user_id = ? ORDER BY sa.saved_at DESC",
             (user.id,),
         ).fetchall()
-        return [_hydrate_message(conn, r) for r in rows]
+        out = []
+        for r in rows:
+            question_row = conn.execute(
+                "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' AND id < ? "
+                "ORDER BY id DESC LIMIT 1",
+                (r["conversation_id"], r["id"]),
+            ).fetchone()
+            out.append(SavedAnswerOut(
+                conversation_id=r["conversation_id"],
+                machine_label=_machine_label(conn, r["machine_id"]),
+                question=question_row["content"] if question_row else None,
+                answer=_hydrate_message(conn, r),
+            ))
+        return out
