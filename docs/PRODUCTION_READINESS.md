@@ -1358,6 +1358,112 @@ done than it is.
       a new search endpoint) -- reasonable for the pilot's current scale,
       would need revisiting if a technician's history routinely exceeds one
       page.
+- [x] **Concurrency tests added for approval/promotion and invitation; a real
+      race found and fixed in the approval path** (2026-08-24 independent
+      follow-up review, P1-6). The review's ask -- "Include concurrent chat,
+      feedback, approval, invitation, retry, and promotion tests against the
+      production database/queue" -- is explicitly answered within the
+      current single-instance SQLite model, the same deferral framing as
+      P0-6's "database/distributed advisory locks" ask: there is no
+      production database/queue to test against yet (that's P0-1, deferred).
+      What's tested here is whether this codebase's existing claim-UPDATE
+      concurrency pattern actually holds up against real, forced thread
+      interleaving under SQLite -- and in one case it didn't.
+      **Approval/promotion** (the review's two words for the same event --
+      approving a replacement document IS the promotion point, per P0-2):
+      `review_document`'s `review_status` UPDATE (`app/api/routes_admin.py`)
+      had no WHERE-clause guard against a concurrent supersession -- it
+      relied only on an earlier, separate, unguarded SELECT. Two admins
+      approving two DIFFERENT pending replacement candidates at the SAME
+      source_ref concurrently could both pass that initial SELECT before
+      either committed; the second admin's UPDATE would then set
+      review_status='approved' on a document the first admin's supersede
+      step had already deactivated, and that second admin's own supersede
+      step would deactivate the first admin's (real) approval too -- leaving
+      **zero** active approved documents at that source_ref, the exact
+      failure mode P0-2 fixed for ingestion-time deactivation, reintroduced
+      here at the approval layer. Fixed the same way every other race in
+      this codebase is fixed: the UPDATE now carries `AND deactivated_at IS
+      NULL` itself, so the loser's write affects zero rows and returns a
+      clean 404 instead of silently corrupting state.
+      New test `tests/api/test_admin.py::test_concurrent_approval_of_two_replacement_candidates_leaves_exactly_one_active`.
+      A first, uninstrumented version of this test (bare `threading.Thread`,
+      the same style already used elsewhere in this suite) **passed against
+      the unguarded, buggy code** -- the vulnerable window is narrower than
+      one GIL switch interval on this fast, local, WAL-mode DB, so plain
+      thread races essentially never landed in it. The test was rewritten
+      to force the exact interleaving deterministically: `get_conn` is
+      monkeypatched (test-only, not production code -- `sqlite3.Connection`
+      itself can't be monkeypatched, it's an immutable C type) to wrap the
+      connection so the losing candidate's read is held open with a
+      `threading.Barrier` until the winning candidate's request has fully
+      committed. Verified both directions by hand: reverted the WHERE-clause
+      fix and confirmed the instrumented test fails reliably (5/5 runs),
+      then restored the fix and confirmed it passes reliably (5/5 runs).
+      **This is worth flagging on its own:** the two pre-existing
+      concurrency tests in this suite
+      (`test_multiturn.py::test_concurrent_machine_confirmation_does_not_duplicate_the_answer`,
+      `test_retry_answer.py::test_concurrent_retry_does_not_duplicate_or_double_call_the_provider`)
+      use bare threads with no forced interleaving. They're not wrong --
+      both protect a genuine claim-UPDATE, which (unlike the approval bug
+      above) is safe under *any* interleaving because the guard lives inside
+      the atomic write itself, not in a separate earlier read -- but this
+      pass found concretely that an uninstrumented thread test can pass
+      against provably buggy code, so those two tests are weaker evidence
+      than they look even though their underlying fixes are sound. Not
+      rewritten here; noted so it isn't mistaken for having been checked.
+      **Invitation:** `register()`'s invite consumption (`app/auth/routes.py`)
+      had the same class of bug as the pre-fix approval code -- a
+      check-then-act read (`used_at is not None`) followed by an
+      unconditional UPDATE at the end. Two requests racing on the SAME
+      invite token could both read `used_at=NULL` and both attempt to
+      INSERT a user; `users.email`'s UNIQUE constraint stopped the actual
+      duplicate account, but the loser's INSERT raised an unhandled
+      `sqlite3.IntegrityError` -- under this pilot's `APP_ENV=development`
+      that's a raw 500 via the global exception handler's re-raise path (see
+      `app/main.py::unhandled_exception_handler`), not the same clean 403
+      every other invitation-rejection path returns. Fixed with the same
+      claim-UPDATE pattern: the invite's `used_at` is now claimed atomically
+      (`WHERE id = ? AND used_at IS NULL`) before any user row is touched;
+      the loser sees `rowcount == 0` and gets a clean 403. Also added, a
+      backstop for a narrower related case the claim-UPDATE alone doesn't
+      close (two DIFFERENT invitations issued for the same email, redeemed
+      concurrently -- each claims its own invite successfully, so both can
+      still reach the INSERT): the INSERT is now wrapped in a
+      try/except for `sqlite3.IntegrityError`, restoring the claim and
+      returning a clean 409 instead of leaking the exception.
+      New test `tests/api/test_admin.py::test_concurrent_registration_with_the_same_invite_token_only_succeeds_once`
+      -- deliberately **not** instrumented, unlike the approval test: a
+      claim-UPDATE's guard is inside the atomic write itself, so (unlike the
+      approval bug, where the guard was simply *missing*) there is no
+      interleaving-dependent window to force; bare threads reliably show
+      `[201, 403]` and exactly one user row. Confirmed by the same
+      revert-and-rerun check as the approval fix.
+      **Feedback:** no idempotency mechanism exists and none was added --
+      feedback has no expensive or duplicative side effect a double-tap
+      could trigger (no provider call, no second conversation turn), and the
+      schema has no `UNIQUE(message_id, user_id)`, so multiple feedback rows
+      per technician per message are allowed by design (submit "helpful",
+      reconsider "incorrect" later). New test
+      `tests/api/test_auth_and_chat.py::test_concurrent_feedback_submission_does_not_crash_or_corrupt`
+      is a characterization test only -- concurrent submission doesn't
+      crash and doesn't lose or merge a row -- not a dedup test, since
+      deduplication was never the actual ask for this endpoint.
+      **Chat and retry:** already covered by the two pre-existing tests
+      named above (machine-confirmation double-tap; retry double-tap); nothing
+      new was added for these, since they already exercise real concurrent
+      HTTP requests against the real claim-UPDATE guards in question.
+      Full backend suite (265 passed, 1 skipped) re-run clean.
+      **Not done:** anything requiring an actual production database/queue
+      (PostgreSQL row-level locking, a real distributed lock, multi-replica
+      coordination) -- that's P0-1, still deferred. Also not done: applying
+      the same forced-interleaving instrumentation retroactively to the two
+      pre-existing bare-thread tests named above, even though this pass
+      showed that style of test can pass against buggy code -- both of
+      those tests protect a claim-UPDATE, which doesn't need it, but the
+      finding itself (bare-thread concurrency tests in this suite are weaker
+      evidence than they look) is recorded rather than silently fixed
+      everywhere.
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
 

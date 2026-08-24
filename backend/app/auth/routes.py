@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -62,6 +63,20 @@ def register(payload: RegisterRequest, request: Request, response: Response):
     an existing administrator (POST /api/admin/invitations) -- there is no
     path from an anonymous request to an account anymore. The very first
     administrator is created by scripts/bootstrap_admin.py, not this endpoint.
+
+    P1-6 (2026-08-24 independent follow-up review, "concurrent ...
+    invitation ... tests"): the invite used to be consumed with a
+    check-then-act read (the `used_at is not None` check below) followed by
+    an unconditional UPDATE at the end -- two requests racing on the SAME
+    invite token both read used_at=NULL and both proceeded to INSERT a user,
+    relying entirely on users.email's UNIQUE constraint to stop the second
+    one. That constraint does stop a duplicate account, but the loser's
+    INSERT raised an unhandled sqlite3.IntegrityError instead of the same
+    clean 403 every other invitation-rejection path returns. The invite is
+    now claimed atomically, before any user row is touched, via the same
+    claim-UPDATE pattern used everywhere else in this codebase for exactly
+    this reason (conversations.pending_message_id, messages.answer_status):
+    only a request that flips used_at from NULL to non-NULL proceeds.
     """
     token_hash = hash_invitation_token(payload.invite_token)
     now = datetime.now(timezone.utc).isoformat()
@@ -85,19 +100,35 @@ def register(payload: RegisterRequest, request: Request, response: Response):
                 detail="This invitation was issued for a different email address.",
             )
 
+        claim = conn.execute(
+            "UPDATE invitations SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL",
+            (invite["id"],),
+        )
+        if claim.rowcount == 0:
+            # Lost the race to a concurrent request for this same token.
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="This invitation has already been used.")
+
         existing = conn.execute("SELECT id FROM users WHERE email = ?", (payload.email,)).fetchone()
         if existing:
+            conn.execute("UPDATE invitations SET used_at = NULL WHERE id = ?", (invite["id"],))
             raise HTTPException(status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
 
-        cur = conn.execute(
-            "INSERT INTO users (email, password_hash, role, display_name) VALUES (?, ?, ?, ?)",
-            (payload.email, hash_password(payload.password), invite["role"], payload.display_name),
-        )
+        try:
+            cur = conn.execute(
+                "INSERT INTO users (email, password_hash, role, display_name) VALUES (?, ?, ?, ?)",
+                (payload.email, hash_password(payload.password), invite["role"], payload.display_name),
+            )
+        except sqlite3.IntegrityError:
+            # A DIFFERENT invitation for the same email, redeemed concurrently
+            # with this one, can still slip past the "existing" check above
+            # (each connection's read happens before either commits) --
+            # users.email's UNIQUE constraint is the actual backstop for that
+            # case. Restore the claim so this invite isn't burned for an
+            # account that was never created.
+            conn.execute("UPDATE invitations SET used_at = NULL WHERE id = ?", (invite["id"],))
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
         user_id = cur.lastrowid
-        conn.execute(
-            "UPDATE invitations SET used_at = datetime('now'), used_by = ? WHERE id = ?",
-            (user_id, invite["id"]),
-        )
+        conn.execute("UPDATE invitations SET used_by = ? WHERE id = ?", (user_id, invite["id"]))
         log_audit_event(conn, "invite_used", actor_user_id=user_id, target_type="invitation",
                          target_id=invite["id"], detail=f"Registered as {invite['role']} via invitation.")
 

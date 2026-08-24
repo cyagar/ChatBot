@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -195,6 +197,42 @@ def test_feedback_rejects_invalid_rating(test_env):
     msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test"}).json()
     resp = client.post(f"/api/messages/{msg['id']}/feedback", json={"rating": "not_a_real_rating"})
     assert resp.status_code == 422
+
+
+def test_concurrent_feedback_submission_does_not_crash_or_corrupt(test_env):
+    """P1-6 (2026-08-24 independent follow-up review, "concurrent chat,
+    feedback, ... tests"): unlike retry/machine-confirmation/invitation,
+    feedback has no idempotency mechanism and none was added here -- there
+    is no expensive or duplicative side effect a double-tap could trigger
+    (no provider call, no second conversation turn), so multiple feedback
+    rows per message are allowed by design (a technician can submit
+    "helpful" and later reconsider "incorrect"; the schema has no
+    UNIQUE(message_id, user_id)). This is a characterization test proving
+    concurrent submission is merely safe -- no crash, no lost/merged row --
+    not a test of deduplication, which was never the ask here."""
+    _register("feedbackracer@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test"}).json()
+
+    responses = []
+
+    def submit(rating):
+        responses.append(client.post(f"/api/messages/{msg['id']}/feedback", json={"rating": rating}))
+
+    threads = [
+        threading.Thread(target=submit, args=("helpful",)),
+        threading.Thread(target=submit, args=("incorrect",)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(r.status_code == 201 for r in responses), [r.status_code for r in responses]
+
+    with get_conn() as conn:
+        rows = conn.execute("SELECT rating FROM feedback WHERE message_id = ?", (msg["id"],)).fetchall()
+    assert sorted(r["rating"] for r in rows) == ["helpful", "incorrect"]
 
 
 def test_save_and_list_saved_answer_roundtrip(test_env):

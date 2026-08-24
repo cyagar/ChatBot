@@ -1,3 +1,5 @@
+import threading
+
 from fastapi.testclient import TestClient
 
 from app.db import get_conn
@@ -293,6 +295,124 @@ def test_rejecting_replacement_leaves_old_document_active(test_env):
     assert new_row["review_status"] == "rejected"
 
 
+def test_concurrent_approval_of_two_replacement_candidates_leaves_exactly_one_active(test_env, monkeypatch):
+    """P1-6 (2026-08-24 independent follow-up review, "concurrent ...
+    approval ... and promotion tests"): two admins approving two DIFFERENT
+    pending replacement candidates at the SAME source_ref at nearly the same
+    moment. Before the fix, the review_status UPDATE had no re-check against
+    a concurrent supersession -- the loser's approval could still succeed
+    after its document was already deactivated by the winner, then that
+    loser's own supersede step would deactivate the winner's document too,
+    leaving ZERO active approved documents at this source_ref (the exact
+    failure mode P0-2 fixed for ingestion, reintroduced here). Exactly one
+    of the two concurrent requests must succeed; the other must see a clean
+    404, and exactly one document must end up active and approved.
+
+    The vulnerable window is narrow: candidate_b's request must read
+    "not yet deactivated" BEFORE candidate_a's request commits, then write
+    AFTER it commits. Two bare threads rarely land there on their own -- the
+    whole request (SELECT + UPDATE + commit) completes well within one GIL
+    switch interval against this fast, local, WAL-mode DB, so an
+    uninstrumented version of this test passed even against the unguarded
+    code it's meant to catch. sqlite3.Connection.execute is patched for the
+    duration of this test only (not the app's own code) so candidate_b's
+    initial SELECT deterministically blocks until candidate_a's request has
+    fully committed, before candidate_b's own UPDATE runs -- reproducing
+    exactly the interleaving the original bug depended on."""
+    source_ref = "google_drive:file789"
+    with get_conn() as conn:
+        old_id = _seed_document_at_source_ref(conn, source_ref, sha256="old-hash", review_status="approved")
+        candidate_a = _seed_document_at_source_ref(conn, source_ref, sha256="candidate-a", review_status="pending")
+        candidate_b = _seed_document_at_source_ref(conn, source_ref, sha256="candidate-b", review_status="pending")
+    _register_admin()
+
+    from contextlib import contextmanager
+
+    import app.api.routes_admin as routes_admin_module
+    from app.db import get_conn as real_get_conn
+
+    select_sql = "SELECT id, source_ref FROM documents WHERE id = ? AND deactivated_at IS NULL"
+    # Both requests' reads must land before either commits (a Barrier makes
+    # that deterministic instead of hoping thread scheduling cooperates);
+    # only THEN does candidate_b additionally wait for candidate_a's full
+    # commit before candidate_b's own write proceeds -- reproducing "read
+    # stale, write late" exactly. sqlite3.Connection itself can't be
+    # monkeypatched (it's an immutable C type), so the connection this route
+    # sees is wrapped in a thin Python proxy instead.
+    both_read = threading.Barrier(2, timeout=5)
+    a_committed = threading.Event()
+
+    class _InstrumentedConn:
+        def __init__(self, real_conn):
+            self._real_conn = real_conn
+
+        def execute(self, sql, params=()):
+            result = self._real_conn.execute(sql, params)
+            if sql == select_sql and params and params[0] in (candidate_a, candidate_b):
+                both_read.wait(timeout=5)
+                if params[0] == candidate_b:
+                    a_committed.wait(timeout=5)
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self._real_conn, name)
+
+    @contextmanager
+    def patched_get_conn():
+        with real_get_conn() as conn:
+            yield _InstrumentedConn(conn)
+
+    monkeypatch.setattr(routes_admin_module, "get_conn", patched_get_conn)
+
+    responses = {}
+
+    def approve_a():
+        responses["a"] = client.post(f"/api/admin/documents/{candidate_a}/review", json={"decision": "approved"})
+        a_committed.set()
+
+    def approve_b():
+        responses["b"] = client.post(f"/api/admin/documents/{candidate_b}/review", json={"decision": "approved"})
+
+    threads = [threading.Thread(target=approve_a), threading.Thread(target=approve_b)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    statuses = sorted(r.status_code for r in responses.values())
+    assert statuses == [200, 404], "exactly one concurrent approval succeeds, the other is rejected as already-superseded"
+
+    with get_conn() as conn:
+        active_approved = conn.execute(
+            "SELECT id FROM documents WHERE source_ref = ? AND deactivated_at IS NULL "
+            "AND review_status = 'approved'",
+            (source_ref,),
+        ).fetchall()
+        all_rows = {
+            r["id"]: (r["review_status"], r["deactivated_at"])
+            for r in conn.execute(
+                "SELECT id, review_status, deactivated_at FROM documents WHERE source_ref = ?", (source_ref,)
+            ).fetchall()
+        }
+    assert len(active_approved) == 1, (
+        f"expected exactly one active approved document at this source_ref, got {len(active_approved)}: {all_rows}"
+    )
+    assert old_id not in {r["id"] for r in active_approved}, "the old document must have been superseded"
+    # old_id legitimately ends up 'approved' (its real historical review
+    # decision, never revoked) AND deactivated (retired once a newer
+    # replacement was approved) -- that combination is expected for a
+    # superseded document. The property that must never hold is a LOSING
+    # CANDIDATE ending up simultaneously 'approved' and deactivated in the
+    # same race -- that ghost state (its own approval "succeeding" into a
+    # row that was already retired) is exactly what the unguarded race used
+    # to produce.
+    for doc_id in (candidate_a, candidate_b):
+        review_status, deactivated_at = all_rows[doc_id]
+        assert not (review_status == "approved" and deactivated_at is not None), (
+            f"candidate document {doc_id} is both approved and deactivated -- ghost state from the race"
+        )
+
+
 # --- Invitations, disable/enable (P0-5) ---
 
 def test_invitation_create_and_use(test_env):
@@ -325,6 +445,47 @@ def test_revoked_invitation_cannot_be_used(test_env):
         json={"email": "revokeme@example.com", "password": "password123", "invite_token": invite["token"]},
     )
     assert reg.status_code == 403
+
+
+def test_concurrent_registration_with_the_same_invite_token_only_succeeds_once(test_env):
+    """P1-6 (2026-08-24 independent follow-up review, "concurrent ...
+    invitation ... tests"): two requests racing to register with the SAME
+    single-use invite token. Before this fix, the invite was consumed with
+    a check-then-act read followed by an unconditional UPDATE at the end --
+    both requests could read used_at=NULL and both proceed to INSERT a
+    user, with users.email's UNIQUE constraint as the only thing stopping a
+    duplicate account; the loser then raised an unhandled
+    sqlite3.IntegrityError (a 500, not the same clean 403 every other
+    invitation-rejection path returns) instead of failing cleanly. The
+    invite is now claimed atomically via the same claim-UPDATE pattern used
+    everywhere else in this codebase, which is race-safe under any
+    interleaving -- unlike the P0-2 approval race above, this needs no
+    forced-interleaving instrumentation to demonstrate."""
+    _register_admin()
+    invite = client.post("/api/admin/invitations", json={"email": "racer@example.com"}).json()
+    token = invite["token"]
+    client.post("/api/auth/logout")
+
+    responses = []
+
+    def register():
+        responses.append(client.post(
+            "/api/auth/register",
+            json={"email": "racer@example.com", "password": "password123", "invite_token": token},
+        ))
+
+    threads = [threading.Thread(target=register) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    statuses = sorted(r.status_code for r in responses)
+    assert statuses == [201, 403], "exactly one registration succeeds, the other is cleanly rejected as already-used"
+
+    with get_conn() as conn:
+        count = conn.execute("SELECT COUNT(*) AS n FROM users WHERE email = 'racer@example.com'").fetchone()["n"]
+    assert count == 1, "the losing request must never create a second account"
 
 
 def test_admin_cannot_disable_own_account(test_env):

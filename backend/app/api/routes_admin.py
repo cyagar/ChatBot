@@ -292,18 +292,42 @@ def review_document(document_id: int, payload: DocumentReviewRequest, admin: Cur
     from technicians. Approving the replacement here is what atomically
     retires whatever else is still active at the same source_ref -- one
     SQLite transaction, so there's never a moment with either zero or two
-    approved documents live at that source_ref."""
+    approved documents live at that source_ref.
+
+    P1-6 (2026-08-24 independent follow-up review, "concurrent ... approval
+    ... and promotion tests"): the review_status UPDATE below used to carry
+    no WHERE-clause guard against a concurrent supersession, relying only on
+    the SELECT above -- a separate, unguarded read -- to have already
+    confirmed `deactivated_at IS NULL`. Two admins approving two DIFFERENT
+    pending replacement candidates at the SAME source_ref concurrently could
+    both pass that initial SELECT before either committed, then both writes
+    would proceed: the second admin's UPDATE would set
+    review_status='approved' on a document the FIRST admin's supersede step
+    had just deactivated, producing an "approved but deactivated" row, and
+    that second admin's own supersede step would then deactivate the FIRST
+    admin's candidate too -- leaving ZERO active approved documents at that
+    source_ref, the exact failure mode P0-2 already fixed for the
+    ingestion-time deactivation, reintroduced here at the approval layer
+    instead. The UPDATE now re-checks `deactivated_at IS NULL` as part of
+    the same atomic write (the same claim-UPDATE pattern used everywhere
+    else in this codebase): the losing concurrent approval sees rowcount 0
+    and gets a clean 404, exactly as if it had raced the SELECT and lost
+    there."""
     with get_conn() as conn:
         doc = conn.execute(
             "SELECT id, source_ref FROM documents WHERE id = ? AND deactivated_at IS NULL", (document_id,)
         ).fetchone()
         if not doc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found or deactivated.")
-        conn.execute(
+        claim = conn.execute(
             "UPDATE documents SET review_status = ?, reviewed_by = ?, reviewed_at = datetime('now'), "
-            "review_note = ? WHERE id = ?",
+            "review_note = ? WHERE id = ? AND deactivated_at IS NULL",
             (payload.decision, admin.id, payload.note, document_id),
         )
+        if claim.rowcount == 0:
+            # Deactivated by a concurrent approval of a competing replacement
+            # at the same source_ref between the SELECT above and this UPDATE.
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found or deactivated.")
         log_audit_event(conn, "document_reviewed", actor_user_id=admin.id, target_type="document",
                          target_id=document_id, detail=f"{payload.decision}" + (f": {payload.note}" if payload.note else ""))
 
