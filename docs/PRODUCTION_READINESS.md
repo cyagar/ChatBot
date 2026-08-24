@@ -687,14 +687,10 @@ done than it is.
       generating; only the request whose UPDATE actually matches a row
       proceeds. Regression-tested with two real concurrent threads hitting
       the same conversation through the FastAPI test client.
-      **Not done:** the review's own wording for this item also asks for "an
-      idempotent answer-attempt endpoint" for *retry*, replacing
-      insert-a-duplicate-user-turn semantics on retry/double-tap-send. That
-      was not built this pass -- the retry button in `app.js` still calls the
-      same `sendQuestion()` path as a fresh question, so retrying a failed
-      answer still inserts a new user turn and re-triggers a full provider
-      call. This is the one piece of "P1-8 -- multi-turn and retry semantics"
-      that remains open.
+      **Now closed:** the idempotent retry endpoint this note originally
+      flagged as the one open piece of P1-8 was built under the 2026-08-24
+      independent follow-up review's own P1-1 -- see that entry further
+      below.
       **Also not done:** `resolved_query` is persisted but not surfaced
       anywhere in the API response or admin UI -- the only way to see what a
       follow-up actually retrieved on today is a direct database query.
@@ -1085,6 +1081,57 @@ done than it is.
       signal, and removing a working feature to satisfy a checkbox would be
       a worse trade than documenting the gap. This needs the browser test
       matrix before a real pilot on shared devices.
+- [x] **Retry regenerates the failed answer in place instead of resending
+      the question as a new message** (2026-08-24 independent follow-up
+      review, P1-1). `app.js`'s retry button used to call
+      `previousUserQuestion()` + `sendQuestion()`, resubmitting the original
+      question text through the normal ask-a-question path -- a second user
+      turn plus a second, unrelated assistant message for what the
+      technician experiences as one logical retry, doubling both the
+      visible history and the billable provider call.
+      New endpoint `POST /conversations/{id}/messages/{message_id}/retry`
+      (`backend/app/api/routes_chat.py::retry_answer`): looks up the
+      original question server-side from the preceding user message (never
+      resent by the client, the same "resume the stored question" pattern
+      P1-8 already uses for pending-clarification resumption) and
+      regenerates through the same `_generate_and_persist_answer` path,
+      which now accepts an optional `retry_message_id` and UPDATEs that
+      message row in place (replacing its `message_sources`) instead of
+      INSERTing a new one. Idempotent via the same claim-UPDATE pattern
+      `conversations.pending_message_id` already uses (P1-8/P1-9):
+      `UPDATE messages SET answer_status='retrying' WHERE id=? AND
+      answer_status='failed'` -- only the request whose UPDATE actually
+      matches proceeds to call the provider, so a double-tap on the retry
+      button can trigger at most one provider call. Only a message with
+      `answer_status='failed'` is retryable (409 otherwise, 404 for a
+      non-assistant message or a message outside the caller's own
+      conversation). New migration `0009_retry.sql` adds
+      `messages.retry_count`, incremented on each successful retry -- the
+      "preserve attempt history" half of the review's ask, as a count
+      rather than a full per-attempt content log (see "Not done" below).
+      5 new tests in `tests/api/test_retry_answer.py`: a failed answer is
+      regenerated in place (same message id, genuinely different content,
+      exactly 2 total messages -- 1 user + 1 assistant -- both before and
+      after retry), a completed answer is rejected (409), a user-role
+      message is rejected (404), cross-user access is rejected (404), and a
+      concurrent double-tap produces exactly one 200 and one 409 with no
+      duplicate message. Full backend suite (240 passed, 1 skipped) re-run
+      clean. `node --check` confirms `app.js` is syntactically valid.
+      **Not done:** the review's literal wording asks for "an idempotency
+      key" -- this uses server-side claimed state (the same `answer_status`
+      claim-UPDATE already proven for `pending_message_id`) rather than a
+      client-supplied key, which gives the same guarantee (a double-tap
+      triggers at most one provider call) through a mechanism already
+      native to this codebase, not a new one. "Preserve attempt history" is
+      a count (`retry_count`), not a log of each prior attempt's content --
+      a genuinely bigger feature (what would show it, how far back) that
+      wasn't scoped by the review's own reproduction. **Not verified in a
+      real browser** (no browser-automation tooling available in this
+      environment) -- `node --check` confirms the JS is syntactically
+      valid and the endpoint's response shape was verified end-to-end via
+      the real HTTP API, but the actual retry button click, in a real
+      browser, against the running app, was not clicked. Same category of
+      gap as the shared-tablet caching item above.
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
 

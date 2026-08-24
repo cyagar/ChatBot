@@ -59,11 +59,12 @@ class MessageOut(BaseModel):
     content: str
     is_clarifying_question: bool
     is_no_answer: bool
-    answer_status: str = "completed"  # pending | completed | failed
+    answer_status: str = "completed"  # pending | completed | failed | retrying
     citations: list[CitationOut] = []
     safety_warnings: list[str] = []
     conflict_note: str | None = None
     clarifying_options: list[dict] = []
+    retry_count: int = 0
     created_at: str
 
 
@@ -214,16 +215,24 @@ def _generate_and_persist_answer(
     question: str,
     machine_id: int,
     history: list[HistoryTurn],
+    *,
+    retry_message_id: int | None = None,
 ) -> MessageOut:
-    """Shared by ask_question (a freshly-asked question) and
-    set_conversation_machine's pending-message resumption (P1-8: "confirming
-    a machine must resume the existing pending message" rather than the
-    caller re-submitting the same question as a new user turn). Retrieval
-    uses the resolved standalone query; the provider still sees the
+    """Shared by ask_question (a freshly-asked question), set_conversation_machine's
+    pending-message resumption (P1-8: "confirming a machine must resume the
+    existing pending message" rather than the caller re-submitting the same
+    question as a new user turn), and retry_answer (P1-1, 2026-08-24 independent
+    follow-up review: "retry must not resend the question as a new message").
+    Retrieval uses the resolved standalone query; the provider still sees the
     question's original wording plus `history` -- an LLM can resolve a
     pronoun like "it" from conversational context the same way a human
     would, so only retrieval (which has no such reasoning) needs the
-    resolved query."""
+    resolved query.
+
+    retry_message_id: when set, this is a retry -- the existing assistant
+    message at that id is UPDATED in place (its old message_sources rows
+    replaced) instead of a new message being INSERTed, so a retry never adds
+    a second assistant turn or a duplicate user turn to the conversation."""
     with get_conn() as conn:
         machine_label = _machine_label(conn, machine_id)
 
@@ -297,17 +306,35 @@ def _generate_and_persist_answer(
     result.citations = deduped_citations
 
     with get_conn() as conn:
-        cur = conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, is_no_answer, machine_id, "
-            "safety_warnings, conflict_note, provider, answer_status) "
-            "VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
-            (
-                conversation_id, result.answer, int(result.is_no_answer), machine_id,
-                json.dumps(result.safety_warnings) if result.safety_warnings else None,
-                result.conflict_note, result.provider, answer_status,
-            ),
-        )
-        msg_id = cur.lastrowid
+        if retry_message_id is not None:
+            # Replace this message's own prior sources -- a retry's new
+            # passages/citations must not be appended alongside the failed
+            # attempt's, which could otherwise resurrect a source the new
+            # attempt never actually cited.
+            conn.execute("DELETE FROM message_sources WHERE message_id = ?", (retry_message_id,))
+            conn.execute(
+                "UPDATE messages SET content = ?, is_no_answer = ?, machine_id = ?, "
+                "safety_warnings = ?, conflict_note = ?, provider = ?, answer_status = ?, "
+                "retry_count = retry_count + 1 WHERE id = ?",
+                (
+                    result.answer, int(result.is_no_answer), machine_id,
+                    json.dumps(result.safety_warnings) if result.safety_warnings else None,
+                    result.conflict_note, result.provider, answer_status, retry_message_id,
+                ),
+            )
+            msg_id = retry_message_id
+        else:
+            cur = conn.execute(
+                "INSERT INTO messages (conversation_id, role, content, is_no_answer, machine_id, "
+                "safety_warnings, conflict_note, provider, answer_status) "
+                "VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    conversation_id, result.answer, int(result.is_no_answer), machine_id,
+                    json.dumps(result.safety_warnings) if result.safety_warnings else None,
+                    result.conflict_note, result.provider, answer_status,
+                ),
+            )
+            msg_id = cur.lastrowid
         citation_excerpt_by_chunk = {c.chunk_id: c.excerpt for c in result.citations}
         # Provider citation order, not retrieval order. `rank` keeps meaning
         # retrieval rank (for retrieval-quality auditing); citation_ordinal
@@ -331,7 +358,9 @@ def _generate_and_persist_answer(
         # -- ask_question clears it unconditionally on any new user turn, and
         # set_conversation_machine claims it atomically before resuming (P1-8)
         # -- so there is nothing left to clear here.
-        created_at = conn.execute("SELECT created_at FROM messages WHERE id=?", (msg_id,)).fetchone()["created_at"]
+        row = conn.execute(
+            "SELECT created_at, retry_count FROM messages WHERE id=?", (msg_id,)
+        ).fetchone()
 
     return MessageOut(
         id=msg_id, role="assistant", content=result.answer,
@@ -345,7 +374,8 @@ def _generate_and_persist_answer(
         ],
         safety_warnings=result.safety_warnings,
         conflict_note=result.conflict_note,
-        created_at=created_at,
+        retry_count=row["retry_count"],
+        created_at=row["created_at"],
     )
 
 
@@ -470,6 +500,7 @@ def _hydrate_message(conn, row) -> MessageOut:
         safety_warnings=safety_warnings,
         conflict_note=row["conflict_note"] if "conflict_note" in row.keys() else None,
         clarifying_options=clarifying_options,
+        retry_count=row["retry_count"] if "retry_count" in row.keys() else 0,
         created_at=row["created_at"],
     )
 
@@ -480,7 +511,7 @@ def get_messages(conversation_id: int, user: CurrentUser = Depends(get_current_u
         _require_own_conversation(conn, conversation_id, user.id)
         rows = conn.execute(
             "SELECT id, role, content, is_clarifying_question, is_no_answer, "
-            "safety_warnings, conflict_note, answer_status, clarifying_options, created_at "
+            "safety_warnings, conflict_note, answer_status, clarifying_options, retry_count, created_at "
             "FROM messages WHERE conversation_id = ? ORDER BY id",
             (conversation_id,),
         ).fetchall()
@@ -557,6 +588,73 @@ def ask_question(
                 )
 
     return _generate_and_persist_answer(conversation_id, user_message_id, question, machine_id, history)
+
+
+@router.post("/conversations/{conversation_id}/messages/{message_id}/retry", response_model=MessageOut)
+@limiter.limit(default_limit_string)
+def retry_answer(
+    conversation_id: int,
+    message_id: int,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Independent follow-up review 2026-08-24 P1-1: "Retry still resends the
+    previous user question as a new message... creating another user turn
+    and provider/retrieval attempt." app.js's retry button used to call
+    sendQuestion() with the original question text, which is exactly that --
+    a second user turn plus a second, unrelated assistant message, doubling
+    both the visible history and the billable provider call for what the
+    technician experiences as one logical retry.
+
+    This regenerates and updates the SAME failed assistant message in place
+    (no new user turn, no new assistant message) -- the original question is
+    looked up server-side from the preceding user message, never resent by
+    the client, the same "resume the stored question" pattern P1-8 already
+    uses for pending-clarification resumption. Idempotent via the same
+    claim-UPDATE pattern as conversations.pending_message_id: only a request
+    that successfully flips answer_status from 'failed' to 'retrying'
+    proceeds to call the provider, so a double-tap on the retry button can
+    trigger at most one provider call, not two concurrent ones."""
+    with get_conn() as conn:
+        conv = _require_own_conversation(conn, conversation_id, user.id)
+        row = conn.execute(
+            "SELECT id, role, answer_status FROM messages WHERE id = ? AND conversation_id = ?",
+            (message_id, conversation_id),
+        ).fetchone()
+        if not row or row["role"] != "assistant":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Message not found.")
+
+        claim = conn.execute(
+            "UPDATE messages SET answer_status = 'retrying' WHERE id = ? AND answer_status = 'failed'",
+            (message_id,),
+        )
+        if claim.rowcount == 0:
+            if row["answer_status"] == "retrying":
+                raise HTTPException(status.HTTP_409_CONFLICT,
+                                     detail="A retry is already in progress for this answer.")
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="Only a failed answer can be retried.")
+
+        user_row = conn.execute(
+            "SELECT id, content FROM messages WHERE conversation_id = ? AND role = 'user' AND id < ? "
+            "ORDER BY id DESC LIMIT 1",
+            (conversation_id, message_id),
+        ).fetchone()
+        machine_id = conv["machine_id"]
+        if user_row is None or machine_id is None:
+            # Restore rather than leave the claim stuck at 'retrying' forever
+            # -- this should not happen in practice (a failed answer always
+            # has a preceding user question and a resolved machine at
+            # generation time), but a stuck claim would make every future
+            # retry attempt 409 with "already in progress" permanently.
+            conn.execute("UPDATE messages SET answer_status = 'failed' WHERE id = ?", (message_id,))
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="This answer cannot be retried.")
+
+        history = _fetch_history(conn, conversation_id, before_message_id=user_row["id"])
+
+    return _generate_and_persist_answer(
+        conversation_id, user_row["id"], user_row["content"], machine_id, history,
+        retry_message_id=message_id,
+    )
 
 
 class FeedbackRequest(BaseModel):

@@ -467,12 +467,28 @@ function wireEvidenceToggles() {
   });
 }
 
-function previousUserQuestion(messageId) {
-  const idx = state.messages.findIndex((m) => String(m.id) === String(messageId));
-  for (let i = idx - 1; i >= 0; i--) {
-    if (state.messages[i].role === "user") return state.messages[i].content;
+async function retryAnswer(messageId) {
+  // Independent follow-up review 2026-08-24 P1-1: retry used to resend the
+  // original question text as a brand-new user turn (previousUserQuestion()
+  // + sendQuestion()), doubling both the visible conversation history and
+  // the billable provider call. The backend now regenerates and updates
+  // this exact message in place -- no new user turn, no new assistant
+  // message -- so the client just swaps this one message for the server's
+  // updated version instead of appending anything.
+  state.sending = true;
+  render();
+  try {
+    const updated = await api(`/api/conversations/${state.conversationId}/messages/${messageId}/retry`, {
+      method: "POST",
+    });
+    const idx = state.messages.findIndex((m) => String(m.id) === String(messageId));
+    if (idx !== -1) state.messages[idx] = updated;
+  } catch (err) {
+    alert("Could not retry: " + err.message);
+  } finally {
+    state.sending = false;
+    render();
   }
-  return null;
 }
 
 async function confirmMachine(machineId) {
@@ -514,8 +530,8 @@ function wireMessageActions() {
   });
   root.querySelectorAll(".retry-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const q = previousUserQuestion(btn.dataset.messageId);
-      if (q) sendQuestion(q);
+      if (state.sending) return;
+      retryAnswer(btn.dataset.messageId);
     });
   });
   root.querySelectorAll(".copy-btn").forEach((btn) => {
