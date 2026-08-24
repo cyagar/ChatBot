@@ -914,7 +914,18 @@ done than it is.
       already an explicit, documented design decision before this review
       (see the class docstring: a file-count limit would make a capped
       listing indistinguishable from real deletions, so this needs
-      deliberate design, not a quick addition) and remains open.
+      deliberate design, not a quick addition) and remains open. Also named
+      by the review and not addressed here: the on-disk `manifest.json`
+      still stores Drive's *claimed* md5Checksum, not a checksum
+      re-verified against the cached file's actual current bytes on every
+      cache-hit -- a file corrupted on disk after a successful, verified
+      download (bit rot, manual tampering) would still be trusted by
+      `cache_valid` until Drive's own checksum changes and forces a
+      re-download. Re-hashing every cached file on every run to guard
+      against that has a real I/O cost at odds with this corpus's size and
+      the point of caching at all; retry backoff is also still a fixed
+      3-attempts loop with no exponential delay/jitter. Neither is fixed
+      here.
 - [x] **The no-answer path is no longer a validation bypass for free
       provider text** (2026-08-24 independent follow-up review, P0-5). The
       review's adversarial diagnostic got a specific, unsupported
@@ -1186,6 +1197,30 @@ and will be fully replaced, not migrated, whenever the switch happens.
 
 ## Known limitations to fix before a real rollout
 
+- **The existing 71-document corpus was grandfather-approved without
+  individual review, and source-ID history is not reproducible** (2026-08-24
+  independent follow-up review, P0-3). Migration 0003 approved every
+  document/link that existed at the time in bulk, explicitly recording that
+  none were individually re-reviewed; the one-off `local_directory` ->
+  `google_drive` source-ref remap and its mapping files were not retained,
+  so `scripts/verify_drive_source_refs.py` can audit today's state but
+  cannot reconstruct the original pairing decisions. **Not attempted, and
+  deliberately not attempted unilaterally:** the review's required fix
+  starts with "remove automatic approval as evidence of review -- put
+  grandfathered rows into legacy_unverified/quarantine until reviewed."
+  Doing that would immediately take all 71 real manuals out of retrieval
+  for the real technicians currently using this pilot, with no replacement
+  review having actually happened yet -- that is a live-service-impacting,
+  business decision (accept a period with a much smaller or empty corpus
+  while every document gets individually re-reviewed, and decide who does
+  that review and on what timeline), not a code change, and was not made
+  without the user's explicit sign-off. The review's other asks in this
+  item -- a version-controlled manifest keyed by Drive file ID/SHA-256/
+  document version, two-person review for ambiguous/high-risk documents,
+  a staging-index rebuild and reconciliation before cutover, a published
+  redacted mapping report -- are real, substantial process and tooling
+  work of their own, gated on that same decision being made first. Nothing
+  in this item has been started.
 - **Table-to-heading attribution is best-effort.** Tables are tagged with the
   nearest heading seen so far on the page, not their exact vertical position.
   Rare mis-tagging is possible (a table appearing after a "Diagnostics"
