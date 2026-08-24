@@ -89,7 +89,7 @@ def _make_source(tmp_path, pages, downloads: dict[str, bytes], **source_kwargs):
 
     download_calls = []
 
-    def fake_download(service, file_id, cache_path):
+    def fake_download(service, file_id, cache_path, expected_md5=None, max_bytes=None):
         download_calls.append(file_id)
         cache_path.write_bytes(downloads[file_id])
 
@@ -126,7 +126,8 @@ def test_same_size_different_checksum_is_not_treated_as_cached(tmp_path):
     # Second revision: same reported size, different checksum, different bytes.
     service._files._pages = [page2]
     service._files.list_calls = 0
-    source._download = lambda service, file_id, cache_path: (calls.append(file_id), cache_path.write_bytes(b"ZZZ"))
+    source._download = lambda service, file_id, cache_path, expected_md5=None, max_bytes=None: (
+        calls.append(file_id), cache_path.write_bytes(b"ZZZ"))
 
     files = source.list_files()
     assert calls == ["f1", "f1"], "changed checksum at the same size must trigger a re-download"
@@ -161,7 +162,8 @@ def test_rename_does_not_leave_a_stale_cache_file_fetchable(tmp_path):
     service._files.list_calls = 0
     # Cache-filename changed (embeds the name) even though content didn't --
     # must still resolve to exactly one file.
-    source._download = lambda service, file_id, cache_path: (calls.append(file_id), cache_path.write_bytes(b"AAA"))
+    source._download = lambda service, file_id, cache_path, expected_md5=None, max_bytes=None: (
+        calls.append(file_id), cache_path.write_bytes(b"AAA"))
     source.list_files()
 
     remaining = list((tmp_path / "cache").glob("f1__*"))
@@ -285,20 +287,31 @@ class _ScriptedDownloader:
     runs, instead of being monkeypatched away entirely as every other test in
     this file does. `plans[file_id]` is a list consumed one entry per
     constructed downloader (i.e. one entry per _download() attempt): either
-    bytes to write and finish on the first next_chunk() call, or an exception
-    instance to raise instead."""
+    an exception instance to raise on the first next_chunk() call, or bytes
+    (delivered whole on one call) or a list of byte chunks (each delivered on
+    its own next_chunk() call, done only becoming True after the last one --
+    real multi-chunk delivery, needed to prove _download() writes each chunk
+    through as it arrives rather than only checking the fully-assembled
+    result afterward)."""
 
     plans: dict[str, list] = {}
 
     def __init__(self, buf, request):
         self._buf = buf
-        self._outcome = self.plans[request.file_id].pop(0)
+        outcome = self.plans[request.file_id].pop(0)
+        if isinstance(outcome, Exception):
+            self._error = outcome
+            self._chunks = []
+        else:
+            self._error = None
+            self._chunks = list(outcome) if isinstance(outcome, list) else [outcome]
 
     def next_chunk(self):
-        if isinstance(self._outcome, Exception):
-            raise self._outcome
-        self._buf.write(self._outcome)
-        return None, True
+        if self._error is not None:
+            raise self._error
+        chunk = self._chunks.pop(0)
+        self._buf.write(chunk)
+        return None, len(self._chunks) == 0
 
 
 @pytest.fixture
@@ -314,10 +327,58 @@ def test_download_streams_and_atomically_renames_into_place(tmp_path, scripted_d
     source = GoogleDriveSource(folder_id="x", service_account_path=tmp_path / "key.json", cache_dir=cache_dir)
     cache_path = cache_dir / "f1__manual.pdf"
 
-    source._download(_FakeService([]), "f1", cache_path)
+    source._download(_FakeService([]), "f1", cache_path, expected_md5=None, max_bytes=1024)
 
     assert cache_path.read_bytes() == b"HELLO"
     assert list(cache_dir.glob("*.dl*")) == [], "no leftover temp download file after a successful download"
+
+
+def test_download_writes_each_chunk_through_to_disk_as_it_arrives(tmp_path, scripted_download):
+    """Independent follow-up review 2026-08-24 P0-4: the old implementation
+    buffered the whole file in io.BytesIO() and only wrote to disk once, at
+    the end, after the last chunk arrived. Proven here two ways for a
+    two-chunk download: (1) the final content is the concatenation of both
+    chunks, exercising the real multi-chunk MediaIoBaseDownload loop, not
+    just a single next_chunk() call. (2) the max_bytes cap is enforced as
+    each chunk is written, not once against a fully-assembled buffer at the
+    end -- the first chunk alone fits under the cap, only the second pushes
+    the running total over it, and the failure must happen exactly there,
+    without ever being handed a third chunk to prove it wasn't buffering
+    past the limit before checking."""
+    scripted_download.plans = {"f1": [[b"A" * 10, b"B" * 10]]}
+    cache_dir = tmp_path / "cache"
+    source = GoogleDriveSource(folder_id="x", service_account_path=tmp_path / "key.json", cache_dir=cache_dir)
+    cache_path = cache_dir / "f1__manual.pdf"
+
+    source._download(_FakeService([]), "f1", cache_path, expected_md5=None, max_bytes=1024)
+    assert cache_path.read_bytes() == b"A" * 10 + b"B" * 10
+
+    scripted_download.plans = {"f1": [[b"A" * 10, b"B" * 10]]}
+    cache_path2 = cache_dir / "f1__manual2.pdf"
+    with pytest.raises(RuntimeError, match="exceeded"):
+        source._download(_FakeService([]), "f1", cache_path2, expected_md5=None, max_bytes=15)
+    assert not cache_path2.exists(), "a download that exceeds max_bytes mid-stream must never be promoted into the cache"
+    assert list(cache_dir.glob("*.dl*")) == [], "no leftover temp file after the cap aborts the download"
+
+
+def test_download_rejects_bytes_not_matching_drives_advertised_checksum(tmp_path, scripted_download):
+    """Independent follow-up review 2026-08-24 P0-4: nothing previously
+    verified downloaded bytes against Drive's own md5Checksum, so a
+    truncated/corrupted transfer that still completed without an HTTP error
+    would be silently cached and fed to the pipeline. All 3 retry attempts
+    here deliver bytes with the wrong MD5, so the download must fail
+    outright and never reach the cache."""
+    scripted_download.plans = {"f1": [b"CORRUPT", b"CORRUPT", b"CORRUPT"]}
+    cache_dir = tmp_path / "cache"
+    source = GoogleDriveSource(folder_id="x", service_account_path=tmp_path / "key.json", cache_dir=cache_dir)
+    cache_path = cache_dir / "f1__manual.pdf"
+
+    with pytest.raises(RuntimeError, match="md5Checksum"):
+        source._download(_FakeService([]), "f1", cache_path,
+                          expected_md5="0" * 32, max_bytes=1024)
+
+    assert not cache_path.exists()
+    assert list(cache_dir.glob("*")) == [], "no leftover temp file after an md5 mismatch on every retry"
 
 
 def test_download_retries_a_transient_failure_then_succeeds(tmp_path, scripted_download):
@@ -326,7 +387,7 @@ def test_download_retries_a_transient_failure_then_succeeds(tmp_path, scripted_d
     source = GoogleDriveSource(folder_id="x", service_account_path=tmp_path / "key.json", cache_dir=cache_dir)
     cache_path = cache_dir / "f1__manual.pdf"
 
-    source._download(_FakeService([]), "f1", cache_path)
+    source._download(_FakeService([]), "f1", cache_path, expected_md5=None, max_bytes=1024)
 
     assert cache_path.read_bytes() == b"HELLO"
 
@@ -338,7 +399,7 @@ def test_download_raises_after_exhausting_retries_and_leaves_no_partial_file(tmp
     cache_path = cache_dir / "f1__manual.pdf"
 
     with pytest.raises(RuntimeError, match="f1"):
-        source._download(_FakeService([]), "f1", cache_path)
+        source._download(_FakeService([]), "f1", cache_path, expected_md5=None, max_bytes=1024)
 
     assert not cache_path.exists()
     assert list(cache_dir.glob("*")) == [], "no leftover temp file after exhausting all retry attempts"
@@ -374,7 +435,8 @@ def test_listing_error_mid_pagination_propagates_and_a_retry_still_converges(tmp
     service._files._pages = [page1, page2]
     service._files.list_calls = 0
     payloads = {"f1": b"AAA", "f2": b"BBB"}
-    source._download = lambda service, file_id, cache_path: (calls.append(file_id), cache_path.write_bytes(payloads[file_id]))
+    source._download = lambda service, file_id, cache_path, expected_md5=None, max_bytes=None: (
+        calls.append(file_id), cache_path.write_bytes(payloads[file_id]))
 
     files = source.list_files()
 
@@ -409,6 +471,30 @@ def test_fresh_instance_after_restart_reuses_the_persisted_manifest(tmp_path):
 # exactly the ambiguity the review (P0-2) warns must never feed removal
 # reconciliation. See GoogleDriveSource's class docstring for the full
 # reasoning; only the per-file size limit is implemented.
+
+def test_missing_reported_size_does_not_bypass_the_cap(tmp_path, scripted_download):
+    """Independent follow-up review 2026-08-24 P0-4: the pre-download check
+    used `int(f.get("size") or 0)`, so a file with no reported size at all
+    (missing key, not even "0") was treated as 0 bytes and always passed the
+    `> max_file_size_bytes` check -- the cap was silently bypassed for
+    exactly the files it matters most for. The real limit is now enforced on
+    bytes actually streamed, in _download(), independent of whatever (or
+    whether) Drive reported for size -- this exercises the real _download()
+    via the scripted downloader to prove a file Drive reports no size for
+    still gets capped once its true size is discovered mid-stream."""
+    page = {"files": [{"id": "f1", "name": "no_size.pdf",
+                        "mimeType": "application/pdf", "md5Checksum": "c1"}]}  # no "size" key at all
+    scripted_download.plans = {"f1": [[b"A" * 10, b"B" * 10]]}
+    source, service, _ = _make_source(tmp_path, [page], {}, max_file_size_bytes=15)
+    source._download = GoogleDriveSource._download.__get__(source)  # use the real _download, not the fake
+
+    files = source.list_files()
+
+    assert files == [], "a file whose true size exceeds the cap must not be indexed, missing Drive size or not"
+    skips = source.pop_skipped()
+    assert any("exceeded" in s.reason or "limit" in s.reason for s in skips), \
+        "the missing-size file must still be reported, not silently dropped"
+
 
 def test_oversized_file_is_skipped_before_download_and_reported(tmp_path):
     """A file over the configured per-file size limit must never be

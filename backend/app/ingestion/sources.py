@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import abc
 import hashlib
-import io
 import json
 import logging
 import os
@@ -200,26 +199,87 @@ class GoogleDriveSource(DocumentSource):
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
         return self.cache_dir / f"{file_id}__{safe_name}"
 
-    def _download(self, service, file_id: str, cache_path: Path) -> None:
+    def _download(self, service, file_id: str, cache_path: Path,
+                   expected_md5: str | None, max_bytes: int) -> None:
         """Downloads to a temp file in the cache dir and atomically renames it into
-        place, retrying transient failures a few times before giving up."""
+        place, retrying transient failures a few times before giving up.
+
+        Independent follow-up review 2026-08-24 P0-4, three separate defects
+        fixed together here:
+        (1) The old version buffered the whole file in an io.BytesIO() before
+        ever writing a byte to disk -- for a file near the 200MB default cap
+        that's 200MB held in the ingestion process's memory on top of
+        whatever else it's doing, on a container with a 2GB limit. Bytes now
+        stream directly to the temp file one chunk at a time via a thin
+        file-like wrapper (MediaIoBaseDownload only ever calls .write() on
+        what it's given -- see googleapiclient.http.MediaIoBaseDownload.next_chunk,
+        no .tell()/.seek() needed).
+        (2) That same wrapper enforces max_bytes DURING the download, not
+        just via the pre-download `reported_size > max_file_size_bytes`
+        check in list_files() -- which used `int(f.get("size") or 0)` and so
+        silently treated a missing/zero Drive-reported size as "0 bytes,
+        always under the cap", bypassing it entirely. The cap is now
+        authoritatively enforced on bytes actually received, regardless of
+        what (or whether) Drive reported for size.
+        (3) Nothing previously verified the downloaded bytes against Drive's
+        own md5Checksum -- a truncated or corrupted transfer that still
+        completed without an HTTP error would be cached and fed to the
+        pipeline as if it were the real file, discovered (if ever) only much
+        later via a garbled extraction. The MD5 of what was actually written
+        is now computed while streaming and compared against Drive's
+        advertised checksum before the temp file is promoted into the cache.
+        """
         from googleapiclient.http import MediaIoBaseDownload
+
+        class _DownloadTooLarge(RuntimeError):
+            """Not retried -- exceeding the byte cap is deterministic (the
+            file is just too big), so retrying would only waste 3x the
+            bandwidth on something that will fail identically every time."""
+
+        class _BoundedHashingWriter:
+            """Minimal file-like object satisfying MediaIoBaseDownload's only
+            requirement (.write()) while streaming to disk, hashing, and
+            enforcing max_bytes as data arrives."""
+
+            def __init__(self, fileobj):
+                self._fileobj = fileobj
+                self.md5 = hashlib.md5()
+                self.bytes_written = 0
+
+            def write(self, chunk: bytes) -> int:
+                self.bytes_written += len(chunk)
+                if self.bytes_written > max_bytes:
+                    raise _DownloadTooLarge(
+                        f"Download of Drive file {file_id} exceeded the {max_bytes}-byte limit "
+                        "while streaming (Drive's reported size was missing, zero, or wrong)."
+                    )
+                self.md5.update(chunk)
+                return self._fileobj.write(chunk)
 
         last_error: Exception | None = None
         for attempt in range(1, 4):
             tmp_name: str | None = None
             try:
                 request = service.files().get_media(fileId=file_id)
-                buf = io.BytesIO()
-                downloader = MediaIoBaseDownload(buf, request)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
                 tmp_fd, tmp_name = tempfile.mkstemp(dir=self.cache_dir, prefix=f"{file_id}__.dl")
                 with os.fdopen(tmp_fd, "wb") as f:
-                    f.write(buf.getvalue())
+                    writer = _BoundedHashingWriter(f)
+                    downloader = MediaIoBaseDownload(writer, request)
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+                if expected_md5 is not None and writer.md5.hexdigest() != expected_md5:
+                    raise RuntimeError(
+                        f"Downloaded bytes do not match Drive's reported md5Checksum for file "
+                        f"{file_id} (expected {expected_md5}, got {writer.md5.hexdigest()}) -- "
+                        "the download was corrupted or truncated in transit."
+                    )
                 os.replace(tmp_name, cache_path)
                 return
+            except _DownloadTooLarge:
+                if tmp_name is not None:
+                    Path(tmp_name).unlink(missing_ok=True)
+                raise
             except Exception as e:
                 last_error = e
                 if tmp_name is not None:
@@ -308,7 +368,21 @@ class GoogleDriveSource(DocumentSource):
                 )
 
                 if not cache_valid:
-                    self._download(service, file_id, cache_path)
+                    # A single bad file (too large once its true size is
+                    # discovered mid-stream, a corrupted transfer that never
+                    # matches Drive's md5Checksum, or exhausted retries on a
+                    # transient error) must not abort listing/downloading
+                    # every other file in the folder -- same per-file
+                    # isolation principle pipeline.py already applies to
+                    # extraction failures. Reported the same way every other
+                    # skip is: via pop_skipped(), never only a log line.
+                    try:
+                        self._download(service, file_id, cache_path,
+                                        expected_md5=md5, max_bytes=self.max_file_size_bytes)
+                    except Exception as e:
+                        logger.warning("Skipping Drive file %s (%r): download failed: %s", file_id, name, e)
+                        self._pending_skips.append(SkippedFile(name, f"Download failed: {e}"))
+                        continue
                     # A rename changes the cache filename (it embeds the name);
                     # drop any other cached copy left behind under this file ID
                     # so a future fetch() can never see more than one candidate.

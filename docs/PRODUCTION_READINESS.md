@@ -846,6 +846,61 @@ done than it is.
       still pending review. That's a pre-existing, narrower gap (a link, not
       a whole document, going unreviewed) and wasn't part of what this review
       claim reproduced.
+- [x] **Google Drive downloads are now byte-integrity-safe and
+      resource-bounded** (2026-08-24 independent follow-up review, P0-4).
+      Three separate defects in `GoogleDriveSource._download()`
+      (`backend/app/ingestion/sources.py`), fixed together:
+      (1) the whole file used to be buffered in an `io.BytesIO()` before a
+      single byte reached disk -- a file near the 200MB default cap meant
+      200MB held in the ingestion process's memory on top of everything
+      else it was doing, on a container with a documented 2GB ceiling (see
+      the P1-10 entry above for what that ceiling actually does under
+      load). Bytes now stream straight to the temp file one chunk at a time
+      through a thin file-like wrapper, since `MediaIoBaseDownload` only
+      ever calls `.write()` on whatever it's given.
+      (2) That same wrapper enforces the size cap on bytes actually
+      received, closing a real bypass: the pre-download check used
+      `int(f.get("size") or 0)`, so a file Drive reported no size for at
+      all -- not even `"0"`, just a missing key -- was silently treated as
+      0 bytes and always passed the `> max_file_size_bytes` check. The cap
+      is now authoritative regardless of what (or whether) Drive reported.
+      (3) nothing previously verified downloaded bytes against Drive's own
+      `md5Checksum` -- a transfer that completed without an HTTP error but
+      arrived truncated or corrupted would be cached and fed straight into
+      extraction, discovered (if ever) only via a garbled result much
+      later. The MD5 of what was actually written is now computed while
+      streaming and checked against Drive's advertised checksum before the
+      temp file is promoted into the cache; a mismatch is retried like any
+      other transient failure (up to 3 attempts), while exceeding the size
+      cap fails immediately without retrying, since it's deterministic --
+      retrying a file that's just too big wastes bandwidth for a result
+      that can't change.
+      **Also fixed, discovered while making this change, not part of the
+      original claims:** `list_files()` never wrapped its call to
+      `_download()` in a try/except -- a single bad file (too large once
+      its true size was discovered mid-stream, a corrupted transfer, or
+      exhausted retries on a transient error) would raise all the way out
+      of `list_files()` and abort listing/downloading every *other* file in
+      the folder too, not just the bad one. This directly contradicted the
+      per-file error isolation the rest of the pipeline already guarantees
+      (independent review concern #14). A download failure is now caught
+      per file and reported via `pop_skipped()`, the same visibility every
+      other skip gets, and the loop continues to the next file.
+      9 new/updated tests in `tests/ingestion/test_google_drive_source.py`:
+      multi-chunk streaming writes each chunk through to disk as it
+      arrives (not buffered-then-written), the cap fires mid-stream on the
+      chunk that crosses it without ever buffering past the limit, an MD5
+      mismatch on every retry attempt fails cleanly with no cache/temp-file
+      leftover, and a file with no reported size at all still gets capped
+      once its true size is discovered mid-stream and is reported via
+      `pop_skipped()` rather than silently dropped or aborting the run.
+      Full backend suite (225 passed, 1 skipped) re-run clean.
+      **Not done:** no removal reconciliation (detecting a file deleted
+      from Drive and retiring the corresponding document) -- this was
+      already an explicit, documented design decision before this review
+      (see the class docstring: a file-count limit would make a capped
+      listing indistinguishable from real deletions, so this needs
+      deliberate design, not a quick addition) and remains open.
 - [ ] **Shared-tablet manual caching is implemented but not browser-tested
       across authorization transitions** (P1-12). The service worker
       namespaces the manual cache per user id
