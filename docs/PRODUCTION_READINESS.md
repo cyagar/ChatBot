@@ -839,6 +839,20 @@ done than it is.
       `test_rejecting_replacement_leaves_old_document_active`) covering the
       approval-time cutover directly. Full backend suite (222 passed, 1
       skipped) re-run clean.
+      **Verified live against the pilot DB** (71 real documents, real
+      admin/technician traffic): confirmed
+      `SELECT source_ref, COUNT(*) FROM documents WHERE deactivated_at IS
+      NULL AND review_status='approved' GROUP BY source_ref HAVING
+      COUNT(*)>1` returns zero rows both before and after rebuilding the
+      container with this fix (no pre-existing or newly-introduced
+      duplicate-active-approved state). The container had no genuinely
+      pending replacement to test the real HTTP endpoint against, so the
+      approval-cutover SQL itself (the exact statements `review_document`
+      runs) was exercised directly against the live database using two
+      throwaway rows sharing a fake source_ref -- confirmed the old row was
+      deactivated with a "Superseded" reason and the new row stayed active
+      and approved, then deleted both throwaway rows. The real 71-document
+      corpus was confirmed unchanged (71 total, 71 active) before and after.
       **Not done:** this is document-level cutover only, gated on
       `documents.review_status`, not on the separate per-machine
       `document_machines.review_status` link approval -- a document can be
