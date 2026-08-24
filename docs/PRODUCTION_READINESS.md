@@ -1186,12 +1186,15 @@ done than it is.
       unapproved provider. Full backend suite (258 passed, 1 skipped)
       re-run clean.
       **Not done:** "request cancellation" -- both providers are called
-      synchronously from a synchronous FastAPI route handler; nothing today
-      cancels an in-flight SDK call if the client disconnects mid-request.
-      Building real cancellation would mean moving `generate()` onto an
-      async path with a cancellation token threaded through the SDK call,
-      a materially larger change than a contract test can verify or this
-      pass scoped in. Not verified live in the running container (this
+      synchronously from a synchronous FastAPI route handler. An in-flight
+      SDK call is bounded (`REQUEST_TIMEOUT_SECONDS = 30`, passed to both
+      SDK clients, so a hung call still fails after 30s), but nothing today
+      cancels it EARLY if the client disconnects mid-request -- the request
+      runs to that 30s bound (or completion) regardless. Building real
+      client-disconnect-driven cancellation would mean moving `generate()`
+      onto an async path with a cancellation token threaded through the SDK
+      call, a materially larger change than a contract test can verify or
+      this pass scoped in. Not verified live in the running container (this
       code path is inactive there -- `AI_PROVIDER` unset -- and the
       container's production image deliberately excludes `tests/`, so
       there is nothing to run live-verification against beyond confirming
