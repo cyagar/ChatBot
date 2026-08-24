@@ -1196,6 +1196,29 @@ done than it is.
       container's production image deliberately excludes `tests/`, so
       there is nothing to run live-verification against beyond confirming
       the dormant path is in fact dormant, which was done above).
+- [x] **README/ARCHITECTURE doc/code drift fixed** (2026-08-24 independent
+      follow-up review, P1-4, prose half). Both docs still described a
+      `DOCUMENT_SOURCE` env var and a `local_directory`/`LOCAL_MANUALS_DIR`
+      fallback -- neither exists in the current code (`.env.example` was
+      already correct; only the prose had drifted) -- and both claimed
+      ingestion was "manual-trigger... not scheduled" despite
+      `app/ingestion/scheduler.py` and `INGESTION_SYNC_INTERVAL_MINUTES`
+      existing since P1-4 of the *original* independent review. Also fixed:
+      both docs referenced a `LocalDirectorySource` class that was never
+      real (the actual test-only stand-in is `FakeDirectorySource` in
+      `tests/ingestion/fakes.py`). This doc's own "Assumptions made" section
+      had the review's other named example -- "First registered user
+      becomes administrator" -- long superseded by the invite-only system
+      (P0-5/P0-6, same original review); struck through with a dated
+      correction rather than silently deleted, so the historical record of
+      what was actually assumed at the time isn't lost. Documentation-only;
+      no code changed, no test run or live verification applicable.
+      **Not done:** the review's other P1-4 ask, "generate deployment docs
+      from the final production configuration and fail CI on obsolete
+      environment keys/examples," needs an actual CI pipeline to hang that
+      check on -- `ls .github/workflows` confirms none exists in this repo.
+      Building CI from scratch is a separate decision, not something to
+      fold into a doc-prose fix; not attempted here.
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
 
@@ -1371,9 +1394,16 @@ and will be fully replaced, not migrated, whenever the switch happens.
 ## Assumptions made (per the plan's "make reasonable assumptions... and
 continue" instruction)
 
-- First registered user becomes administrator (no separate admin-invite flow
-  built) — reasonable for initial setup, should be revisited before opening
-  registration publicly.
+- ~~First registered user becomes administrator (no separate admin-invite
+  flow built)~~ -- **stale, corrected 2026-08-24 (P1-4, doc/code drift):**
+  this assumption was superseded by the invite-only system built under the
+  independent follow-up review's P0-5/P0-6 (see "Registration is closed and
+  documents require explicit approval" above). Public self-registration no
+  longer exists at all; the first administrator is created out-of-band via
+  `scripts/bootstrap_admin.py`, and every other account requires an
+  admin-issued invitation. Left struck through rather than deleted so this
+  doesn't read as though the old race condition was never a real, since-fixed
+  issue.
 - "Current revision" defaults to `true` on ingestion for every new document;
   nothing currently demotes an older revision automatically when a newer one
   of the same document arrives — admins mark supersession manually via the

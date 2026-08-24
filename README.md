@@ -39,10 +39,9 @@ Edit `backend/.env`:
   generated, synthesized answers).
 - `TESSERACT_CMD` — set if you installed Tesseract and want scanned pages
   indexed.
-- `DOCUMENT_SOURCE` — `google_drive` in production (see below) or
-  `local_directory` for local dev without Drive access (reads from
-  `LOCAL_MANUALS_DIR`, default `../data/manuals_incoming`; used by the test
-  suite via synthetic fixtures, never real manuals).
+- `GOOGLE_DRIVE_FOLDER_ID`/`GOOGLE_SERVICE_ACCOUNT_JSON_PATH` — required to
+  index anything at all. Google Drive is the only document source; there is
+  no local-directory fallback (see "Indexing manuals" below).
 
 A `SECRET_KEY` is auto-generated into `.env` on first setup in this repo's
 history; if you're starting fresh, put any random 64-character string there —
@@ -55,15 +54,17 @@ truth; there is no local upload path or local manuals folder in production
 (one place for the corpus to live means it can't drift out of sync with
 itself). To point a deployment at Drive, set in `.env`:
 
-- `DOCUMENT_SOURCE=google_drive`
 - `GOOGLE_DRIVE_FOLDER_ID` — the ID from the folder's URL
   (`drive.google.com/drive/folders/<THIS_PART>`)
 - `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` — path to a downloaded service-account
   key file (never the key's contents inline in `.env`). Share the target
   folder with that service account's `client_email` (Viewer is enough).
 
-Then, whenever manuals are added or changed in Drive, trigger a re-index —
-either the admin UI (`/admin` → "Ingestion reports" → "Run re-index now") or:
+A background loop (`INGESTION_SYNC_INTERVAL_MINUTES` in `.env`, default 6h)
+automatically re-syncs from Drive on that schedule -- see "Google Drive as
+the document source" below. You don't have to trigger a re-index by hand for
+the corpus to stay current, but you still can, any time — either the admin
+UI (`/admin` → "Ingestion reports" → "Run re-index now") or:
 
 ```bash
 python scripts/ingest.py
@@ -176,22 +177,34 @@ From `/admin`:
 - **Feedback & gaps** — technician feedback and frequently unanswered
   questions (manual-coverage gap signal).
 
-There is no in-app upload: add a manual to the shared Drive folder, then use
-"Run re-index now" above.
+There is no in-app upload: add a manual to the shared Drive folder, then
+either use "Run re-index now" above or wait for the next automated sync
+(see "Google Drive as the document source" below).
 
 ## Google Drive as the document source
 
 `GoogleDriveSource` (`app/ingestion/sources.py`) lists a shared folder via a
-service account, downloads each file into `data/gdrive_cache/` keyed by Drive
-file ID, and hashes the cached bytes (Drive only exposes an md5 checksum;
-the rest of the pipeline assumes real SHA-256 throughout). No
-`changes.list`/page-token incremental sync -- a full listing every re-index
-is cheap at this corpus size, and the existing sha256 skip-if-unchanged logic
-already makes repeat listings idempotent. Ingestion stays manual-trigger
-(admin "re-index now"), not scheduled -- add files to Drive, then trigger a
-re-index whenever you're ready.
+service account, streams each file to `data/gdrive_cache/` keyed by Drive
+file ID, verifies the downloaded bytes against Drive's own advertised
+checksum before caching them, and hashes the cached bytes (Drive only
+exposes an md5 checksum; the rest of the pipeline assumes real SHA-256
+throughout). No `changes.list`/page-token incremental sync -- a full listing
+every re-index is cheap at this corpus size, and the existing sha256
+skip-if-unchanged logic already makes repeat listings idempotent.
 
-`LocalDirectorySource` still exists and is what the test suite uses (pointed
-at synthetic tmp-directory fixtures, never real manuals) so the ingestion
-pipeline can be tested without live Drive access. It's not used for any real
-corpus in this deployment.
+Ingestion is both scheduled and manually triggerable, not manual-only:
+`app/ingestion/scheduler.py` runs the same sync path automatically every
+`INGESTION_SYNC_INTERVAL_MINUTES` (default 6h, disabled if
+`GOOGLE_DRIVE_FOLDER_ID` is blank), and "Run re-index now" in the admin UI
+(or `python scripts/ingest.py`) runs it on demand at any time -- e.g. right
+after adding files to Drive, instead of waiting for the next scheduled sync.
+`GET /api/admin/ingestion/status` reports whether the scheduler is enabled,
+when the last successful sync finished, and flags the corpus as stale if
+that exceeds the configured SLA.
+
+`GoogleDriveSource` is the only real document source; there is no
+local-directory fallback used against a real corpus. The test suite exercises
+the ingestion pipeline against `FakeDirectorySource`
+(`tests/ingestion/fakes.py`), a small directory-scanning stand-in pointed at
+synthetic tmp-directory fixtures, so pipeline logic can be tested without
+live Drive access.

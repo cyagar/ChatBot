@@ -53,10 +53,12 @@ later without touching unrelated code:
    assumes real SHA-256). No incremental `changes.list`/page-token sync -- a
    full listing every re-index is cheap at this corpus size, and the existing
    sha256 skip-if-unchanged logic already makes repeat listings idempotent.
-   `LocalDirectorySource` still exists purely as test infrastructure (synthetic
-   tmp-directory fixtures in the test suite) — no real manuals are stored
-   locally in this deployment; ingestion is Drive-only, manual-trigger (admin
-   "re-index now"), and there is no local-upload path.
+   `FakeDirectorySource` (`tests/ingestion/fakes.py`) exists purely as test
+   infrastructure (synthetic tmp-directory fixtures) — no real manuals are
+   stored locally in this deployment. Ingestion is Drive-only, with no
+   local-upload path, and both scheduled (`app/ingestion/scheduler.py`, an
+   automatic sync every `INGESTION_SYNC_INTERVAL_MINUTES`) and manually
+   triggerable on demand (admin "re-index now" / `scripts/ingest.py`).
 2. **Type resolution** (`extractors.py`) — trusts file *content* (magic bytes)
    over the file extension. This mattered concretely: 5 files in the corpus
    were PDFs mislabeled `.doc`/`.docx`.
