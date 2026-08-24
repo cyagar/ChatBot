@@ -785,15 +785,47 @@ done than it is.
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
 
+**2026-08-24 decision, explicit and revisited, not silent:** a second
+independent review (`ChatBot_Current_Assessment_and_Production_Architecture_Prompts_2026-08-24.txt`,
+reviewing commit `aafb316`) made the case below its own P0-1: replace this
+entire stack with Node.js/Next.js/TypeScript + PostgreSQL/pgvector + a
+durable job/workflow queue + S3-compatible object storage, on the grounds
+that FastAPI/Jinja2/SQLite/BackgroundTasks is a temporary prototype
+substitution, not the intended production architecture, and that a
+single-instance deployment can't support multi-replica/production-scale
+operation. The user weighed that against migration cost and **deferred it,
+deliberately, not rejected it**: at this pilot's actual current scale
+(single instance, small technician team), SQLite + one FastAPI process is a
+defensible, supportable choice, and the reviewer's target architecture
+assumes needs the project doesn't have yet. The explicit commitment is
+"later, not never" — once the project has made real distance and functions
+correctly, the architecture migration happens. Continued hardening of the
+current stack proceeds in the meantime (see the P0-2 through P0-8 entries
+from that same review below).
+What stays portable either way: the `/api/*` REST/JSON route shape (already
+decoupled from Jinja2/vanilla JS, so a future Next.js frontend can consume
+it largely as-is), the Python business logic (ingestion, retrieval, claim
+validation, provider adapters — moves to a `services/rag`-style Python
+service mostly intact), the relational schema shape (SQLite→PostgreSQL
+migration is mechanical, not a redesign), and any safety/correctness fix
+made in the meantime (algorithm/data-invariant fixes, not
+storage-engine-specific). What does NOT carry forward, and is deliberately
+NOT being invested in further as a result: the in-process background-job
+layer (`FastAPI BackgroundTasks` + `_INGEST_LOCK` + the asyncio scheduler)
+is fundamentally incompatible with the target durable-queue architecture
+and will be fully replaced, not migrated, whenever the switch happens.
+
 - [ ] **PostgreSQL + pgvector** — currently SQLite + FTS5 + brute-force cosine.
       Functionally complete at this corpus's scale; not yet load-tested or
       built for multi-instance/concurrent-writer deployment. Migration path
-      documented in `docs/ARCHITECTURE.md`.
+      documented in `docs/ARCHITECTURE.md`. Explicitly deferred, not
+      abandoned — see the 2026-08-24 decision above.
 - [ ] **Next.js/TypeScript frontend** — currently server-rendered
       Jinja2+vanilla JS. Meets every functional UI requirement in the plan
       but doesn't get Next's component ecosystem, type safety, or
       hot-module-reload dev experience. The backend is a clean JSON API, so
-      this is additive, not a rewrite.
+      this is additive, not a rewrite. Explicitly deferred, not abandoned —
+      see the 2026-08-24 decision above.
 - [x] ~~**Docker Compose local dev loop** — not exercised end-to-end.~~
       **Update (2026-08-21):** now built and run end-to-end multiple times —
       `docker compose build && docker compose up`, healthcheck passing,
