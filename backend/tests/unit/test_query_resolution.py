@@ -88,3 +88,67 @@ def test_original_wording_is_a_prefix_of_the_resolved_query():
     q = "What about replacing it?"
     resolved = resolve_follow_up_query(q, history)
     assert resolved.startswith(q)
+
+
+# --- P1-2 (independent follow-up review, 2026-08-24): negatives -----------
+# The prior test above only covers the successful-resolution path. These
+# cover the resolver's confidence model -- when it must NOT guess.
+
+
+def test_no_answer_assistant_turn_is_not_scraped_for_antecedent_words():
+    """The immediately-prior assistant turn was a failure/no-answer message
+    (real boilerplate this codebase actually sends, see routes_chat.py). Its
+    prose must never be treated as an antecedent -- none of its own words may
+    appear in the resolved query."""
+    history = [
+        HistoryTurn(role="user", content="Why is it not heating?"),
+        HistoryTurn(
+            role="assistant",
+            content="I couldn't reach the AI provider (timed out). Please try again in a moment.",
+            is_no_answer=True,
+        ),
+    ]
+    resolved = resolve_follow_up_query("What about replacing it?", history)
+    for junk in ("provider", "timed", "moment", "please"):
+        assert junk not in resolved.lower()
+
+
+def test_no_extractable_content_anywhere_returns_question_unchanged():
+    """The only assistant turn failed (skipped) and the prior user turn has
+    no extractable content words of its own either -- there is nothing
+    confident to resolve against, so the question must come back unchanged
+    rather than being padded with failure-message noise."""
+    history = [
+        HistoryTurn(role="user", content="What is it?"),
+        HistoryTurn(
+            role="assistant",
+            content="I couldn't search the manuals right now due to a temporary technical problem.",
+            is_no_answer=True,
+        ),
+    ]
+    q = "What about it?"
+    assert resolve_follow_up_query(q, history) == q
+
+
+def test_resolution_walks_back_past_a_failed_retry_to_a_real_prior_answer():
+    """Turn 1 answered for real; turn 2 was a failed retry attempt (same
+    conversation, e.g. a transient provider error); turn 3 is a follow-up.
+    Resolution must skip the failed turn 2 and use turn 1's real content,
+    not fall back to unresolved just because the MOST RECENT assistant turn
+    happened to fail."""
+    history = [
+        HistoryTurn(role="user", content="Why is it not heating?"),
+        HistoryTurn(
+            role="assistant", content="Check the tank heater and thermistor for failure.",
+            is_no_answer=False,
+        ),
+        HistoryTurn(role="user", content="What about replacing it?"),
+        HistoryTurn(
+            role="assistant", content="I couldn't reach the AI provider (timed out).",
+            is_no_answer=True,
+        ),
+    ]
+    resolved = resolve_follow_up_query("Which connector?", history)
+    assert resolved != "Which connector?"
+    assert "heater" in resolved.lower() or "thermistor" in resolved.lower()
+    assert "provider" not in resolved.lower() and "timed" not in resolved.lower()

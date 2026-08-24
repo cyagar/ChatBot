@@ -196,17 +196,23 @@ def _fetch_history(conn, conversation_id: int, *, before_message_id: int | None 
     question (concern #5, P1-8)."""
     if before_message_id is not None:
         rows = conn.execute(
-            "SELECT role, content FROM messages WHERE conversation_id = ? AND id < ? "
+            "SELECT role, content, is_no_answer FROM messages WHERE conversation_id = ? AND id < ? "
             "AND is_clarifying_question = 0 ORDER BY id DESC LIMIT ?",
             (conversation_id, before_message_id, MAX_HISTORY_TURNS),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT role, content FROM messages WHERE conversation_id = ? "
+            "SELECT role, content, is_no_answer FROM messages WHERE conversation_id = ? "
             "AND is_clarifying_question = 0 ORDER BY id DESC LIMIT ?",
             (conversation_id, MAX_HISTORY_TURNS),
         ).fetchall()
-    return [HistoryTurn(role=r["role"], content=r["content"][:MAX_HISTORY_TURN_CHARS]) for r in reversed(rows)]
+    return [
+        HistoryTurn(
+            role=r["role"], content=r["content"][:MAX_HISTORY_TURN_CHARS],
+            is_no_answer=bool(r["is_no_answer"]),
+        )
+        for r in reversed(rows)
+    ]
 
 
 def _generate_and_persist_answer(

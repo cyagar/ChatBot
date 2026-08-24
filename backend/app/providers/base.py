@@ -42,10 +42,18 @@ class HistoryTurn:
     """One prior turn, bounded and pre-summarized by the caller (routes_chat) —
     providers never see the full conversation, only what's been decided is safe
     and useful context (concern #5: follow-ups need real history, but the
-    selected machine must never change except through an explicit action)."""
+    selected machine must never change except through an explicit action).
+
+    is_no_answer (independent follow-up review P1-2, 2026-08-24): true when an
+    assistant turn is itself a no-answer/failure message ("I couldn't find...",
+    "I couldn't reach the AI provider..."). Always False for user turns. Exists
+    so resolve_follow_up_query can skip scraping boilerplate failure prose as
+    if it were real antecedent content -- providers themselves still receive
+    the turn's actual content unchanged; only resolution treats it specially."""
 
     role: str  # "user" | "assistant"
     content: str
+    is_no_answer: bool = False
 
 
 class ProviderError(Exception):

@@ -16,11 +16,30 @@ a human would -- this module exists only because retrieval cannot.
 The resolved query is a heuristic, not a semantic parse: it targets the
 review's own three-turn example ("Why is it not heating?" -> "What about
 replacing it?" -> "Which connector?") by pulling content words from the most
-recent ASSISTANT turn (since a pronoun like "it" in a follow-up typically
-refers to something the assistant just said, e.g. "replace the heating
-element" -- not to whatever the user asked two turns ago) and the most
-recent USER turn, then appending them to the original question. It will not
-resolve every possible anaphora and is not intended to.
+recent ANSWERED assistant turn (since a pronoun like "it" in a follow-up
+typically refers to something the assistant just said, e.g. "replace the
+heating element" -- not to whatever the user asked two turns ago) and the
+most recent USER turn, then appending them to the original question. It will
+not resolve every possible anaphora and is not intended to.
+
+Independent follow-up review P1-2 (2026-08-24): "resolve follow-ups into a
+standalone retrieval query with confidence/clarification." A prior assistant
+turn that was itself a no-answer/failure message ("I couldn't find...", "I
+couldn't reach the AI provider...") is skipped when looking for the "most
+recent assistant turn" -- its prose is boilerplate, not domain content, and
+scraping it would inject retrieval-irrelevant words (e.g. "technical",
+"administrator") into the resolved query. Resolution walks back through
+history for the most recent assistant turn that actually answered something;
+if none exists, that is treated as low confidence and the question is
+returned unchanged rather than guessed at -- retrieving on the technician's
+own words is safer than retrieving on noise. This is the module's whole
+confidence model: "resolved" (an antecedent was found) vs "unresolved"
+(returned unchanged), observable by the caller via `!= question`. What this
+does NOT do: extract or persist structured fields for "referenced
+component/procedure" or "unresolved pronoun" as their own DB columns, or
+surface a clarification prompt to the technician when resolution fails --
+those would need a genuine NLP/entity-extraction step or new UI and are
+scoped out here (see docs/PRODUCTION_READINESS.md P1-2 entry).
 """
 from __future__ import annotations
 
@@ -78,7 +97,9 @@ def resolve_follow_up_query(question: str, history: list) -> str:
     if not history or not _looks_like_follow_up(question):
         return question
 
-    last_assistant = next((h.content for h in reversed(history) if h.role == "assistant"), "")
+    last_assistant = next(
+        (h.content for h in reversed(history) if h.role == "assistant" and not h.is_no_answer), ""
+    )
     last_user = next((h.content for h in reversed(history) if h.role == "user"), "")
 
     context_words = _content_words(last_assistant, limit=15) + _content_words(last_user, limit=10)

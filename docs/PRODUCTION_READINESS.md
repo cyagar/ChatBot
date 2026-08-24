@@ -1222,6 +1222,60 @@ done than it is.
       check on -- `ls .github/workflows` confirms none exists in this repo.
       Building CI from scratch is a separate decision, not something to
       fold into a doc-prose fix; not attempted here.
+- [x] **Follow-up resolver no longer scrapes failed-answer boilerplate as
+      antecedent content** (2026-08-24 independent follow-up review, P1-2).
+      The review's ask: "Persist a structured conversation state -- selected
+      machine, referenced component/procedure, prior cited chunk IDs,
+      unresolved pronouns -- and resolve follow-ups into a standalone
+      retrieval query with confidence/clarification. Evaluate it on
+      multi-turn negatives as well as successes." Two of the four named
+      pieces of state were already persisted before this pass and needed no
+      new work: the selected machine (`conversations.machine_id`) and prior
+      cited chunk IDs (`message_sources.is_citation`, already used by
+      `_hydrate_message` to reproduce exactly what a technician saw on
+      reload). The real gap, found by actually reading
+      `query_resolution.py` against a concrete failure case: when the most
+      recent assistant turn was itself a no-answer/failure message ("I
+      couldn't reach the AI provider...", "I couldn't search the manuals
+      right now..."), the resolver scraped ITS prose for "content words" and
+      appended them to the next follow-up's retrieval query -- injecting
+      words like "provider", "timed", "administrator" into a BM25/vector
+      search instead of real manual vocabulary. `HistoryTurn` gained an
+      `is_no_answer: bool` field (`app/providers/base.py`), populated by
+      `_fetch_history` from the already-existing `messages.is_no_answer`
+      column; `resolve_follow_up_query` now walks back through history for
+      the most recent assistant turn that actually answered something,
+      skipping no-answer turns entirely, and falls back to the technician's
+      own original wording (unchanged) when no such turn exists anywhere in
+      history -- retrieving on the technician's own words is safer than
+      retrieving on noise. This IS the module's confidence model: resolved
+      (an antecedent was found) vs. unresolved (returned unchanged, already
+      observable via `!= question`, unchanged from before this pass). Three
+      new negative/multi-turn tests added to
+      `tests/unit/test_query_resolution.py` (10 total, up from 7): a
+      no-answer turn's own words never appear in the resolved query; when
+      nothing anywhere in history has extractable content, the question
+      comes back unchanged; and resolution correctly walks back PAST a
+      failed retry turn to an earlier real answer rather than either using
+      the failure's words or giving up entirely. Full backend suite (261
+      passed, 1 skipped) re-run clean; this is a pure retrieval-query
+      change with no schema migration, so no live-container verification
+      was performed beyond the test suite -- there is no new runtime
+      surface to click through.
+      **Not done:** "referenced component/procedure" and "unresolved
+      pronouns" as their own structured/persisted fields -- the review's
+      wording implies real entity extraction (e.g. recognizing "the heating
+      element" as a canonical component reference distinct from surrounding
+      prose), which needs an NLP/entity-extraction step this codebase has no
+      dependency for (`requirements.txt` has no spaCy or equivalent; adding
+      one is a dependency decision bigger than this pass, the same category
+      of call as P1-7's "not doing an async rewrite for cancellation").
+      Also not done: a clarification prompt surfaced to the technician when
+      resolution fails (the "clarification" half of "confidence/
+      clarification") -- there is no new UI path here, only the internal
+      resolved-vs-unresolved signal; building a technician-facing
+      clarification flow would overlap with the P1-3 history/resume UI work
+      and was left there rather than half-built in this item.
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
 
