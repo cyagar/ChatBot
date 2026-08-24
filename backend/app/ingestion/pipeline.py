@@ -224,16 +224,31 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
     # unsupported file (e.g. .indd) doesn't accumulate a new row every run.
     # superseded_candidate_id: the currently-active row at this source_ref,
     # when the incoming bytes differ from it. Deliberately NOT deactivated
-    # here -- independent review P0-2: retiring a working manual before its
-    # replacement has been extracted and validated means a corrupt/unreadable
-    # replacement can take down a manual technicians could otherwise still
-    # use. It's only deactivated once a validated outcome (indexed/partial/
-    # duplicate) actually exists to take its place, further down.
+    # here, and NOT deactivated once extraction/chunking succeeds either
+    # (independent review P0-2, both the original claim and the 2026-08-24
+    # follow-up): retiring a working, *approved* manual as soon as its
+    # replacement merely parses is still not safe -- the replacement's
+    # review_status defaults to 'pending' (migration 0003), so a technician
+    # could be left with zero approved manuals for this machine for however
+    # long the replacement sits unreviewed, even though extraction/chunking
+    # "succeeded". The old document is only deactivated once a human approves
+    # the replacement -- see the cutover in routes_admin.py's review_document,
+    # which deactivates whatever else is still active at this source_ref in
+    # the same transaction as the approval. A rejected replacement therefore
+    # never takes down the manual it was meant to replace.
+    #
+    # Because of this, more than one row can be simultaneously "active"
+    # (deactivated_at IS NULL) at the same source_ref -- the still-approved
+    # old one, and however many pending replacement attempts have piled up
+    # since. The idempotency/resume check below always compares against the
+    # most recently ingested one, not an arbitrary one, and matches on it by
+    # id explicitly rather than assuming source_ref alone is unique.
     stable_retry_id: int | None = None
     superseded_candidate_id: int | None = None
     with get_conn() as conn:
         existing = conn.execute(
-            "SELECT id, status, sha256 FROM documents WHERE source_ref = ? AND deactivated_at IS NULL",
+            "SELECT id, status, sha256 FROM documents WHERE source_ref = ? AND deactivated_at IS NULL "
+            "ORDER BY ingested_at DESC, id DESC LIMIT 1",
             (sf.source_ref,),
         ).fetchone()
 
@@ -307,18 +322,12 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
                 (stable_retry_id,),
             )
 
-    # Extraction succeeded and produced usable content: the replacement is now
-    # validated, so it's safe to retire the row it's superseding (P0-2 -- this
-    # only runs once we know there's a real replacement to take its place, not
-    # before).
-    if superseded_candidate_id is not None:
-        with get_conn() as conn:
-            conn.execute(
-                "UPDATE documents SET deactivated_at = datetime('now'), "
-                "status_reason = COALESCE(status_reason || ' | ', '') "
-                "|| 'Superseded: content changed at this source path.' WHERE id = ?",
-                (superseded_candidate_id,),
-            )
+    # Extraction succeeded, but the old document at this source_ref is
+    # deliberately left active here -- see the comment above superseded_candidate_id.
+    # It's only retired once a human approves this replacement (routes_admin.py's
+    # review_document), not merely because extraction/chunking produced *a*
+    # result; a pending or rejected replacement must never take down a manual
+    # technicians can currently retrieve.
 
     # --- Exact duplicate of an already-stored file ---
     with get_conn() as conn:

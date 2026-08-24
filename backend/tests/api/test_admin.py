@@ -194,6 +194,80 @@ def test_metadata_correction_approves_the_links_it_sets(test_env):
     assert link["reviewed_by"] is not None
 
 
+# --- Replacement cutover (independent follow-up review P0-2, 2026-08-24
+# follow-up): approving a replacement is the moment it retires whatever it's
+# superseding, not ingestion. ---
+
+def _seed_document_at_source_ref(conn, source_ref, *, sha256, review_status="pending",
+                                  status="indexed", title="Axiom Service Manual") -> int:
+    conn.execute(
+        "INSERT OR IGNORE INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')"
+    )
+    cur = conn.execute(
+        "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+        "file_type, sha256, byte_size, status, review_status, manufacturer_id, doc_type, title, "
+        "is_current_revision, ingested_at) "
+        "VALUES ('axiom.pdf', ?, 'google_drive', ?, 'pdf', ?, 100, ?, ?, 1, 'service_repair', ?, 1, "
+        "datetime('now'))",
+        (sha256, source_ref, sha256, status, review_status, title),
+    )
+    doc_id = cur.lastrowid
+    conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (?, 1)", (doc_id,))
+    return doc_id
+
+
+def test_approving_replacement_deactivates_old_document_at_same_source_ref(test_env):
+    """Mirrors what _ingest_one actually leaves behind: the old approved
+    document and the new pending replacement both active at the same
+    source_ref. Approving the replacement must be the atomic cutover --
+    the old one retires in the same request, not on some later admin
+    pass, so there's never a moment with two approved documents (or,
+    before this fix, zero) live at this source_ref."""
+    source_ref = "google_drive:file123"
+    with get_conn() as conn:
+        old_id = _seed_document_at_source_ref(conn, source_ref, sha256="old-hash", review_status="approved")
+        new_id = _seed_document_at_source_ref(conn, source_ref, sha256="new-hash", review_status="pending")
+    _register_admin()
+
+    resp = client.post(f"/api/admin/documents/{new_id}/review", json={"decision": "approved"})
+    assert resp.status_code == 200
+
+    with get_conn() as conn:
+        old_row = conn.execute("SELECT deactivated_at, status_reason FROM documents WHERE id = ?", (old_id,)).fetchone()
+        new_row = conn.execute("SELECT deactivated_at, review_status FROM documents WHERE id = ?", (new_id,)).fetchone()
+        audit = conn.execute(
+            "SELECT event_type FROM audit_events WHERE target_type = 'document' AND target_id = ?", (new_id,)
+        ).fetchall()
+    assert old_row["deactivated_at"] is not None, "the old document must be retired once its replacement is approved"
+    assert "Superseded" in (old_row["status_reason"] or "")
+    assert new_row["deactivated_at"] is None
+    assert new_row["review_status"] == "approved"
+    assert any(a["event_type"] == "document_superseded" for a in audit)
+
+
+def test_rejecting_replacement_leaves_old_document_active(test_env):
+    """The failure mode this whole fix exists to prevent: a replacement that
+    turns out to be wrong must never take the working manual down with it."""
+    source_ref = "google_drive:file456"
+    with get_conn() as conn:
+        old_id = _seed_document_at_source_ref(conn, source_ref, sha256="old-hash", review_status="approved")
+        new_id = _seed_document_at_source_ref(conn, source_ref, sha256="new-hash", review_status="pending")
+    _register_admin()
+
+    resp = client.post(f"/api/admin/documents/{new_id}/review", json={"decision": "rejected"})
+    assert resp.status_code == 200
+
+    with get_conn() as conn:
+        old_row = conn.execute("SELECT deactivated_at FROM documents WHERE id = ?", (old_id,)).fetchone()
+        new_row = conn.execute("SELECT deactivated_at, review_status FROM documents WHERE id = ?", (new_id,)).fetchone()
+    assert old_row["deactivated_at"] is None, "rejecting a replacement must not touch the document it targeted"
+    assert new_row["deactivated_at"] is None, "a rejected document is kept (not deactivated) for the review record"
+    assert new_row["review_status"] == "rejected"
+
+
 # --- Invitations, disable/enable (P0-5) ---
 
 def test_invitation_create_and_use(test_env):

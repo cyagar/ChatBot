@@ -273,8 +273,18 @@ class DocumentReviewRequest(BaseModel):
 
 @router.post("/documents/{document_id}/review")
 def review_document(document_id: int, payload: DocumentReviewRequest, admin: CurrentUser = Depends(require_admin)):
+    """Independent follow-up review P0-2 (2026-08-24 follow-up): approving a
+    replacement is the cutover point, not ingestion. `_ingest_one` deliberately
+    leaves the document a replacement is superseding active (deactivated_at
+    IS NULL) so a pending or rejected replacement never takes a manual away
+    from technicians. Approving the replacement here is what atomically
+    retires whatever else is still active at the same source_ref -- one
+    SQLite transaction, so there's never a moment with either zero or two
+    approved documents live at that source_ref."""
     with get_conn() as conn:
-        doc = conn.execute("SELECT id FROM documents WHERE id = ? AND deactivated_at IS NULL", (document_id,)).fetchone()
+        doc = conn.execute(
+            "SELECT id, source_ref FROM documents WHERE id = ? AND deactivated_at IS NULL", (document_id,)
+        ).fetchone()
         if not doc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found or deactivated.")
         conn.execute(
@@ -284,6 +294,20 @@ def review_document(document_id: int, payload: DocumentReviewRequest, admin: Cur
         )
         log_audit_event(conn, "document_reviewed", actor_user_id=admin.id, target_type="document",
                          target_id=document_id, detail=f"{payload.decision}" + (f": {payload.note}" if payload.note else ""))
+
+        if payload.decision == "approved":
+            superseded = conn.execute(
+                "UPDATE documents SET deactivated_at = datetime('now'), "
+                "status_reason = COALESCE(status_reason || ' | ', '') "
+                "|| 'Superseded: document ' || ? || ' was approved at this source path.' "
+                "WHERE source_ref = ? AND id != ? AND deactivated_at IS NULL",
+                (document_id, doc["source_ref"], document_id),
+            )
+            if superseded.rowcount:
+                log_audit_event(conn, "document_superseded", actor_user_id=admin.id, target_type="document",
+                                 target_id=document_id,
+                                 detail=f"Retired {superseded.rowcount} prior active document(s) at "
+                                        f"source_ref={doc['source_ref']!r} on approval.")
     return {"ok": True}
 
 

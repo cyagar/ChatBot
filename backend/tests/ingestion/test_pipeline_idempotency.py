@@ -10,6 +10,7 @@ import shutil
 
 import pytest
 
+from app.db import get_conn
 from app.ingestion.pipeline import ingest_all
 from tests.ingestion.fakes import FakeDirectorySource
 
@@ -108,7 +109,16 @@ def test_exact_duplicate_bytes_are_flagged_and_excluded_from_retrieval(test_env,
     assert chunk_count_for_dup == 0, "a duplicate document must not contribute its own chunks to retrieval"
 
 
-def test_content_change_at_same_path_creates_new_current_row(test_env, make_pdf, manuals_dir):
+def test_content_change_at_same_path_creates_new_pending_row_without_deactivating_old(
+    test_env, make_pdf, manuals_dir
+):
+    """Independent follow-up review P0-2 (2026-08-24 follow-up): a replacement
+    that merely extracts/chunks successfully must NOT retire the manual it's
+    replacing -- the new row's review_status defaults to 'pending' (migration
+    0003), so deactivating the old one here would leave technicians with zero
+    approved documents at this source_ref until a human happens to review it.
+    Both rows must stay active until an admin approves the replacement (see
+    tests/api/test_admin.py for the approval-time cutover)."""
     path = manuals_dir / "evolving.pdf"
 
     v1 = make_pdf(["Version one content about the water filter."])
@@ -116,21 +126,24 @@ def test_content_change_at_same_path_creates_new_current_row(test_env, make_pdf,
     source = FakeDirectorySource(manuals_dir)
     ingest_all(source=source, embed=False)
 
+    with get_conn() as conn:
+        conn.execute("UPDATE documents SET review_status = 'approved' WHERE source_ref = ?",
+                     (f"test_directory:{path.name}",))
+
     v2 = make_pdf(["Version two content, completely rewritten about the water filter replacement."], name="v2.pdf")
     shutil.copy(v2, path)  # same source_ref (path relative to the corpus root), different bytes
     ingest_all(source=source, embed=False)
 
     source_ref = f"test_directory:{path.name}"
-    from app.db import get_conn
     with get_conn() as conn:
         active = conn.execute(
-            "SELECT id FROM documents WHERE source_ref = ? AND deactivated_at IS NULL", (source_ref,)
+            "SELECT id, review_status FROM documents WHERE source_ref = ? AND deactivated_at IS NULL "
+            "ORDER BY ingested_at, id", (source_ref,)
         ).fetchall()
-        all_rows = conn.execute(
-            "SELECT id, deactivated_at FROM documents WHERE source_ref = ?", (source_ref,)
-        ).fetchall()
-    assert len(active) == 1, "only the latest content for a given path should be active"
-    assert len(all_rows) == 2, "the superseded version should be kept (deactivated) for audit, not deleted"
+    assert len(active) == 2, \
+        "the already-approved old document must stay active alongside the new pending one, not get retired on ingest"
+    assert active[0]["review_status"] == "approved"
+    assert active[1]["review_status"] == "pending", "a fresh replacement must not be auto-approved"
 
 
 def test_relocated_corpus_root_does_not_create_a_duplicate_row(test_env, make_pdf, manuals_dir, tmp_path):

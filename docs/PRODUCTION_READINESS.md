@@ -806,6 +806,46 @@ done than it is.
       **P0-8's third sub-claim** (shared-tablet cache purge unverified in a
       real browser) is the same item already tracked below as P1-12 -- not
       duplicated here.
+- [x] **Document replacement is now an approval-gated cutover, not an
+      ingestion-time one** (2026-08-24 independent follow-up review, P0-2).
+      The original P0-2 fix (same session, before this review) already
+      deferred deactivating a superseded document until extraction/chunking
+      *succeeded* -- but a fresh replacement's `review_status` defaults to
+      `'pending'` (migration 0003), and retrieval requires
+      `review_status = 'approved'`. So the old fix still left a real gap the
+      new review reproduced exactly: a replacement that extracts and chunks
+      fine, but hasn't been reviewed yet, got its predecessor deactivated
+      anyway -- zero approved, retrievable documents at that source_ref for
+      however long the replacement sat in the review queue.
+      `backend/app/ingestion/pipeline.py::_ingest_one` no longer deactivates
+      the superseded document at all. The idempotency/resume lookup
+      (`existing = ...WHERE source_ref = ? AND deactivated_at IS NULL`) now
+      explicitly picks the most recently ingested active row
+      (`ORDER BY ingested_at DESC, id DESC LIMIT 1`), since more than one row
+      can legitimately be active at the same source_ref now (the still-
+      approved old one, plus however many pending replacement attempts have
+      piled up). The actual cutover moved to
+      `backend/app/api/routes_admin.py::review_document`: approving a
+      document now atomically (single SQLite transaction) deactivates
+      whatever else is active at the same `source_ref`, with an audit event
+      (`document_superseded`) recording how many rows it retired. Rejecting a
+      replacement -- the failure mode this exists to prevent -- touches
+      nothing; the old, working document is simply never approached.
+      New tests: `tests/ingestion/test_pipeline_idempotency.py`'s renamed
+      `test_content_change_at_same_path_creates_new_pending_row_without_deactivating_old`
+      (both rows active post-ingest, new one pending) and two new tests in
+      `tests/api/test_admin.py`
+      (`test_approving_replacement_deactivates_old_document_at_same_source_ref`,
+      `test_rejecting_replacement_leaves_old_document_active`) covering the
+      approval-time cutover directly. Full backend suite (222 passed, 1
+      skipped) re-run clean.
+      **Not done:** this is document-level cutover only, gated on
+      `documents.review_status`, not on the separate per-machine
+      `document_machines.review_status` link approval -- a document can be
+      approved (triggering cutover) while a specific machine link on it is
+      still pending review. That's a pre-existing, narrower gap (a link, not
+      a whole document, going unreviewed) and wasn't part of what this review
+      claim reproduced.
 - [ ] **Shared-tablet manual caching is implemented but not browser-tested
       across authorization transitions** (P1-12). The service worker
       namespaces the manual cache per user id
