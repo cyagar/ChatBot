@@ -18,6 +18,11 @@ from app.providers.base import (
 
 MODEL = "gpt-5.1"
 REQUEST_TIMEOUT_SECONDS = 30
+# Independent follow-up review 2026-08-24 P1-7 ("token budgets"): unlike
+# AnthropicProvider, this request set no cap at all -- an unbounded response
+# is both a cost risk and, for this app's use case (a few claims/steps plus
+# citations), never actually needed. Matches AnthropicProvider's own cap.
+MAX_OUTPUT_TOKENS = 1200
 
 _JSON_SHAPE_INSTRUCTION = (
     "Respond with ONLY this JSON shape: "
@@ -111,6 +116,7 @@ class OpenAIProvider(AIProvider):
                 model=MODEL,
                 messages=messages,
                 response_format={"type": "json_object"},
+                max_completion_tokens=MAX_OUTPUT_TOKENS,
             )
         except openai.APITimeoutError as e:
             raise ProviderError("The AI provider timed out.") from e

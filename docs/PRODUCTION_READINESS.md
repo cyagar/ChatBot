@@ -1147,6 +1147,55 @@ done than it is.
       HTTP check above confirms the endpoint it calls behaves correctly,
       but the click-through UI path itself is unverified. Same category of
       gap as the shared-tablet caching item above.
+- [x] **Mocked contract tests for the Anthropic/OpenAI providers** (2026-08-24
+      independent follow-up review, P1-7). `AnthropicProvider`/`OpenAIProvider`
+      had zero test coverage before this -- both are dormant in the live
+      pilot (`AI_PROVIDER` is unset there, defaulting to `local_extractive`;
+      confirmed against the running container), but their failure-handling
+      code has to be correct the moment either is switched on, not
+      discovered wrong the first time a real deployment flips the setting.
+      `tests/unit/test_provider_contracts.py` (18 tests, new), both
+      providers covered identically: **timeout** (SDK `APITimeoutError` ->
+      `ProviderError` with "timed out"), **rate limit** (`RateLimitError`
+      -> `ProviderError` with "rate-limited"), **model retirement**
+      (`NotFoundError`, the shape a retired/invalid model id surfaces as ->
+      `ProviderError`, not an unhandled exception), **malformed response**
+      (garbage text on both the first call and the one repair retry -> the
+      repair prompt fires exactly once, not zero or more than once, then
+      falls back to `UNVERIFIED_ANSWER`), **retry recovery** (garbage first,
+      valid JSON on the repair retry -> the recovered answer is actually
+      used), **safety-refusal response shapes** (Anthropic: empty
+      `content` list; OpenAI: `message.content is None`, a real shape the
+      API returns for a content-filtered response) both degrade to a clean
+      no-answer instead of crashing on a regex-against-`None` or similar,
+      and **no-passages short-circuit** (zero retrieved passages never
+      calls the provider at all). Also fixed here, a real gap found while
+      writing these: `OpenAIProvider` set no `max_tokens`/token-budget cap
+      at all, unlike `AnthropicProvider`'s existing 1200-token cap -- an
+      unbounded response was both a cost risk and never actually needed for
+      this app's claim/step/citation output shape. Now sets
+      `max_completion_tokens=1200` (the current, non-deprecated OpenAI
+      parameter, confirmed via the installed SDK's own signature -- not the
+      legacy `max_tokens`), matching Anthropic's cap; a new test pins both
+      providers' token budgets between 0 and 4096. Also confirmed and
+      tested: "no manual content may be sent to an unapproved provider" --
+      `get_provider()` (`app/providers/factory.py`) only ever returns one
+      of three hardcoded classes, and `Settings.validate_for_startup()`
+      refuses to start on any `AI_PROVIDER` value outside that fixed set,
+      so there is no runtime path to a dynamically-configured or
+      unapproved provider. Full backend suite (258 passed, 1 skipped)
+      re-run clean.
+      **Not done:** "request cancellation" -- both providers are called
+      synchronously from a synchronous FastAPI route handler; nothing today
+      cancels an in-flight SDK call if the client disconnects mid-request.
+      Building real cancellation would mean moving `generate()` onto an
+      async path with a cancellation token threaded through the SDK call,
+      a materially larger change than a contract test can verify or this
+      pass scoped in. Not verified live in the running container (this
+      code path is inactive there -- `AI_PROVIDER` unset -- and the
+      container's production image deliberately excludes `tests/`, so
+      there is nothing to run live-verification against beyond confirming
+      the dormant path is in fact dormant, which was done above).
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
 
