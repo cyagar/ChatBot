@@ -1030,6 +1030,13 @@ done than it is.
       `DocumentOut.needs_reprocessing` (`GET /api/admin/documents`) computes
       the same comparison, so a stale document shows up in the listing an
       admin already reviews documents through, not only in a run log.
+      `needs_reprocessing` does not set the run's own `had_error` -- a run
+      where every document needs reprocessing still reports
+      `status='completed'`, deliberately: nothing failed *this run*, and
+      conflating "stale content flagged" with "ingestion errored" would
+      blur two different severities admins act on differently. Verified via
+      `ingestion_events`/`DocumentOut.needs_reprocessing`, not via the
+      run-level status.
       3 new tests: a simulated version bump on an otherwise-unchanged file
       is reported as `needs_reprocessing` (not `skipped_unchanged`) and
       leaves the document's stored version/status untouched (proving it's
