@@ -1025,6 +1025,13 @@ done than it is.
       detection, not silent auto-reprocessing); the existing-corpus-not-
       flagged-on-upgrade default; and the API-level flag flips correctly.
       Full backend suite (234 passed, 1 skipped) re-run clean.
+      **Verified live against the pilot DB:** rebuilt the container,
+      confirmed migration 0008 applied cleanly on startup with no errors,
+      and confirmed all 71 real documents came through at
+      `extraction_version=1, chunking_version=1` (0 flagged as
+      `needs_reprocessing`) -- the default matches today's code, so the
+      existing corpus is not retroactively flagged on upgrade, exactly as
+      designed.
       **Not done, and stated plainly so this isn't mistaken for closing the
       gap:** this is detection/reporting only -- nothing automatically
       re-extracts or re-chunks a flagged document this pass. Advisor
