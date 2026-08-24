@@ -764,6 +764,48 @@ done than it is.
       container memory or per-document/batched invocation instead of one
       long-lived process) worth its own pass, not folded into this item's
       scope.
+- [x] **Bootstrap admin creation now validates email/password** (2026-08-24
+      independent follow-up review, P0-8, first sub-claim). `bootstrap_admin()`
+      previously accepted any string as an email (e.g. `"not-an-email"`) and
+      any password, including an empty one -- `scripts/bootstrap_admin.py`
+      only checked the 72-byte bcrypt ceiling, nothing else, and a caller
+      going through the function directly (tests, future admin tooling) got
+      no validation at all. Now validated inside `bootstrap_admin()` itself,
+      not just the CLI, with the same rules already used by public
+      registration (`app.auth.routes.RegisterRequest`): `EmailStr` format,
+      password 8-72 characters. An invalid call raises `ValueError` before
+      any row is written; the CLI catches it and exits 1 with a clear
+      message instead of a raw traceback.
+      `backend/tests/unit/test_bootstrap_admin.py` (5 tests, new): invalid
+      email rejected, blank password rejected, short password rejected (each
+      asserting zero rows written), valid credentials succeed, and a second
+      bootstrap attempt is refused once a user exists. Full backend suite
+      (220 passed, 1 skipped) re-run clean after this change, including
+      `conftest.py`'s `register_test_user()` helper which calls
+      `bootstrap_admin()` on every test that needs a logged-in user.
+      **P0-8's second sub-claim, reviewed and not changed:**
+      `OriginCheckMiddleware` (`app/main.py`) allows a state-changing request
+      through when neither `Origin` nor `Referer` is present. This is real,
+      but it is an existing, explicitly documented trade-off, not an
+      oversight -- the only auth mechanism in this app is the `httponly`
+      session cookie (`app/auth/deps.py`, no Bearer/API-key path exists), so
+      the realistic header-less-but-cookie-bearing caller is a legitimate
+      `curl -b`/scripted admin session, not a browser CSRF attack: an actual
+      victim browser reliably attaches `Origin` on cross-origin
+      POST/PUT/PATCH/DELETE fetch/XHR/form submissions regardless of
+      referrer-policy settings, so that case is already caught by the
+      existing mismatch check below it. `SameSite=Lax` on the session cookie
+      is the primary CSRF defense (also already true before this review);
+      this middleware is explicitly layered defense-in-depth on top of it.
+      Requiring `Origin`/`Referer` whenever the session cookie is present
+      would close a narrow, largely theoretical gap at the cost of breaking
+      the legitimate scripted-admin-session use case, for a middleware that
+      isn't the primary defense to begin with -- judged not worth it. Left
+      as-is, with this reasoning recorded rather than the claim being
+      silently dropped.
+      **P0-8's third sub-claim** (shared-tablet cache purge unverified in a
+      real browser) is the same item already tracked below as P1-12 -- not
+      duplicated here.
 - [ ] **Shared-tablet manual caching is implemented but not browser-tested
       across authorization transitions** (P1-12). The service worker
       namespaces the manual cache per user id

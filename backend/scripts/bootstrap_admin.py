@@ -34,7 +34,11 @@ def main():
         raise SystemExit(1)
 
     run_migrations()
-    user_id = bootstrap_admin(args.email, password, args.display_name)
+    try:
+        user_id = bootstrap_admin(args.email, password, args.display_name)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
     print(f"Created administrator {args.email!r} (user id {user_id}).")
 
 
