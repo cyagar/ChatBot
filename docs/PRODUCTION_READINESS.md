@@ -1453,7 +1453,25 @@ done than it is.
       named above (machine-confirmation double-tap; retry double-tap); nothing
       new was added for these, since they already exercise real concurrent
       HTTP requests against the real claim-UPDATE guards in question.
-      Full backend suite (265 passed, 1 skipped) re-run clean.
+      Full backend suite (265 passed, 1 skipped) re-run clean, re-run 2 more
+      times with no flakiness.
+      **Live-verified against the real running pilot container** for the
+      invitation fix: rebuilt the image, created a throwaway administrator
+      directly in the production DB, drove the actual `app.main` FastAPI
+      object through `TestClient` against the live `/data/db/app.db` to
+      create a real invitation and fire two genuinely concurrent
+      registration requests at it -- confirmed `[201, 403]` and exactly one
+      user row, matching the test suite exactly. Full cleanup afterward
+      (including one throwaway row orphaned by a first attempt that used an
+      email TLD `EmailStr` rejects -- `.invalid`, fine for a raw SQL insert
+      as in the P1-3 verification, but rejected by the real endpoint's
+      validation here); confirmed 0 residual rows and unchanged real counts
+      (1 real user, 71 real documents). The approval/promotion fix was
+      **not** live-verified against the real corpus -- the real 71-document
+      corpus has no pending replacement candidates to safely race against,
+      and manufacturing a fake race against real production rows was judged
+      not worth the risk; the deterministic instrumented test above is the
+      evidence for that fix.
       **Not done:** anything requiring an actual production database/queue
       (PostgreSQL row-level locking, a real distributed lock, multi-replica
       coordination) -- that's P0-1, still deferred. Also not done: applying
