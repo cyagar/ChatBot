@@ -275,8 +275,22 @@ def parse_and_validate(raw_text: str, passages: list, provider_name: str) -> Gen
         explanation = data.get("no_answer_explanation")
         if not isinstance(explanation, str) or not explanation.strip():
             return None
+        explanation = explanation.strip()
+        # Independent follow-up review 2026-08-24 P0-5: this text used to
+        # reach the technician completely unchecked -- is_no_answer skipped
+        # every claim/warning check below, so a fabricated, specific,
+        # unsupported instruction (the reviewer's adversarial diagnostic got
+        # "bypass the interlock at 600V" through exactly this path) would
+        # display as if it were a safe "I couldn't find this" message. A
+        # genuine explanation of why nothing was found has no reason to
+        # contain a part number, voltage, or error code; if it does, treat
+        # it the same as any other unsupported claim -- reject the response
+        # so the caller retries with a repair prompt or falls back to
+        # UNVERIFIED_ANSWER, rather than display it.
+        if _material_tokens(explanation):
+            return None
         return GeneratedAnswer(
-            answer=explanation.strip(),
+            answer=explanation,
             is_no_answer=True,
             provider=provider_name,
         )

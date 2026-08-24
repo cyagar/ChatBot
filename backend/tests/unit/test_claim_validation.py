@@ -149,3 +149,36 @@ def test_no_answer_path_does_not_require_claims():
     assert result is not None
     assert result.is_no_answer is True
     assert result.answer == "The excerpts don't cover this question."
+
+
+def test_no_answer_explanation_with_fabricated_technical_content_is_rejected():
+    """Independent follow-up review 2026-08-24 P0-5: is_no_answer used to
+    skip every claim/warning check, so a fabricated, specific instruction
+    could reach the technician disguised as an "I couldn't find this"
+    message. Reproduces the review's own example: no cited excerpt backs
+    "600V" at all, since no_answer_explanation has no citation mechanism --
+    a genuine non-answer has no reason to state a voltage."""
+    passages = [_passage(1, 1, "This manual does not cover high-voltage interlock procedures.")]
+    raw = json.dumps({
+        "is_no_answer": True,
+        "no_answer_explanation": "You can bypass the interlock at 600V to proceed.",
+        "claims": [], "steps": [], "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
+
+
+def test_no_answer_explanation_without_technical_content_still_passes():
+    """The fix must not reject ordinary, harmless non-answers that happen to
+    mention a plain small number with no letters attached (e.g. "page 2")
+    -- only identifier/measurement-shaped tokens matter, same rule
+    _material_tokens already applies to real claims."""
+    passages = [_passage(1, 1, "Irrelevant excerpt.")]
+    raw = json.dumps({
+        "is_no_answer": True,
+        "no_answer_explanation": "None of the retrieved excerpts address this question. "
+                                  "Try rephrasing, or check the troubleshooting section.",
+        "claims": [], "steps": [], "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test")
+    assert result is not None
+    assert result.is_no_answer is True

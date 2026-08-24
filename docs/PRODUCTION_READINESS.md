@@ -915,6 +915,37 @@ done than it is.
       (see the class docstring: a file-count limit would make a capped
       listing indistinguishable from real deletions, so this needs
       deliberate design, not a quick addition) and remains open.
+- [x] **The no-answer path is no longer a validation bypass for free
+      provider text** (2026-08-24 independent follow-up review, P0-5). The
+      review's adversarial diagnostic got a specific, unsupported
+      instruction -- "bypass the interlock at 600V" -- displayed to a
+      technician as if it were a safe "I couldn't find this" message, since
+      `is_no_answer` skipped every claim/warning check `parse_and_validate`
+      applies to a normal answer: `no_answer_explanation` was taken as free
+      prose straight from the model with no verification at all.
+      `backend/app/providers/base.py::parse_and_validate` now runs the
+      no-answer explanation through the same `_material_tokens()` check a
+      real claim gets -- a genuine "nothing in the manual covers this"
+      explanation has no reason to contain a part number, voltage, or error
+      code; if it does, the response is rejected the same way an
+      unsupported claim already is, so the caller retries with a repair
+      prompt or falls back to `UNVERIFIED_ANSWER`
+      (`anthropic_provider.py`/`openai_provider.py` already had that
+      fallback wired up for every other rejection path). Two new tests in
+      `tests/unit/test_claim_validation.py`: the review's own "600V"
+      reproduction is rejected, and an ordinary harmless non-answer (no
+      identifier/measurement-shaped tokens) still passes. Full backend
+      suite (227 passed, 1 skipped) re-run clean.
+      **Not done, and this does not close the rest of P0-5:** this is
+      still token-presence validation, a heuristic -- it catches a
+      fabricated *specific* claim (a number or identifier with no support),
+      not a purely qualitative false or unsafe statement with no number in
+      it at all. The review's broader ask, a semantic entailment stage that
+      fails closed, was not built -- that's a model-backed component, not a
+      regex improvement, and remains open. `_claim_supported`'s own
+      docstring already says this plainly; this fix closes the one path
+      (`is_no_answer`) that had *no* check at all, it doesn't upgrade the
+      check itself.
 - [ ] **Shared-tablet manual caching is implemented but not browser-tested
       across authorization transitions** (P1-12). The service worker
       namespaces the manual cache per user id
