@@ -281,6 +281,7 @@ function renderIngestionStatusBanner() {
         ${s.scheduler_enabled ? "" : " The automated scheduler is currently disabled -- only manual re-index will refresh the corpus."}
       </div>`;
   }
+  const hadErrors = s.last_success_status === "completed_with_errors";
   return `
     <div class="banner ok">
       Corpus last synced ${Math.round(s.hours_since_last_success * 10) / 10}h ago
@@ -288,6 +289,7 @@ function renderIngestionStatusBanner() {
       ${s.scheduler_enabled
         ? `Automated sync runs every ${Math.round(s.sync_interval_minutes / 60 * 10) / 10}h.`
         : "Automated sync is disabled; manual re-index is the only freshness mechanism right now."}
+      ${hadErrors ? ` <strong>That run completed with some individual file failures -- check the run list below.</strong>` : ""}
     </div>`;
 }
 

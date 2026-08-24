@@ -4,6 +4,7 @@ operational SLA -- GET /api/admin/ingestion/status."""
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.db import get_conn
@@ -96,6 +97,81 @@ def test_completed_with_errors_still_counts_as_a_successful_sync(test_env):
     body = resp.json()
     assert body["last_success_run_id"] is not None
     assert body["last_success_trigger"] == "scheduled"
+
+
+def test_last_success_status_distinguishes_clean_from_error_runs(test_env):
+    """Independent follow-up review 2026-08-24 P0-6: staleness correctly
+    treats completed_with_errors as a success (the test above), but the
+    response previously gave no way to tell a clean success from one with
+    individual file failures without a second call to /ingestion/runs."""
+    with get_conn() as conn:
+        _insert_run(
+            conn, status="completed_with_errors", trigger="scheduled",
+            started_at="2026-08-23 10:00:00", finished_at="2026-08-23 10:05:00",
+        )
+    _register_admin()
+
+    resp = client.get("/api/admin/ingestion/status")
+    assert resp.json()["last_success_status"] == "completed_with_errors"
+
+
+# --- Run row persisted before the 202 (P0-6) -------------------------------
+
+def test_reindex_run_row_exists_synchronously_before_the_background_task_runs(test_env, monkeypatch):
+    """Independent follow-up review 2026-08-24 P0-6: the ingestion_runs row
+    used to be created inside ingest_all(), which only executes once the
+    BackgroundTask actually runs -- after the 202 response was already sent.
+    If the process restarted in that window, an admin told a run started
+    would see no evidence one ever was. The row must now exist by the time
+    trigger_reindex() calls background_tasks.add_task(), which this proves
+    by stubbing ingest_all() to record what run_id it was handed instead of
+    doing any real ingestion work."""
+    calls = []
+
+    def fake_ingest_all(run_id=None, **kwargs):
+        calls.append(run_id)
+
+    import app.api.routes_admin as routes_admin
+    monkeypatch.setattr(routes_admin, "ingest_all", fake_ingest_all)
+    _register_admin()
+
+    resp = client.post("/api/admin/ingestion/reindex")
+    assert resp.status_code == 202
+    run_id = resp.json()["run_id"]
+    assert run_id is not None
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT status, trigger FROM ingestion_runs WHERE id = ?", (run_id,)).fetchone()
+    assert row is not None, "the run row must exist by the time the 202 response is returned"
+    assert row["status"] == "running"
+    assert row["trigger"] == "manual"
+    assert calls == [run_id], "ingest_all() must be handed the same run_id the row was created with"
+
+
+def test_ingest_all_marks_the_passed_in_run_failed_if_it_cannot_get_the_lock(test_env):
+    """The row is created before the lock is actually acquired inside
+    ingest_all() (the /reindex endpoint only checks .locked(), a
+    check-then-act race against the scheduler's own timer). If ingest_all()
+    then can't acquire the lock, the pre-created row must not be left
+    dangling at status='running' forever -- it has to be marked failed with
+    a clear reason."""
+    from app.ingestion.pipeline import _INGEST_LOCK, ingest_all
+
+    with get_conn() as conn:
+        cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', 'manual')")
+        run_id = cur.lastrowid
+
+    _INGEST_LOCK.acquire(blocking=False)
+    try:
+        with pytest.raises(RuntimeError):
+            ingest_all(run_id=run_id)
+    finally:
+        _INGEST_LOCK.release()
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT status, finished_at FROM ingestion_runs WHERE id = ?", (run_id,)).fetchone()
+    assert row["status"] == "failed"
+    assert row["finished_at"] is not None
 
 
 def test_status_requires_admin(test_env):

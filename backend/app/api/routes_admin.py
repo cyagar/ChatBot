@@ -486,10 +486,19 @@ def enable_user(user_id: int, admin: CurrentUser = Depends(require_admin)):
 
 @router.post("/ingestion/reindex", status_code=status.HTTP_202_ACCEPTED)
 def trigger_reindex(background_tasks: BackgroundTasks, admin: CurrentUser = Depends(require_admin)):
+    """Independent follow-up review 2026-08-24 P0-6: the ingestion_runs row
+    used to be created inside ingest_all(), which only executes once this
+    BackgroundTask actually runs -- after this response is already sent. If
+    the process restarted in that gap, an admin who was told a run started
+    would see no evidence one ever was. The row is now created here,
+    synchronously, before the 202 goes out."""
     if _INGEST_LOCK.locked():
         raise HTTPException(status.HTTP_409_CONFLICT, detail="An ingestion run is already in progress.")
-    background_tasks.add_task(ingest_all)
-    return {"ok": True, "detail": "Re-index started in the background."}
+    with get_conn() as conn:
+        cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', 'manual')")
+        run_id = cur.lastrowid
+    background_tasks.add_task(ingest_all, run_id=run_id)
+    return {"ok": True, "detail": "Re-index started in the background.", "run_id": run_id}
 
 
 @router.get("/ingestion/runs")
@@ -524,7 +533,7 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
         # failed. Only a run that never finished (status='failed', e.g. an
         # auth/quota error before any file was even seen) is not a success.
         last_success = conn.execute(
-            "SELECT id, finished_at, trigger FROM ingestion_runs "
+            "SELECT id, finished_at, trigger, status FROM ingestion_runs "
             "WHERE status IN ('completed', 'completed_with_errors') "
             "ORDER BY finished_at DESC LIMIT 1"
         ).fetchone()
@@ -547,6 +556,13 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
         "last_success_run_id": last_success["id"] if last_success else None,
         "last_success_at": last_success["finished_at"] if last_success else None,
         "last_success_trigger": last_success["trigger"] if last_success else None,
+        # Independent follow-up review 2026-08-24 P0-6: "completed_with_errors
+        # treated as unconditional success" -- staleness correctly still
+        # counts it (see test_completed_with_errors_still_counts_as_a_successful_sync),
+        # but this response used to give no way to tell a clean success from
+        # one where individual files failed without a second call to
+        # /ingestion/runs. Surfaced here instead of only implied.
+        "last_success_status": last_success["status"] if last_success else None,
         "hours_since_last_success": hours_since_last_success,
         "last_attempt_run_id": last_attempt["id"] if last_attempt else None,
         "last_attempt_started_at": last_attempt["started_at"] if last_attempt else None,

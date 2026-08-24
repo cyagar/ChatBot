@@ -115,19 +115,42 @@ def _document_full_text(conn, document_id: int) -> str:
 
 
 def ingest_all(
-    source: DocumentSource | None = None, embed: bool = True, trigger: str = "manual"
+    source: DocumentSource | None = None, embed: bool = True, trigger: str = "manual",
+    run_id: int | None = None,
 ) -> IngestionReport:
+    """run_id: independent follow-up review 2026-08-24 P0-6: an admin's "run
+    re-index now" click returns 202 before this function ever executes (it
+    runs as a FastAPI BackgroundTask). If the process restarted in that gap
+    -- before this function created its own ingestion_runs row -- a run the
+    admin was told had started would leave no trace at all. routes_admin.py's
+    trigger_reindex now creates that row synchronously, inside the request
+    handler, before responding, and passes its id through here so this
+    function updates that same row instead of creating a second one. The
+    scheduler's own timer-triggered calls (trigger='scheduled') pass no
+    run_id and keep creating their own row exactly as before -- there's no
+    HTTP response for that path to race against."""
     if not _INGEST_LOCK.acquire(blocking=False):
+        if run_id is not None:
+            with get_conn() as conn:
+                conn.execute(
+                    "UPDATE ingestion_runs SET status='failed', finished_at=datetime('now'), "
+                    "trigger=? WHERE id = ?",
+                    (trigger, run_id),
+                )
+                _record_event(conn, run_id, "(run)", "failed",
+                               "Could not start: another ingestion run was already in progress.", None)
         raise RuntimeError(
             "An ingestion run is already in progress. Wait for it to finish before starting another."
         )
     try:
-        return _ingest_all_locked(source, embed, trigger)
+        return _ingest_all_locked(source, embed, trigger, run_id)
     finally:
         _INGEST_LOCK.release()
 
 
-def _ingest_all_locked(source: DocumentSource | None, embed: bool, trigger: str) -> IngestionReport:
+def _ingest_all_locked(
+    source: DocumentSource | None, embed: bool, trigger: str, run_id: int | None = None
+) -> IngestionReport:
     settings = get_settings()
     source = source or get_document_source(settings)
 
@@ -139,9 +162,10 @@ def _ingest_all_locked(source: DocumentSource | None, embed: bool, trigger: str)
     # `trigger` ('manual' | 'scheduled', P1-4) records who started this run,
     # so an admin can see the scheduler is actually running rather than
     # taking it on faith.
-    with get_conn() as conn:
-        cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', ?)", (trigger,))
-        run_id = cur.lastrowid
+    if run_id is None:
+        with get_conn() as conn:
+            cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', ?)", (trigger,))
+            run_id = cur.lastrowid
 
     report = IngestionReport(run_id=run_id)
     had_error = False

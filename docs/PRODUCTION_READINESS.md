@@ -946,6 +946,55 @@ done than it is.
       docstring already says this plainly; this fix closes the one path
       (`is_no_answer`) that had *no* check at all, it doesn't upgrade the
       check itself.
+- [x] **Ingestion run records are persisted before the 202, not inside the
+      background task** (2026-08-24 independent follow-up review, P0-6,
+      bounded slice). `POST /api/admin/ingestion/reindex` returns 202
+      immediately, before its `BackgroundTask` has actually executed --
+      but the `ingestion_runs` row used to be created inside `ingest_all()`
+      itself, which only runs once that background task fires. If the
+      process restarted in the gap between the 202 response and the
+      background task actually starting, an admin told a re-index had
+      started would find zero evidence one ever was.
+      `trigger_reindex` (`backend/app/api/routes_admin.py`) now creates the
+      `ingestion_runs` row synchronously, inside the request handler,
+      before responding, and passes its id into `ingest_all(run_id=...)`
+      (`backend/app/ingestion/pipeline.py`), which updates that same row
+      instead of creating a second one; the response body now includes
+      `run_id` too. The scheduler's own timer-triggered calls
+      (`trigger='scheduled'`) pass no `run_id` and keep creating their own
+      row exactly as before -- there's no HTTP response for that path to
+      race against. Handled the case this creates: the `/reindex` endpoint
+      only checks `_INGEST_LOCK.locked()` (a check-then-act race against
+      the scheduler's own timer), so the row can exist before the lock is
+      actually acquired inside `ingest_all()` -- if that acquisition then
+      fails, the pre-created row is marked `failed` with a clear reason
+      instead of being left dangling at `status='running'` forever.
+      Also added (the response's other named gap, "completed_with_errors
+      treated as unconditional success"): staleness already correctly
+      treats `completed_with_errors` as a real success (see
+      `test_completed_with_errors_still_counts_as_a_successful_sync`,
+      pre-existing and intentional -- individual file failures don't mean
+      the sync itself failed), but `GET /ingestion/status` gave no way to
+      tell a clean success from one with file failures without a second
+      call to `/ingestion/runs`. The response now includes
+      `last_success_status`; the admin UI banner surfaces it when the last
+      success had errors.
+      4 new tests across `tests/api/test_ingestion_status.py`: the run row
+      exists synchronously before the background task runs (proven by
+      stubbing `ingest_all` and reading the DB right after the 202), a
+      pre-created row is marked failed (not left dangling) when the lock
+      can't be acquired, and `last_success_status` is surfaced correctly.
+      Full backend suite (230 passed, 1 skipped) re-run clean.
+      **Not done, by explicit agreement, not oversight:** the review's
+      other P0-6 ask -- "database/distributed advisory locks scoped to the
+      corpus" -- is the in-process background-job layer
+      (`BackgroundTasks`/`_INGEST_LOCK`/the scheduler's asyncio timer) the
+      2026-08-24 architecture-deferral decision above already named as not
+      worth deepening investment in: it gets fully replaced by a durable
+      queue at the eventual architecture migration, not incrementally
+      upgraded now. `_INGEST_LOCK` remains a single-process lock, correct
+      for this pilot's single-instance deployment and explicitly not
+      multi-replica-safe.
 - [ ] **Shared-tablet manual caching is implemented but not browser-tested
       across authorization transitions** (P1-12). The service worker
       namespaces the manual cache per user id
