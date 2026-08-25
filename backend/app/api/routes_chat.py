@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sqlite3
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 
@@ -66,6 +67,15 @@ class MessageOut(BaseModel):
     clarifying_options: list[dict] = []
     retry_count: int = 0
     created_at: str
+    # The requesting user's own current feedback/save state, so a client that
+    # reloads a conversation (app restart, rotation recreating a ViewModel,
+    # just navigating away and back) can show "already marked" instead of
+    # resetting to blank buttons and inviting a redundant re-tap. feedback
+    # rows are intentionally not deduplicated (see feedback table comment --
+    # a technician reconsidering is a real, allowed case), so this reports
+    # the MOST RECENT rating, not "whether any feedback exists".
+    feedback_rating: str | None = None
+    is_saved: bool = False
 
 
 def _machine_label(conn, machine_id: int | None) -> str | None:
@@ -478,7 +488,7 @@ def set_conversation_machine(
     )
 
 
-def _hydrate_message(conn, row) -> MessageOut:
+def _hydrate_message(conn, row, user_id: int) -> MessageOut:
     # Only rows the provider actually selected (is_citation=1) -- every
     # retrieved passage is still kept in message_sources for retrieval-quality
     # auditing, but reload must reproduce exactly what the technician saw, not
@@ -518,6 +528,16 @@ def _hydrate_message(conn, row) -> MessageOut:
         except (TypeError, ValueError):
             clarifying_options = []
 
+    feedback_row = conn.execute(
+        "SELECT rating FROM feedback WHERE message_id = ? AND user_id = ? "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        (row["id"], user_id),
+    ).fetchone()
+    is_saved = conn.execute(
+        "SELECT 1 FROM saved_answers WHERE message_id = ? AND user_id = ? LIMIT 1",
+        (row["id"], user_id),
+    ).fetchone() is not None
+
     return MessageOut(
         id=row["id"], role=row["role"], content=row["content"],
         is_clarifying_question=bool(row["is_clarifying_question"]),
@@ -529,6 +549,8 @@ def _hydrate_message(conn, row) -> MessageOut:
         clarifying_options=clarifying_options,
         retry_count=row["retry_count"] if "retry_count" in row.keys() else 0,
         created_at=row["created_at"],
+        feedback_rating=feedback_row["rating"] if feedback_row else None,
+        is_saved=is_saved,
     )
 
 
@@ -542,7 +564,49 @@ def get_messages(conversation_id: int, user: CurrentUser = Depends(get_current_u
             "FROM messages WHERE conversation_id = ? ORDER BY id",
             (conversation_id,),
         ).fetchall()
-        return [_hydrate_message(conn, r) for r in rows]
+        return [_hydrate_message(conn, r, user.id) for r in rows]
+
+
+def _message_by_idempotency_key(conn, conversation_id: int, idempotency_key: str):
+    return conn.execute(
+        "SELECT id FROM messages WHERE conversation_id = ? AND idempotency_key = ? AND role = 'user'",
+        (conversation_id, idempotency_key),
+    ).fetchone()
+
+
+def _reply_to_user_message(conn, conversation_id: int, user_message_id: int):
+    """The assistant (or clarifying-question) message immediately following a
+    given user turn, if one has been persisted yet. There's no explicit
+    reply-to column -- ordering is the same contract _fetch_history and
+    retry_answer's "preceding user message" lookup already rely on."""
+    return conn.execute(
+        "SELECT id, role, content, is_clarifying_question, is_no_answer, "
+        "safety_warnings, conflict_note, answer_status, clarifying_options, retry_count, created_at "
+        "FROM messages WHERE conversation_id = ? AND role = 'assistant' AND id > ? "
+        "ORDER BY id ASC LIMIT 1",
+        (conversation_id, user_message_id),
+    ).fetchone()
+
+
+def _idempotent_replay(conn, conversation_id: int, user_message_id: int, user_id: int) -> MessageOut:
+    """Called once a duplicate Idempotency-Key has been identified (either by
+    the pre-check or by losing the UNIQUE-index race on insert). Plan sec 9:
+    "A duplicate key ... returns the original result, not another user
+    message." If the original attempt hasn't produced a reply yet -- still
+    generating, or the process died mid-attempt -- there is nothing to
+    replay; 409 rather than silently starting a second provider call for the
+    same question (that second call is exactly the hazard this exists to
+    prevent). This is a known, accepted gap versus the plan's full durable
+    -attempt design (sec 5.1/9), which would let the client resume the
+    original attempt instead of dead-ending here -- that needs the
+    Postgres/queue migration and is out of scope for this change."""
+    reply = _reply_to_user_message(conn, conversation_id, user_message_id)
+    if reply is not None:
+        return _hydrate_message(conn, reply, user_id)
+    raise HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail="A request with this idempotency key is already being processed.",
+    )
 
 
 @router.post("/conversations/{conversation_id}/messages", response_model=MessageOut)
@@ -552,24 +616,44 @@ def ask_question(
     payload: MessageIn,
     request: Request,
     user: CurrentUser = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     question = payload.content.strip()
     if not question:
         raise HTTPException(422, detail="Question cannot be empty.")
+    # Absurdly long values aren't a real key from any client we control --
+    # treat them as absent rather than storing them.
+    if idempotency_key is not None and (not idempotency_key.strip() or len(idempotency_key) > 128):
+        idempotency_key = None
 
     with get_conn() as conn:
         conv = _require_own_conversation(conn, conversation_id, user.id)
         machine_id = conv["machine_id"]
+
+        if idempotency_key is not None:
+            existing = _message_by_idempotency_key(conn, conversation_id, idempotency_key)
+            if existing is not None:
+                return _idempotent_replay(conn, conversation_id, existing["id"], user.id)
 
         # Bounded prior turns, captured before this question is inserted, so
         # follow-ups like "what about replacing it?" have real context instead
         # of only ever seeing the latest question in isolation (concern #5).
         history = _fetch_history(conn, conversation_id)
 
-        cur = conn.execute(
-            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
-            (conversation_id, question),
-        )
+        try:
+            cur = conn.execute(
+                "INSERT INTO messages (conversation_id, role, content, idempotency_key) VALUES (?, 'user', ?, ?)",
+                (conversation_id, question, idempotency_key),
+            )
+        except sqlite3.IntegrityError:
+            # Lost a race against a concurrent request carrying the same key
+            # -- the pre-check above is a fast path, not the safety
+            # mechanism; the UNIQUE index on (conversation_id,
+            # idempotency_key) is. The winner's user message is now visible.
+            existing = _message_by_idempotency_key(conn, conversation_id, idempotency_key)
+            if existing is None:
+                raise  # not actually a key collision -- some other integrity error
+            return _idempotent_replay(conn, conversation_id, existing["id"], user.id)
         user_message_id = cur.lastrowid
 
         # A new user turn always supersedes any earlier pending clarification
@@ -716,8 +800,15 @@ def save_answer(message_id: int, user: CurrentUser = Depends(get_current_user)):
         ).fetchone()
         if not msg:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Message not found.")
+        # Unlike feedback (a rating a technician might deliberately resubmit
+        # after reconsidering), saving the same answer twice carries no new
+        # information -- it's always either a genuine repeat click or a
+        # client that lost track of already-saved state (e.g. a rehydrated
+        # ChatViewModel that hasn't loaded is_saved yet). INSERT OR IGNORE
+        # against the UNIQUE(user_id, message_id) index makes a duplicate
+        # save a no-op instead of a second saved_answers row.
         conn.execute(
-            "INSERT INTO saved_answers (user_id, message_id) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO saved_answers (user_id, message_id) VALUES (?, ?)",
             (user.id, message_id),
         )
     return {"ok": True}
@@ -759,6 +850,6 @@ def list_saved_answers(user: CurrentUser = Depends(get_current_user)):
                 conversation_id=r["conversation_id"],
                 machine_label=_machine_label(conn, r["machine_id"]),
                 question=question_row["content"] if question_row else None,
-                answer=_hydrate_message(conn, r),
+                answer=_hydrate_message(conn, r, user.id),
             ))
         return out

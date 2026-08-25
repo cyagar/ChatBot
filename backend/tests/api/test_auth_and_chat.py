@@ -235,6 +235,190 @@ def test_concurrent_feedback_submission_does_not_crash_or_corrupt(test_env):
     assert sorted(r["rating"] for r in rows) == ["helpful", "incorrect"]
 
 
+def test_get_messages_reports_the_current_users_feedback_and_saved_state(test_env):
+    """Found via live tablet testing (2026-08-25): a client that reloads a
+    conversation (app restart, rotation recreating a ViewModel, navigating
+    away and back) had no way to know a message was already rated/saved, so
+    the buttons reset to unmarked and a re-tap silently duplicated the row.
+    MessageOut.feedback_rating/is_saved is how a client rehydrates that
+    state instead of re-deriving it -- this pins the contract."""
+    _register("tech10@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test"}).json()
+
+    fresh = next(m for m in client.get(f"/api/conversations/{conv['id']}/messages").json() if m["id"] == msg["id"])
+    assert fresh["feedback_rating"] is None
+    assert fresh["is_saved"] is False
+
+    client.post(f"/api/messages/{msg['id']}/feedback", json={"rating": "helpful"})
+    client.post(f"/api/messages/{msg['id']}/save")
+
+    updated = next(m for m in client.get(f"/api/conversations/{conv['id']}/messages").json() if m["id"] == msg["id"])
+    assert updated["feedback_rating"] == "helpful"
+    assert updated["is_saved"] is True
+
+
+def test_get_messages_reports_the_most_recent_feedback_rating(test_env):
+    """Feedback rows are intentionally not deduplicated -- a technician
+    reconsidering (helpful, then later incorrect) is an allowed, real case
+    (see test_concurrent_feedback_submission_does_not_crash_or_corrupt).
+    feedback_rating must report the latest judgment, not the first."""
+    _register("tech11@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test"}).json()
+
+    client.post(f"/api/messages/{msg['id']}/feedback", json={"rating": "helpful"})
+    client.post(f"/api/messages/{msg['id']}/feedback", json={"rating": "incorrect"})
+
+    updated = next(m for m in client.get(f"/api/conversations/{conv['id']}/messages").json() if m["id"] == msg["id"])
+    assert updated["feedback_rating"] == "incorrect"
+
+
+def test_save_answer_twice_is_idempotent(test_env):
+    """The bug this session found live: a client with stale/unknown saved
+    state re-tapping Save inserted a second saved_answers row for the same
+    (user_id, message_id). Unlike feedback, a duplicate save carries no new
+    information, so this is enforced as a real UNIQUE constraint + INSERT OR
+    IGNORE (migration 0011), not an append-only log."""
+    _register("tech12@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test"}).json()
+
+    first = client.post(f"/api/messages/{msg['id']}/save")
+    second = client.post(f"/api/messages/{msg['id']}/save")
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id FROM saved_answers WHERE message_id = ?", (msg["id"],)).fetchall()
+    assert len(rows) == 1
+
+
+def test_duplicate_idempotency_key_returns_the_original_reply_not_a_new_turn(test_env):
+    """Android Rewrite Plan sec 9/16/17: a client retry after an ambiguous
+    dropped connection must return the original attempt's result, never
+    insert a second user turn or trigger a second provider call."""
+    _register("idempotent1@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    key = "client-generated-uuid-1"
+
+    first = client.post(
+        f"/api/conversations/{conv['id']}/messages",
+        json={"content": "Why won't it heat up?"},
+        headers={"Idempotency-Key": key},
+    )
+    second = client.post(
+        f"/api/conversations/{conv['id']}/messages",
+        json={"content": "Why won't it heat up?"},
+        headers={"Idempotency-Key": key},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+
+    with get_conn() as conn:
+        user_rows = conn.execute(
+            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user'", (conv["id"],)
+        ).fetchall()
+    assert len(user_rows) == 1
+
+
+def test_different_idempotency_keys_create_separate_turns(test_env):
+    """Sanity guard against over-aggressive dedup: two distinct keys (two
+    genuinely different questions) must not collapse into one turn."""
+    _register("idempotent2@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+
+    first = client.post(
+        f"/api/conversations/{conv['id']}/messages",
+        json={"content": "Why won't it heat up?"},
+        headers={"Idempotency-Key": "key-a"},
+    )
+    second = client.post(
+        f"/api/conversations/{conv['id']}/messages",
+        json={"content": "Why is it leaking?"},
+        headers={"Idempotency-Key": "key-b"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["id"] != second.json()["id"]
+
+    with get_conn() as conn:
+        user_rows = conn.execute(
+            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user'", (conv["id"],)
+        ).fetchall()
+    assert len(user_rows) == 2
+
+
+def test_missing_idempotency_key_behaves_exactly_as_before(test_env):
+    """Backward compatibility: existing callers (the PWA JS) that never send
+    the header must be completely unaffected -- every question is a new turn,
+    same as pre-idempotency behavior."""
+    _register("idempotent3@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+
+    first = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test one"})
+    second = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test two"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["id"] != second.json()["id"]
+
+    with get_conn() as conn:
+        user_rows = conn.execute(
+            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user'", (conv["id"],)
+        ).fetchall()
+    assert len(user_rows) == 2
+
+
+def test_concurrent_duplicate_idempotency_key_never_creates_two_user_turns(test_env):
+    """The pre-check (SELECT then INSERT) is a fast path, not the safety
+    mechanism -- this proves the UNIQUE index actually holds under a genuine
+    race, not just under sequential duplicate requests (see
+    test_duplicate_idempotency_key_returns_the_original_reply_not_a_new_turn
+    above, which doesn't exercise concurrent timing at all)."""
+    _register("idempotentracer@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    key = "racing-key"
+
+    responses = []
+    barrier = threading.Barrier(2)
+
+    def submit():
+        barrier.wait(timeout=5)
+        responses.append(
+            client.post(
+                f"/api/conversations/{conv['id']}/messages",
+                json={"content": "Why won't it heat up?"},
+                headers={"Idempotency-Key": key},
+            )
+        )
+
+    threads = [threading.Thread(target=submit) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Either both requests see the same completed reply (200/200, same id),
+    # or the loser arrives before the winner's reply is persisted and gets a
+    # 409 ("already being processed") instead -- both are correct outcomes.
+    # What must never happen is a second user turn or two different
+    # assistant replies.
+    statuses = sorted(r.status_code for r in responses)
+    assert statuses in ([200, 200], [200, 409]), statuses
+    ok_ids = {r.json()["id"] for r in responses if r.status_code == 200}
+    assert len(ok_ids) == 1
+
+    with get_conn() as conn:
+        user_rows = conn.execute(
+            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user'", (conv["id"],)
+        ).fetchall()
+    assert len(user_rows) == 1
+
+
 def test_save_and_list_saved_answer_roundtrip(test_env):
     _register("tech7@example.com")
     conv = client.post("/api/conversations", json={"machine_id": None}).json()
