@@ -408,10 +408,12 @@ private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                    Text(evidence.content, modifier = Modifier.padding(12.dp))
-                }
                 if (evidence.has_page_image && state.evidenceDocumentId != null) {
+                    // The page image IS the evidence here -- showing the
+                    // parsed/extracted text underneath it too is redundant
+                    // (and occasionally a worse read than the real page,
+                    // e.g. after imperfect OCR). Only fall back to the text
+                    // card below when there's no image to show instead.
                     val url = "${BuildConfig.BASE_URL}api/manuals/${state.evidenceDocumentId}/pages/${evidence.page_number}/image"
                     AsyncImage(
                         model = url,
@@ -420,6 +422,10 @@ private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit) {
                         contentScale = ContentScale.FillWidth,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                } else {
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                        Text(evidence.content, modifier = Modifier.padding(12.dp))
+                    }
                 }
             } else {
                 Text("Evidence not available.")

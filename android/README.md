@@ -241,6 +241,16 @@ The existing administrator account also works and reaches the same screens
 
 ## Handled during review (worth knowing about)
 
+- **Evidence sheet no longer duplicates the page image with parsed text
+  underneath it (2026-08-25).** `EvidenceSheet` in `ChatScreen.kt` used to
+  always show a `Card` with `evidence.content` (the extracted/OCR'd text of
+  the cited excerpt) followed by the real manual page image when one was
+  available (`has_page_image`) -- redundant, and occasionally a worse read
+  than the actual page (imperfect OCR). Now the text card only renders when
+  there's no page image to show instead; when there is one, the image alone
+  is the evidence. Verified live on the Tab A9+: tapping a citation with a
+  page image now shows just the title/page metadata and the real page,
+  nothing else.
 - **Pull-to-refresh on Machines, History, and Chat (2026-08-25).** Added
   `PullToRefreshBox` (Material3, stable in this project's compose-bom) around
   the scrollable content of all three screens. `HistoryViewModel.refresh()`
