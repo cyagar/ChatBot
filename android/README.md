@@ -1,0 +1,504 @@
+# Technician Manual Assistant — Android (Day-1 Demo)
+
+This is the first vertical slice of the native Android rewrite described in
+`../Technician_Manual_Assistant_Galaxy_Tab_A9_Android_Rewrite_Plan_2026-08-24.txt`.
+Scope for this build: **sign in → pick an approved machine → ask one question →
+get a grounded answer → open a citation's evidence and page image**, running
+live against the existing FastAPI backend in `../backend`. Nothing here is
+production-ready; it exists to give technicians something real to react to.
+
+**Device scope (updated 2026-08-25):** the plan document above was written
+for the Galaxy Tab A9+ tablet fleet specifically — that's still the primary
+device this build has been physically tested on. The requirement has since
+widened: technicians will also use this app on their Android phones, so it
+needs to work correctly and look good on any Android device, not just that
+one tablet. The layout code was already written against Material 3
+window-size classes rather than any device-model check, so this was mostly
+already true; see "Material 3 Adaptive list-detail layout" under "Scope
+decisions" below for what that means concretely and what's actually been
+verified versus reasoned-through-but-unverified on real phone hardware.
+
+## What this is NOT
+
+This is a one-day slice, not Phase 1 of the plan. Deliberately skipped for now
+(see "Scope decisions" below): Hilt, Room, DataStore, OpenAPI codegen, the new
+Node.js mobile API, Postgres, the transactional outbox/durable-attempt/SSE
+pipeline, and OIDC. The app talks directly to the current FastAPI backend's
+existing JSON endpoints. (Material 3 Adaptive's list-detail layout *was*
+added on 2026-08-24 — see "Scope decisions" below.)
+
+## Running it
+
+1. Start the backend from `../backend`:
+   ```
+   python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+   ```
+2. Confirm `APP_ENV=development` in `backend/.env` — the session cookie is
+   marked `Secure` otherwise and silently stops working over plain HTTP.
+3. The tablet and this machine must be on the same Wi-Fi. Update
+   `BASE_URL` in `app/build.gradle.kts` (debug build type) if this machine's
+   LAN IP isn't `192.168.1.71` anymore, then rebuild.
+4. Windows Firewall must allow inbound TCP on port 8000, or a tablet on the
+   LAN can't reach the backend at all.
+5. Open this `android/` folder in Android Studio, or run:
+   ```
+   .\gradlew.bat assembleDebug
+   ```
+   The APK lands at `app/build/outputs/apk/debug/app-debug.apk`. Install it
+   on a physical Galaxy Tab A9+ (USB debugging enabled) via Android Studio's
+   Run button, or `adb install -r app-debug.apk`.
+
+### Demo login
+
+A local-only technician account was seeded directly into `data/db/app.db`
+for this demo (not through the invitation flow — this is dev-only seeding,
+not something to do against a real deployment):
+
+- Email: `tech.demo@hmwagner.com`
+- Password: `DemoPass123!`
+
+The existing administrator account also works and reaches the same screens
+(nothing in this slice enforces the technician/administrator split yet).
+
+## Scope decisions for the one-day demo
+
+- **No Hilt.** A hand-rolled `ApiClient` singleton object does the wiring.
+  Cheap to replace once there's more than one screen's worth of dependencies.
+- **No Room/DataStore.** No offline cache, no persisted drafts. All state is
+  in-memory ViewModels; force-quitting the app loses an in-progress draft.
+- **No OpenAPI codegen.** Retrofit interface + hand-written `kotlinx.serialization`
+  models in `network/ApiModels.kt`, kept in sync by hand with
+  `backend/app/api/routes_*.py`.
+- **Material 3 Adaptive list-detail layout (added 2026-08-24, phone-scoped
+  2026-08-25).** Uses the already-present `material3-window-size-class`
+  dependency (not the newer `material3-adaptive` component suite, which is
+  built around Navigation3 — a bigger retrofit than this app's plain
+  `NavHost` justified) to gate on `WindowWidthSizeClass.Expanded`: landscape
+  on the Tab A9+ (~1280dp) gets a fixed 360dp machine-list pane beside the
+  chat pane (`AppNav.kt`'s `TwoPaneHome`); anything narrower — the Tab A9+ in
+  portrait (~800dp, Medium), and any phone in either orientation, which
+  essentially never reaches Expanded — keeps the original single-pane
+  Machines→Chat flow (`SinglePaneHome`). This means the two-pane layout was
+  always phone-safe by construction (it's gated on measured window width,
+  never on device model), which is why picking up the wider "must work on
+  phones too" requirement on 2026-08-25 didn't need a layout redesign — see
+  the device-scope note at the top of this file. What phone support has
+  actually had: reasoning through the width-driven gate, plus one spot-check
+  on the Tab A9+ with `adb shell wm size`/`wm density` overridden to a
+  phone-like 1080×2400 @420dpi (single-column layout, no clipping, composer
+  and send button fully reachable). What it has **not** had: a real phone.
+  Selection state is hoisted into a small `HomeSelectionViewModel` shared by
+  both branches so it survives switching between them. Verified live on the
+  Tab A9+: two-pane render, machine search/select in the left pane,
+  switching between two different machines correctly swaps the right pane's
+  conversation (not a stale cached `ChatViewModel`), a full send→answer
+  round trip with citations in the right-hand pane with composer/send button
+  not clipped, and — as of 2026-08-25 — rotating landscape (two-pane, a
+  conversation selected) back to portrait correctly lands on that same
+  conversation instead of dropping to the machine list (see "Handled during
+  review" below for what that bug actually was; it wasn't what the first two
+  fix attempts assumed).
+- **Cookie-based session, not the plan's OIDC/PKCE design** (plan section 8).
+  `PersistentCookieJar` still stores the backend's existing `tma_session`
+  httpOnly cookie, not a refresh token from a real identity provider — that
+  still needs the IdP decision (plan section 18). As of 2026-08-24 the cookie
+  value itself is encrypted at rest with an AES-256-GCM key held in the
+  Android Keystore (`PersistentCookieJar`'s `getOrCreateKey()`) before being
+  written to `SharedPreferences`, instead of sitting there in plain text
+  readable via a rooted device or `adb backup`. **Don't overstate what this
+  is**: there's still no expiration/rotation policy, no server-side
+  per-device revocation, and no refresh token — it closes the
+  "readable-at-rest" gap for the one thing we store, nothing more. A
+  pre-existing plaintext install is discarded (not migrated) on first launch
+  after this change — a forced one-time re-login, not a bug.
+- **Idempotency keys are implemented (2026-08-24); durable attempts/SSE are
+  not** (plan section 9). Every `send()`/`retryPendingSend()` call carries an
+  `Idempotency-Key` header (`ChatViewModel`'s `LocalEcho.id`, generated once
+  per composed question and held steady across retries — never regenerated).
+  The backend (`routes_chat.py::ask_question`, migration
+  `0010_idempotency.sql`) stores it with a `UNIQUE(conversation_id,
+  idempotency_key)` constraint: a duplicate key with a completed reply
+  replays that reply instead of creating a second user turn; a duplicate key
+  with no reply yet (the original attempt is still generating, or the server
+  died mid-attempt) returns `409` rather than starting a second provider
+  call. Chat is still a single synchronous `POST .../messages` call — there's
+  no durable job queue, so a `409` genuinely can't be resumed, only detected
+  and safely retried later with the same key. That queue/outbox (plan
+  sec 5.1/9) is Phase 3, needs Postgres, and is still not built; see
+  `docs/ARCHITECTURE.md`'s deviation table for the exact boundary between
+  what's covered now and what still needs it.
+- **minSdk 26 is a placeholder**, not a real decision — the plan requires a
+  fleet inventory before setting this for real (plan section 6).
+- **Debug-only cleartext HTTP exception** for the dev LAN IP, scoped to the
+  debug build type only (`src/debug/res/xml/network_security_config_debug.xml`).
+  The release build type has no such exception and keeps
+  `usesCleartextTraffic="false"`.
+- **No physical-device or emulator run happened in this environment** — no
+  emulator image or connected device was available where this was built. The
+  debug build compiles and packages cleanly (`assembleDebug` succeeds), but
+  the actual on-device behavior (touch targets, keyboard handling, real
+  network conditions, the Coil-authenticated page-image loading path) has
+  **not** been verified live. Treat first real device install as the actual
+  first test, not a formality.
+
+## Known correctness gaps worth fixing before showing this beyond an internal demo
+
+- No pull-to-refresh or explicit "reconnect and check" affordance for the
+  ambiguous "lost connection while sending" state described in
+  `ChatViewModel.send()` — it now has a one-tap "Retry" affordance that
+  safely reuses the same idempotency key (see "Handled during review" below),
+  but there's still no general pull-to-refresh anywhere else in the app.
+- ~~A code-level accessibility pass happened (2026-08-24); a device-verified
+  one hasn't~~ **Partially closed out on the Tab A9+ (2026-08-25)** — see
+  "Handled during review" below. Verified via the real accessibility node
+  tree (`adb shell uiautomator dump`, not literally listening to TalkBack —
+  see that entry for the distinction): the citation chip does not
+  double-read, and the Helpful/Incorrect/Save touch-target gap was a real,
+  measured defect, now fixed. **Still genuinely open:** whether the
+  error-text live regions actually get announced out loud — `uiautomator
+  dump` doesn't surface Compose's `liveRegion` semantics property at all, so
+  this needs an actual TalkBack session (enable it, listen) to confirm,
+  not just a node-tree inspection.
+- `LoginViewModel`, `MachinesViewModel`, and `ChatViewModel` are covered by
+  unit tests now; `AppNav`'s session-expiry redirect and the screens
+  themselves (Compose UI) are not.
+- ~~The Keystore-backed cookie encryption has not been verified on a physical
+  device~~ **Verified live on the Tab A9+ (2026-08-24).** Installed this
+  build directly over an existing pre-Keystore install that had an active
+  plaintext session (`adb install -r`, no uninstall) — launched straight to
+  the login screen as designed, no crash, plaintext session correctly not
+  trusted. Logged in fresh, then `am force-stop` + relaunch went straight to
+  the machines list (not login) — the encrypted cookie round-tripped through
+  a real cold start via the actual Keystore, not just
+  `CookieSerializationTest`'s pure-logic coverage. `logcat -d *:E` clean
+  through the whole sequence.
+- ~~Two-pane selection didn't survive rotation~~ **Fixed and verified live on
+  the Tab A9+ (2026-08-25).** See "Handled during review" below for the full
+  story — two separate bugs were involved, and the first fix attempt was
+  aimed at the wrong one.
+- **No conversation-history/resume screen for a single machine.** Tapping a
+  machine from the list (or "Recent & favorites") always starts a *new*
+  conversation — there's no way to reopen a specific past conversation for
+  that machine from the UI. This is a real, separate gap on its own (a
+  technician can't return to yesterday's answer for the same machine without
+  re-asking), and it also means the feedback/saved-state rehydration fix
+  below (2026-08-25) could only be verified live for the "same process,
+  fresh `ChatViewModel`" case (branch switch between single/two-pane), not
+  the "cold app restart back into an already-marked conversation" case that
+  most needs it — that path is verified by code inspection and the backend
+  tests, not on-device.
+- ~~`submitFeedback`/`saveAnswer` fail silently on a network error~~ **Fixed
+  (2026-08-25).** See "Handled during review" below. Still genuinely open:
+  the transient `IOException: unexpected end of stream` errors observed live
+  that prompted this fix are now surfaced to the technician instead of
+  hidden, but their root cause (a reused OkHttp connection the OS had
+  silently reset) hasn't been addressed — a technician will now see "check
+  your connection, try again" for something that's actually a client-side
+  connection-pool staleness issue, not their Wi-Fi.
+
+## Handled during review (worth knowing about)
+
+- **Silent feedback/save failures (2026-08-25).** `submitFeedback` and
+  `saveAnswer` in `ChatViewModel.kt` used to swallow both a non-2xx response
+  and a thrown exception entirely — a technician could tap Helpful or Save,
+  the request could fail, and nothing on screen would say so; the button
+  just stayed tappable with no explanation. Both now set the same
+  `state.error` the rest of the screen already uses for load/send failures
+  (bottom banner, `LiveRegionMode.Polite` so TalkBack announces it, never a
+  blocking dialog — plan 10.4's "feedback must never interrupt the repair
+  task" still holds, since the banner doesn't block anything). A success
+  clears any stale error left over from a prior failed attempt. Four tests
+  added to `ChatViewModelTest.kt` covering: a non-2xx feedback failure sets
+  a feedback-specific error, a network failure on save sets a save-specific
+  error and leaves `savedMessageIds` untouched, and a subsequent successful
+  save clears the stale error. (One test needed `Connection: close` on the
+  prior response to force a fresh connection for the disconnect test —
+  otherwise OkHttp transparently retries a disconnect on a *reused* pooled
+  connection regardless of `retryOnConnectionFailure(false)`, which would
+  have silently masked the exact failure the test means to trigger.)
+- **Duplicate feedback/saved-answers rows from re-tapping Helpful/Save
+  (2026-08-25, found via live tablet testing).** `ChatViewModel`'s
+  `feedbackGiven`/`savedMessageIds` were purely in-memory — a fresh
+  `ChatViewModel` (rotation switching the two-pane/single-pane branch, an
+  app restart, or just leaving and re-entering a conversation) always
+  started both empty, so the buttons reset to unmarked even for a message
+  the technician had already rated/saved. Re-tapping then silently inserted
+  a second row server-side. Reproduced and confirmed directly against the
+  live pilot DB (`feedback` id 4, `saved_answers` id 2 — both duplicates of
+  an already-existing row for the same message/user), then removed those
+  two test rows by hand. Not a regression from this session's adaptive-layout
+  work — an app restart reproduces it identically with no rotation involved.
+  The fix has two parts, decided independently per table:
+  - **`feedback` stays exactly as it was.** `test_auth_and_chat.py`'s
+    `test_concurrent_feedback_submission_does_not_crash_or_corrupt` already
+    documents, deliberately, that multiple feedback rows per message are
+    allowed by design (a technician reconsidering "helpful" to "incorrect"
+    is a real case) — that precedent settled the question rather than being
+    overridden. `MessageOut` now carries `feedback_rating`, the *most
+    recent* rating for the requesting user (`ORDER BY created_at DESC, id
+    DESC LIMIT 1` in `_hydrate_message`), so a client can show "already
+    marked" without needing the table itself to be deduplicated.
+  - **`saved_answers` gets a real `UNIQUE(user_id, message_id)` constraint**
+    (migration `0011_saved_answers_unique.sql`, applied to the live pilot
+    DB) — a duplicate save carries no "reconsideration" meaning the way a
+    changed rating does, so `save_answer` now does `INSERT OR IGNORE`
+    against that index, making a repeat save a no-op instead of a second
+    row. `MessageOut.is_saved` reports the boolean.
+  - `ChatViewModel.loadMessages()` now rebuilds `feedbackGiven`/
+    `savedMessageIds` from these two fields on every reload instead of
+    always starting empty.
+  - Backend: three new tests in `test_auth_and_chat.py`
+    (`test_get_messages_reports_the_current_users_feedback_and_saved_state`,
+    `test_get_messages_reports_the_most_recent_feedback_rating`,
+    `test_save_answer_twice_is_idempotent`), all passing alongside the full
+    274-test suite.
+  - Android: verified live that `feedback_rating`/`is_saved` round-trip
+    correctly (raw JSON confirmed via a temporary `HttpLoggingInterceptor`
+    bump to `BODY`, reverted before this build) and that a fresh
+    `ChatViewModel` (via the single-pane/two-pane branch switch) renders
+    "Marked helpful"/"Saved" without any tap. See the "no conversation
+    -history/resume screen" gap above for what this verification does and
+    doesn't rule out.
+- **TalkBack accessibility, verified via the real node tree, not audio
+  (2026-08-25).** There's no way to make this session literally listen to
+  TalkBack's speech output through adb/screenshots. What's used instead is
+  `adb shell uiautomator dump`, which prints the actual
+  `AccessibilityNodeInfo` tree the platform hands to any screen reader —
+  strong, direct evidence for anything that's a property of that tree
+  (node merging, `contentDescription` values, touch-target bounds), but it
+  does **not** surface Compose's `liveRegion` semantics property, so it
+  can't confirm or deny whether an announcement actually gets spoken. Two
+  of the three open questions from the 2026-08-24 accessibility pass were
+  resolved this way; the third genuinely needs a real TalkBack session:
+  - **Citation chip does not double-read.** Dumped the tree with a real
+    citation chip on screen (`AssistChip` in `ChatScreen.kt`'s
+    `MessageBubble`): the chip's own `clickable`/`focusable` node has empty
+    text and `content-desc`, while its descendants (the label `Text` and
+    the chip's own Button-role node) are both `focusable="false"` —
+    confirming Compose's semantics merging collapses them into one
+    TalkBack focus stop, and the label's overridden `contentDescription`
+    (e.g. "Citation 1, page 1, AJ/AJX SERIES") *replaces* rather than
+    supplements the raw "[1] p.1" glyph text for accessibility purposes.
+    One announcement, not two.
+  - **Helpful/Incorrect/Save's touch-target gap was a real, measured
+    defect — now fixed.** The dumped bounds showed each button already met
+    the 48dp minimum touch-target *height* on its own, but the gap between
+    adjacent clickable bounds was exactly 4dp (matching the `spacedBy(4.dp)`
+    in `ChatScreen.kt`) — half of the ~8dp Material Design recommends
+    between adjacent targets, and reproduced identically across two
+    separate messages/screens. Bumped to `spacedBy(8.dp)`; re-dumped and
+    confirmed the gap is now exactly 8dp. This is exactly the kind of
+    mis-tap plan section 13.5's gloves concern is about, made worse by
+    Helpful/Incorrect being opposite-meaning actions next to each other.
+  - **Error-text live regions: still unverified.** `liveRegion =
+    LiveRegionMode.Polite` is set in code (`ChatScreen.kt`, `LoginScreen.kt`,
+    `MachinesScreen.kt`) and the Compose→platform mapping for this property
+    is a direct, well-established one, so there's reasonable confidence
+    it's wired correctly — but "reasonable confidence from reading the
+    code" is exactly the standard this whole pass was trying to raise past.
+    Confirming it actually gets announced needs TalkBack switched on and
+    someone listening, which a future physical-device session should do.
+- **Two-pane rotation: a crash, then a real state bug, both found only by
+  running on the tablet (2026-08-25).** Illustrates why "builds and unit
+  tests pass" was never treated as equivalent to "works" for this feature —
+  neither issue below was visible from `assembleDebug`/`testDebugUnitTest`.
+  - **Crash on every launch.** `HomeSelectionViewModel` (`AppNav.kt`) was
+    declared `private class`. Android's default `ViewModelProvider` factory
+    instantiates ViewModel classes via reflection, which needs at least
+    package visibility — `private` produced `IllegalAccessException:
+    ...HomeSelectionViewModel is not accessible from
+    ...JvmViewModelProviders` on every cold start, caught live via `adb
+    logcat -s AndroidRuntime:E` after the app started immediately crashing
+    with "keeps stopping." Fixed by dropping the `private` modifier.
+  - **The actual rotation bug wasn't a state-persistence problem.** The
+    first fix attempt (hoisting the selection into `rememberSaveable`, then
+    into a `ViewModel`) assumed the selected-conversation state itself was
+    getting lost across the Activity recreate a rotation triggers. Temporary
+    logging (`Log.d` on `HomeContent`'s recomposition) proved that wrong:
+    the selection survived correctly the whole time, with either approach.
+    The real bug was in `SinglePaneHome`: its `rememberNavController()` gets
+    reused — along with whatever back stack it had the *last* time
+    `SinglePaneHome` was on screen — across the plain `if (isExpanded) {
+    TwoPaneHome } else { SinglePaneHome }` branch in `HomeContent`, because
+    Compose preserves `remember`-level identity across a branch leaving and
+    re-entering the same composition, not just across true Activity
+    recreates. So `startDestination` was silently ignored on every re-entry
+    after the first: `NavHost` only consults it when the controller has no
+    existing destination, and this one already had one (`Routes.MACHINES`,
+    from the very first cold-launch composition of `SinglePaneHome`, before
+    a machine was ever picked). Fixed by wrapping `SinglePaneHome`'s call
+    site in `key(selection.selectedId ?: -1)`, which forces a genuinely
+    fresh `NavController` — and correct `startDestination` evaluation —
+    whenever the selection differs from what it was the last time that
+    branch was shown, while leaving in-branch nav state alone (e.g. a
+    mid-draft composer) when the selection hasn't actually changed.
+  - Verified live end-to-end afterward: select a machine in two-pane
+    landscape, rotate to portrait, land directly on that same conversation's
+    Chat screen (not the machine list) with the back arrow correctly shown
+    and correctly clearing the selection back to the machine list.
+- **401 recovery**: an OkHttp interceptor (`ApiClient.kt`) clears the session
+  and routes back to the login screen on any 401 other than a failed login
+  attempt. Without this, a session expiring mid-demo (or sitting idle over a
+  break) would leave every screen showing a raw "code 401" with no way back
+  in short of force-reinstalling.
+- **The clarifying-machine flow is now reachable**: "Not sure which machine?"
+  on the machine picker starts a conversation with no machine selected, so
+  asking a question exercises the server's real clarify-instead-of-guess path
+  (`_resolve_machine_mention` in `routes_chat.py`) — worth demoing, since it's
+  one of the invariants the plan explicitly calls out as must-not-regress.
+- **No-answer gets its own visual treatment.** Live testing against the real
+  corpus showed `is_no_answer=true` is a common outcome, not an edge case —
+  two of three test questions came back that way. It's now a distinct muted
+  card with an explicit label instead of rendering identically to a real
+  answer, so it reads as intentional honesty rather than a broken app.
+- **Confirming a clarifying machine no longer races its own reload.**
+  `selectClarifyingMachine()` used to call `refresh()`, which launches a
+  detached child coroutine and returns immediately — so its `finally` cleared
+  `sending` (re-enabling the composer) before that child coroutine had
+  actually reloaded the conversation. Fixed by awaiting the reload directly
+  in the same coroutine (`ChatViewModel.loadMessages()`). Covered by
+  `ChatViewModelTest`.
+- **A dropped connection mid-send no longer looks identical to a normal
+  message.** If `send()` throws (network lost, not an HTTP error), the
+  technician's own question stayed on screen with no spinner and no
+  explanation once `sending` flipped back to false — indistinguishable from
+  an already-sent message. `ChatUiState.pendingEchoUncertain` now flags this
+  case explicitly and `ChatScreen` labels it "Connection lost — unknown if
+  this was received" instead of silently dropping the ambiguity.
+- **Feedback/save buttons now show whether they landed.** They used to swallow
+  both success and failure silently, so tapping "Helpful" or "Save" gave no
+  visible confirmation the server got it. On a successful call the buttons
+  are replaced with "Marked helpful"/"Marked incorrect" and "Saved"; on
+  failure they're deliberately left tappable again rather than showing a
+  false confirmation (still fire-and-forget per plan 10.4 — feedback must
+  never block or interrupt the repair task).
+- **Question submission is now idempotent (plan sec 9/16/17).** Every send
+  carries an `Idempotency-Key` header (`LocalEcho.id`, generated once per
+  composed question, never regenerated on retry). A dropped connection or a
+  `409` ("this key is already being processed") now shows a "Retry" button on
+  the pending bubble that resends with the *same* key and text — never a
+  fresh key, never whatever's currently in the composer — so it's always safe
+  to tap even if the original attempt actually landed. See
+  `docs/ARCHITECTURE.md`'s deviation table for what this does and doesn't
+  cover versus the plan's full durable-attempt design.
+- **The session cookie is no longer stored in plain text (2026-08-24).**
+  `PersistentCookieJar` previously wrote `tma_session` straight into
+  `SharedPreferences` — readable on a rooted device or via `adb backup`. It's
+  now encrypted with an AES-256-GCM key generated inside the Android Keystore
+  (never exported) before being written. Explicitly *not* claimed: this is
+  not the plan's OIDC/PKCE token vault (still no refresh token, rotation, or
+  server-side per-device revocation — that needs the identity-provider
+  decision in plan section 18); it only removes the plaintext-at-rest gap.
+  **Verified live on the Tab A9+ (2026-08-24)** — see the "Known correctness
+  gaps" entry above for the full sequence (upgrade install over a plaintext
+  session, fresh login, force-stop/relaunch survives via the real Keystore).
+- **Accessibility pass (2026-08-24) — code-auditable parts fixed, TalkBack
+  behavior unverified.** What changed, split by how it was verified:
+  - **Verified by build + code audit:**
+    - Dark mode was broken for warnings/errors. `Theme.kt` wires up
+      `isSystemInDarkTheme()`, but every warning/error color in
+      `ChatScreen`/`LoginScreen`/`MachinesScreen` was a single hardcoded hex
+      value never re-checked against `DarkColors` — worst case, the error
+      card (`Color(0xFFFFEBEE)`, a near-white pink) rendering as a bright
+      slab in a dark UI. All of it now goes through
+      `MaterialTheme.colorScheme.error`/`errorContainer`/`onErrorContainer`
+      or a new `warningColor` (`ui/theme/Theme.kt`), each with an explicit
+      light and dark value.
+    - `conflict_note` (a revision-conflict notice — plan section 2's
+      must-not-regress list) was color-only status: amber text, no icon, no
+      label, the exact "color-independent status" gap plan section 6 names.
+      It now gets the same icon + explicit "Revision conflict:" label prefix
+      the safety-warnings block already had.
+    - Audited for fixed-height text containers and hardcoded `fontSize`/
+      `maxLines` overrides that would clip text under a larger system font
+      size — **none found** across the four screens; Compose's default
+      scalable typography is used throughout.
+  - **Standard fix applied, behavior not confirmed on-device:**
+    - Login/Machines/Chat error text now sets
+      `Modifier.semantics { liveRegion = LiveRegionMode.Polite }` so
+      TalkBack should announce an error as soon as it appears, instead of a
+      screen-reader user needing to manually explore the screen to discover
+      it landed.
+    - The Login "Sign in" button sets an explicit `contentDescription`
+      ("Signing in") while loading, since the button's content becomes a
+      bare spinner with no text for TalkBack to read otherwise.
+    - Citation chips (`[1] p.5`) get a fuller `contentDescription`
+      ("Citation 1, page 5, `<title>`") set on the label `Text` specifically
+      (not the chip's own modifier), to avoid touching the chip's own
+      click/Button-role semantics. **Needs a real TalkBack listen**: if this
+      double-announces (chip role + both the literal glyphs and the override),
+      the fix is different from what's here.
+  - **Flagged, not fixed — needs a physical device to even evaluate:**
+    Helpful/Incorrect/Save render as three `TextButton`s in a
+    `Row(Arrangement.spacedBy(4.dp))`. Material3 enforces a 48dp minimum
+    interactive size per button by default (not hand-added here), but
+    whether three adjacent 4dp-gapped targets are actually mis-tap-prone
+    with gloves (plan section 13.5) is a usability question, not something
+    resolvable by reading code.
+
+## Tests
+
+The 2026-08-24 accessibility pass added no new tests — Compose semantics/
+TalkBack behavior needs Robolectric or an instrumented test to verify
+meaningfully, and a shaky Robolectric semantics harness would manufacture
+confidence this doesn't actually have. It's verified by `assembleDebug` and
+code audit only; see the accessibility bullet above for exactly which parts
+that does and doesn't cover.
+
+Three ViewModels have unit test coverage, all driven against a real
+`MockWebServer` rather than a mocked `ApiService` (via
+`ApiClient.overrideServiceForTest`, a test-only seam — `init(context)` needs
+a real Android `Context` a JVM unit test doesn't have):
+
+- `CookieSerializationTest` (3 tests): the pure domain+Set-Cookie-header
+  serialization round-trips, and garbage/blank input fails to parse instead
+  of throwing. This is deliberately the *only* part of `PersistentCookieJar`
+  that's unit-tested — the Android Keystore isn't available in a JVM unit
+  test, so the AES-256-GCM encrypt/decrypt path (`getOrCreateKey()`,
+  `storeCookie()`, `loadStoredCookie()`) is verified only by installing on a
+  physical device: confirm a session survives an app restart, and confirm
+  installing this build over a pre-encryption install forces a clean
+  re-login instead of crashing on the old plaintext data.
+- `ChatViewModelTest` (7 tests): correct user-then-assistant message
+  ordering, the uncertain-pending-echo state, the clarifying-machine reload
+  race (verified to actually fail against the pre-fix code before being
+  kept), the feedback/save success+failure paths, `retryPendingSend()`
+  reusing the original `Idempotency-Key` header rather than a fresh one, and
+  a `409` triggering an automatic refresh that resolves the pending echo.
+- `LoginViewModelTest` (4 tests): blank-credential validation short-circuits
+  before any network call, successful login, wrong-password message, lost
+  connection.
+- `MachinesViewModelTest` (5 tests): recent-machines load, search, selecting
+  a machine (conversation created + touched + label reported), starting
+  without a machine (null label reported), and a failed conversation
+  creation.
+
+Run with:
+```
+.\gradlew.bat testDebugUnitTest
+```
+Not covered yet: `AppNav`'s session-expiry redirect, and the Compose screens
+themselves (no UI/instrumented tests — everything above is ViewModel-level).
+
+## Things I did that you should know about
+
+- **The demo technician account was seeded by inserting directly into
+  `data/db/app.db`**, bypassing the invitation flow — reasonable for local
+  dev seeding, not something to do against a real deployment. Its password
+  is in this file, in plaintext, above. If this repo (or just this file) ever
+  goes somewhere more shared than your own machine, rotate that password or
+  strip it out first.
+- **`data/app.db` (0 bytes, shows as untracked in `git status`) is stale** —
+  the real database is at `data/db/app.db` per `backend/.env`'s `DB_PATH`. I
+  didn't delete it since I wasn't sure if it's leftover from something else;
+  worth confirming it's safe to remove.
+- **The backend I ran to verify this end-to-end is not persistent** — it was
+  started in a background shell for testing and will not survive past this
+  session. Before the demo, start it fresh from `backend/`:
+  `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000`
+- **Windows Firewall**: I could not add the inbound rule for TCP 8000 myself
+  (access denied — needs an elevated shell). Run this once, in an elevated
+  PowerShell, before the demo:
+  ```
+  New-NetFirewallRule -DisplayName "TechManualAssistant-dev-8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -Profile Private
+  ```

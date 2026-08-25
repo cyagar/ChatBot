@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 data/db/*.db
+data/app.db
 data/object_storage/*
 !data/object_storage/.gitkeep
 data/reports/*
@@ -20,6 +21,7 @@ data/manuals_incoming/*
 # same trust tier as backend/.env. Never commit.
 backend/*.json
 .claude/
+.idea/
 _pipcheck/
 .venv/
 node_modules/

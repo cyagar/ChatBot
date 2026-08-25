@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+    Debug-only network security override. Allows plaintext HTTP to the local
+    dev backend so a physical tablet on the same Wi-Fi can reach it during the
+    pilot demo. This file is merged only into debug builds; the release
+    manifest has no such exception and keeps usesCleartextTraffic="false"
+    from the main manifest (plan section 5.3, TLS-only via Android Network
+    Security Configuration).
+    -->
+    <application android:networkSecurityConfig="@xml/network_security_config_debug" />
+</manifest>
