@@ -67,24 +67,47 @@ object ApiClient {
             response
         }
 
+        // Retries a request exactly once, GET only, when the connection itself
+        // failed (e.g. "unexpected end of stream" from a dead pooled connection
+        // reused after the peer's keep-alive timeout elapsed -- confirmed
+        // 2026-08-25 that a short server-side --timeout-keep-alive reliably
+        // triggers this). GET is always safe to retry. POST is deliberately
+        // NOT retried here, even though OkHttp's own retryOnConnectionFailure
+        // would cover it too -- submitFeedback has no idempotency protection
+        // (the feedback table is deliberately append-only; see
+        // routes_chat.py's submit_feedback), so an automatic retry could write
+        // a second row for a request the server actually received. ask_question
+        // already has its own resilience story instead: a per-turn
+        // Idempotency-Key plus the manual "Retry" button in ChatViewModel that
+        // reuses it (see "Handled during review" in the README) -- that one
+        // deliberately stays a user-initiated action, not an automatic one.
+        val getRetryInterceptor = okhttp3.Interceptor { chain ->
+            val request = chain.request()
+            if (request.method != "GET") {
+                chain.proceed(request)
+            } else {
+                try {
+                    chain.proceed(request)
+                } catch (_: java.io.IOException) {
+                    chain.proceed(request)
+                }
+            }
+        }
+
         okHttpClient = OkHttpClient.Builder()
             .cookieJar(cookieJar)
             .addInterceptor(logging)
             .addInterceptor(authExpiryInterceptor)
+            .addInterceptor(getRetryInterceptor)
             // Retrieval + provider call runs synchronously server-side (see
             // routes_chat.py's ask_question) -- a real answer can take 20-30s.
             .readTimeout(90, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .connectTimeout(15, TimeUnit.SECONDS)
-            // askQuestion sends a per-turn Idempotency-Key (see ChatViewModel.send
-            // / routes_chat.py's ask_question dedup on conversation_id+key), so a
-            // retried POST is now safe to resend rather than something to guard
-            // against -- retry-on-connection-failure left enabled (the default)
-            // covers the "unexpected end of stream" class of error (a dead pooled
-            // connection reused after the peer's keep-alive timeout elapsed;
-            // confirmed 2026-08-25 the local dev server's default 5s
-            // --timeout-keep-alive was the actual trigger during testing, but a
-            // real network can still drop an idle connection this way).
+            // OkHttp's own blanket auto-retry is left off -- it can't
+            // distinguish GET from POST, so it would retry submitFeedback too.
+            // getRetryInterceptor above covers GET specifically instead.
+            .retryOnConnectionFailure(false)
             .build()
 
         val retrofit = Retrofit.Builder()

@@ -157,8 +157,11 @@ The existing administrator account also works and reaches the same screens
   measured defect, now fixed. **Still genuinely open:** whether the
   error-text live regions actually get announced out loud — `uiautomator
   dump` doesn't surface Compose's `liveRegion` semantics property at all, so
-  this needs an actual TalkBack session (enable it, listen) to confirm,
-  not just a node-tree inspection.
+  this needs a human turning on TalkBack on the device and listening to
+  confirm, not just a node-tree inspection. **Do not enable TalkBack over
+  adb to check this** — doing so makes the physical device start speaking
+  out loud unattended, which is disruptive and not something to trigger
+  remotely (found the hard way, 2026-08-25).
 - `LoginViewModel`, `MachinesViewModel`, and `ChatViewModel` are covered by
   unit tests now; `AppNav`'s session-expiry redirect and the screens
   themselves (Compose UI) are not.
@@ -202,20 +205,37 @@ The existing administrator account also works and reaches the same screens
   connection-pool bug, and not something a technician would see behind a
   real server/proxy with a normal 60-75s keep-alive -- just start the dev
   server with a longer `--timeout-keep-alive` during manual testing.
-  Separately, also found and fixed a real (if minor, given the above) client
-  gap while investigating this: `ApiClient`'s `OkHttpClient` had
-  `retryOnConnectionFailure(false)`, with a comment justifying it as
-  guarding against double-sending a non-idempotent `ask_question` POST --
-  but per-turn `Idempotency-Key` support (see `ChatViewModel.send` /
-  `routes_chat.py`'s dedup on `conversation_id`+key) landed in an earlier
-  slice this session, making that guard stale and the retry-disable no
-  longer necessary. Removed it (default is enabled) -- confirmed live
-  2026-08-25 by reverting the dev server to its default 5s keep-alive (the
-  exact condition that reliably failed before) and repeating the same tap
-  sequence: five consecutive clean loads, no error banner, no visible retry
-  latency. This is now genuine defense-in-depth against the same class of
-  error on a real network (a Wi-Fi idle-drop, an AP/NAT timeout), not just
-  a workaround for the dev server's default.
+  Separately, also found and fixed a real client gap while investigating
+  this: `ApiClient`'s `OkHttpClient` had `retryOnConnectionFailure(false)`,
+  justified by a comment about guarding against a double-sent, non-idempotent
+  `ask_question` POST -- but per-turn `Idempotency-Key` support (see
+  `ChatViewModel.send` / `routes_chat.py`'s dedup on `conversation_id`+key)
+  landed in an earlier slice this session, making that specific guard stale.
+  The first fix attempt just flipped the flag to the OkHttp default
+  (enabled) -- caught in review before committing further: that's too broad.
+  `saveAnswer` is safe to retry (its `INSERT OR IGNORE` + the unique index
+  from migration 0011 makes a retried POST a no-op), and `ask_question` is
+  now safe too (the idempotency key), but `submitFeedback` writes a plain
+  `INSERT INTO feedback` -- the table is deliberately append-only (multiple
+  ratings over time are legitimate), so nothing stops a connection-failure
+  retry that lands *after* the server already committed the row from writing
+  a second, identical one. That's exactly the duplicate-rows bug class this
+  session's first commit already fixed once for `saved_answers`; blanket
+  retry would have reopened the same risk for `feedback`.
+
+  Fixed properly instead with a custom interceptor (`getRetryInterceptor` in
+  `ApiClient.kt`) that retries a request once on `IOException` only when it's
+  a `GET` -- always safe to retry -- leaving every `POST` (including
+  `submitFeedback`) untouched, exactly as conservative as before.
+  `retryOnConnectionFailure(false)` stays explicit on the `OkHttpClient`
+  itself so its own blanket retry (which can't distinguish GET from POST)
+  never fires. Confirmed live 2026-08-25, both directions: reverted the dev
+  server to its default 5s keep-alive (the exact condition that reliably
+  failed before) and repeated the tap sequence -- GET requests (history list,
+  messages) now retry transparently with no error banner; then sent a fresh
+  question, tapped "Helpful" on it, and confirmed via the backend log and a
+  direct `sqlite3` query that exactly one `feedback` row was written -- no
+  silent duplicate from the retry path.
 
 ## Handled during review (worth knowing about)
 
