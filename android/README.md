@@ -176,17 +176,17 @@ The existing administrator account also works and reaches the same screens
   the Tab A9+ (2026-08-25).** See "Handled during review" below for the full
   story — two separate bugs were involved, and the first fix attempt was
   aimed at the wrong one.
-- **No conversation-history/resume screen for a single machine.** Tapping a
-  machine from the list (or "Recent & favorites") always starts a *new*
-  conversation — there's no way to reopen a specific past conversation for
-  that machine from the UI. This is a real, separate gap on its own (a
-  technician can't return to yesterday's answer for the same machine without
-  re-asking), and it also means the feedback/saved-state rehydration fix
-  below (2026-08-25) could only be verified live for the "same process,
-  fresh `ChatViewModel`" case (branch switch between single/two-pane), not
-  the "cold app restart back into an already-marked conversation" case that
-  most needs it — that path is verified by code inspection and the backend
-  tests, not on-device.
+- ~~No conversation-history/resume screen.~~ **Added and verified live on the
+  Tab A9+ (2026-08-25).** See "Handled during review" below. Single-pane:
+  Machines -> History -> pick a past conversation -> Chat loads the right
+  conversation with full history, feedback/saved-state correctly rehydrated
+  (this also closes out the "cold restart into an already-marked
+  conversation" rehydration gap noted in the feedback/saved-state entry
+  below), and back from Chat lands on the machine list, not History. Two-pane:
+  found and fixed a real bug where switching from one conversation straight
+  to another in the fixed detail pane silently kept showing the *previous*
+  conversation's `ChatViewModel` -- see the "two-pane History->Chat
+  ViewModel-caching bug" entry below.
 - ~~`submitFeedback`/`saveAnswer` fail silently on a network error~~ **Fixed
   (2026-08-25).** See "Handled during review" below. Still genuinely open:
   the transient `IOException: unexpected end of stream` errors observed live
@@ -198,6 +198,70 @@ The existing administrator account also works and reaches the same screens
 
 ## Handled during review (worth knowing about)
 
+- **Conversation-history/resume screen (2026-08-25).** The backend's
+  `GET /conversations` (P1-3) had no Android UI at all -- tapping a machine
+  always started a new conversation, with no way back to a past one for the
+  same machine short of re-asking the same question. Added `HistoryScreen`/
+  `HistoryViewModel` (`ui/history/`), reusing the endpoint as-is (most
+  recently updated first, all machines, not filtered per-machine -- a
+  single cross-machine list, closer to how a chat app's history usually
+  reads than a per-machine sub-list). Entry point is a new "History" icon
+  in `MachinesScreen`'s top bar (`onHistoryClick`, optional/nullable so
+  existing callers are unaffected); wired into `AppNav.kt` as a real nav
+  route in `SinglePaneHome` and as a plain hoisted `showHistory` toggle in
+  `TwoPaneHome`'s fixed left pane, matching how `selectedId` is already
+  hoisted there rather than routed. In `SinglePaneHome`, Chat's back button
+  landing on the machine list rather than back through History is actually
+  driven by the `key(selection.selectedId ?: -1)` remount in `HomeContent`
+  (a fresh `NavController` per selection, starting straight on Chat) --
+  the `popUpTo(Routes.MACHINES)` on the History->Chat nav call is close to
+  a no-op given that remount, kept only in case this controller becomes
+  longer-lived; see the comment at that call site for the full reasoning.
+  `HistoryScreen` also has a `LaunchedEffect(Unit) { vm.refresh() }` so the
+  list reloads on every composition entry, not just genuine `ViewModel`
+  construction -- caught in review before this landed: `TwoPaneHome` flips
+  `showHistory` between two composables in the same fixed pane with nothing
+  keying that subtree, so `viewModel()` could resolve back to a retained,
+  stale-data instance on toggle. `HistoryViewModel` has no `init{}` refresh
+  of its own (removed after the live-testing below) -- the Composable's
+  `LaunchedEffect(Unit)` is the single source of the first load; both firing
+  was two redundant requests on every mount. Four `HistoryViewModelTest`
+  cases (load, empty-is-not-an-error, load failure, refresh replaces rather
+  than appends) against the real Retrofit/OkHttp stack via `MockWebServer`,
+  same pattern as `MachinesViewModelTest`, driving `refresh()` explicitly
+  since the ViewModel no longer self-starts. **Verified live on the Tab
+  A9+ (2026-08-25)** in both single-pane and two-pane layouts, including a
+  real backend restart mid-session (see the "unexpected end of stream"
+  entry below) and a genuine two-pane bug this testing found -- see the next
+  entry.
+- **Two-pane History->Chat `ViewModel`-caching bug, found and fixed via live
+  testing (2026-08-25).** The original comment on `key(selectedId) {
+  ChatScreen(...) }` in `TwoPaneHome` (`AppNav.kt`) claimed picking a
+  different machine "tears down and rebuilds ChatScreen's `viewModel()` call
+  site." That's wrong for the plain `viewModel(factory = ...)` overload used
+  there: without an explicit `key` argument, it looks up the `ChatViewModel`
+  in the `LocalViewModelStoreOwner`'s store (the Activity, here -- `TwoPaneHome`
+  has no `NavBackStackEntry` to scope it per-route the way `SinglePaneHome`'s
+  `NavHost` does) keyed only by class name, not by anything Compose's
+  `key(...)` recomposition-scoping touches. Result: selecting a *second*
+  conversation directly from History while a first was already showing in
+  the two-pane detail pane silently returned the same cached `ChatViewModel`
+  instance from the first selection -- its `init` never re-ran, so the pane
+  kept showing the first conversation's (possibly errored) state with no new
+  network call at all. Only a null-to-first-selection transition worked,
+  because that's the one case where the store was genuinely empty. Found by
+  instrumenting `TwoPaneHome`/`HistoryScreen` with temporary `Log.d` calls
+  during live testing: recomposition demonstrably happened with the new
+  `conversationId`, but zero new `okhttp` log lines followed it. Fixed in
+  `ChatScreen.kt` by passing an explicit
+  `viewModel(key = "chat-$conversationId", factory = ...)` -- confirmed live
+  afterward, switching 94 -> 92 -> 94 in the two-pane pane, each switch
+  firing its own fresh `GET .../messages` call and rendering that
+  conversation's own content. This same call site is shared by the
+  Machines-driven two-pane selection path, so the fix (and the bug, before
+  it) applies there too, not just to History -- the original "verified live"
+  claim on that comment most likely was never actually exercised
+  conversation-to-conversation, only null-to-first-selection.
 - **Silent feedback/save failures (2026-08-25).** `submitFeedback` and
   `saveAnswer` in `ChatViewModel.kt` used to swallow both a non-2xx response
   and a thrown exception entirely — a technician could tap Helpful or Save,
@@ -256,9 +320,13 @@ The existing administrator account also works and reaches the same screens
     correctly (raw JSON confirmed via a temporary `HttpLoggingInterceptor`
     bump to `BODY`, reverted before this build) and that a fresh
     `ChatViewModel` (via the single-pane/two-pane branch switch) renders
-    "Marked helpful"/"Saved" without any tap. See the "no conversation
-    -history/resume screen" gap above for what this verification does and
-    doesn't rule out.
+    "Marked helpful"/"Saved" without any tap. At the time, there was no way
+    to reopen a specific past conversation from the UI, so the "cold app
+    restart back into an already-marked conversation" path -- the one that
+    most needs this fix -- couldn't be exercised live, only verified by
+    code inspection and the backend tests. The History screen added below
+    is what makes that path reachable; it hasn't been used to close out
+    this specific verification gap yet (see its own entry for why).
 - **TalkBack accessibility, verified via the real node tree, not audio
   (2026-08-25).** There's no way to make this session literally listen to
   TalkBack's speech output through adb/screenshots. What's used instead is

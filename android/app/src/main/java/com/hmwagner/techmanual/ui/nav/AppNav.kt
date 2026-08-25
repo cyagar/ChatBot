@@ -38,6 +38,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.ui.chat.ChatScreen
+import com.hmwagner.techmanual.ui.history.HistoryScreen
 import com.hmwagner.techmanual.ui.login.LoginScreen
 import com.hmwagner.techmanual.ui.machines.MachinesScreen
 
@@ -69,6 +70,7 @@ private object Routes {
     const val LOGIN = "login"
     const val HOME = "home"
     const val MACHINES = "machines"
+    const val HISTORY = "history"
     const val CHAT = "chat/{conversationId}?label={label}"
     fun chat(conversationId: Int, label: String?) = "chat/$conversationId?label=${label ?: ""}"
 }
@@ -165,10 +167,39 @@ private fun SinglePaneHome(
     val startDestination = if (selectedId != null) Routes.chat(selectedId, selectedLabel) else Routes.MACHINES
     NavHost(navController = innerNav, startDestination = startDestination) {
         composable(Routes.MACHINES) {
-            MachinesScreen(onMachineSelected = { conversationId, label ->
-                onSelect(conversationId, label)
-                innerNav.navigate(Routes.chat(conversationId, label))
-            })
+            MachinesScreen(
+                onMachineSelected = { conversationId, label ->
+                    onSelect(conversationId, label)
+                    innerNav.navigate(Routes.chat(conversationId, label))
+                },
+                onHistoryClick = { innerNav.navigate(Routes.HISTORY) },
+            )
+        }
+        composable(Routes.HISTORY) {
+            HistoryScreen(
+                onConversationSelected = { conversationId, label ->
+                    // onSelect writes selection.selectedId, which changes the
+                    // key(...) wrapping SinglePaneHome in HomeContent -- this
+                    // whole composable (innerNav included) is torn down and
+                    // rebuilt with a fresh NavController whose
+                    // startDestination is Chat directly, on the next
+                    // recomposition. That rebuild, not the popUpTo below, is
+                    // what actually makes Chat's back button land on the
+                    // machine list rather than back through History: the new
+                    // controller's back stack never contained History or
+                    // Machines to begin with. The navigate() call here (on
+                    // the soon-to-be-discarded old innerNav) just avoids a
+                    // stale frame before that rebuild lands; popUpTo is kept
+                    // for the same "undo one step, not re-walk History"
+                    // intent in case a future change makes this controller
+                    // longer-lived.
+                    onSelect(conversationId, label)
+                    innerNav.navigate(Routes.chat(conversationId, label)) {
+                        popUpTo(Routes.MACHINES)
+                    }
+                },
+                onBack = { innerNav.popBackStack() },
+            )
         }
         composable(
             route = Routes.CHAT,
@@ -201,21 +232,41 @@ private fun SinglePaneHome(
  */
 @Composable
 private fun TwoPaneHome(selectedId: Int?, selectedLabel: String?, onSelect: (Int, String?) -> Unit) {
+    // Plain hoisted toggle, not a nav route, matching `selectedId` above --
+    // there's no "back" affordance needed in a fixed pane, just a switch
+    // between what it shows.
+    var showHistory by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxSize()) {
         Box(Modifier.width(360.dp).fillMaxHeight()) {
-            MachinesScreen(onMachineSelected = onSelect)
+            if (showHistory) {
+                HistoryScreen(
+                    onConversationSelected = { conversationId, label ->
+                        onSelect(conversationId, label)
+                        showHistory = false
+                    },
+                    onBack = { showHistory = false },
+                )
+            } else {
+                MachinesScreen(onMachineSelected = onSelect, onHistoryClick = { showHistory = true })
+            }
         }
         HorizontalDivider(modifier = Modifier.fillMaxHeight().width(1.dp))
         Box(Modifier.fillMaxHeight()) {
             if (selectedId == null) {
                 EmptyDetailPane()
             } else {
-                // Keys the whole detail subtree on conversationId so picking a
-                // different machine tears down and rebuilds ChatScreen's
-                // viewModel() call site instead of reusing the previous
-                // conversation's cached ChatViewModel instance (which would
-                // otherwise silently keep showing the old conversation --
-                // viewModel() caches by call site, not by conversationId).
+                // key(selectedId) alone is NOT what prevents ChatScreen from
+                // reusing the previous conversation's ChatViewModel -- found
+                // via live testing (2026-08-25) that it wasn't preventing
+                // that at all: viewModel() without an explicit key looks
+                // itself up by class name in the Activity's ViewModelStore,
+                // untouched by this recomposition-scoping key(). The actual
+                // fix is the explicit `key = "chat-$conversationId"` passed
+                // to viewModel() inside ChatScreen itself -- see the comment
+                // there. This key() is kept anyway since it still forces a
+                // clean recomposition of everything else in the subtree
+                // (LazyListState, scroll position, etc.) on conversation
+                // switches, which is harmless and arguably still desired.
                 key(selectedId) {
                     ChatScreen(conversationId = selectedId, machineLabel = selectedLabel, onBack = null)
                 }

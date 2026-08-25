@@ -57,7 +57,22 @@ import com.hmwagner.techmanual.ui.theme.warningColor
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)? = null) {
-    val vm: ChatViewModel = viewModel(factory = ChatViewModel.Factory(conversationId))
+    // Explicit `key`, not just the default class-name-based one: viewModel()
+    // without a key scopes the ViewModelStore lookup to the class name alone
+    // (via the LocalViewModelStoreOwner -- here, the Activity, since
+    // TwoPaneHome has no NavBackStackEntry to scope it per-route the way
+    // SinglePaneHome's NavHost does). Wrapping this call in
+    // `key(selectedId) { ... }` (see TwoPaneHome in AppNav.kt) changes the
+    // Compose slot but does NOT reset that ViewModelStore lookup, so without
+    // this explicit key, switching from one conversation straight to another
+    // in the two-pane detail pane silently returned the *same* cached
+    // ChatViewModel instance -- its `init` never re-ran, so it kept showing
+    // the previous conversation's stale state (found via live tablet
+    // testing 2026-08-25, the same session the History screen was added --
+    // instrumented with temporary Log.d calls in ChatScreen/TwoPaneHome to
+    // confirm recomposition WAS happening with the new id while no new
+    // network call ever fired).
+    val vm: ChatViewModel = viewModel(key = "chat-$conversationId", factory = ChatViewModel.Factory(conversationId))
     val state by vm.state.collectAsState()
     val listState = rememberLazyListState()
 
