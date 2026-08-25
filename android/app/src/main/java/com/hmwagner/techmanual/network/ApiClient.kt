@@ -76,13 +76,15 @@ object ApiClient {
             .readTimeout(90, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .connectTimeout(15, TimeUnit.SECONDS)
-            // The server has no Idempotency-Key support yet (that's a Phase 3
-            // production item, not part of today's slice). OkHttp's default
-            // auto-retry-on-connection-failure can silently resend a POST,
-            // which would create a duplicate user turn -- disable it and rely
-            // on disabling the send button while a request is in flight
-            // instead. This is a known, recorded gap, not a fixed one.
-            .retryOnConnectionFailure(false)
+            // askQuestion sends a per-turn Idempotency-Key (see ChatViewModel.send
+            // / routes_chat.py's ask_question dedup on conversation_id+key), so a
+            // retried POST is now safe to resend rather than something to guard
+            // against -- retry-on-connection-failure left enabled (the default)
+            // covers the "unexpected end of stream" class of error (a dead pooled
+            // connection reused after the peer's keep-alive timeout elapsed;
+            // confirmed 2026-08-25 the local dev server's default 5s
+            // --timeout-keep-alive was the actual trigger during testing, but a
+            // real network can still drop an idle connection this way).
             .build()
 
         val retrofit = Retrofit.Builder()

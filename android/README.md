@@ -188,13 +188,34 @@ The existing administrator account also works and reaches the same screens
   conversation's `ChatViewModel` -- see the "two-pane History->Chat
   ViewModel-caching bug" entry below.
 - ~~`submitFeedback`/`saveAnswer` fail silently on a network error~~ **Fixed
-  (2026-08-25).** See "Handled during review" below. Still genuinely open:
-  the transient `IOException: unexpected end of stream` errors observed live
-  that prompted this fix are now surfaced to the technician instead of
-  hidden, but their root cause (a reused OkHttp connection the OS had
-  silently reset) hasn't been addressed — a technician will now see "check
-  your connection, try again" for something that's actually a client-side
-  connection-pool staleness issue, not their Wi-Fi.
+  (2026-08-25).** See "Handled during review" below. The transient
+  `IOException: unexpected end of stream` errors that prompted this fix are
+  now surfaced to the technician instead of hidden either way, so this fix
+  stands regardless -- but their root cause turned out to be **the local dev
+  server, not the app**: confirmed 2026-08-25 by restarting `uvicorn` with
+  `--timeout-keep-alive 75` (default is 5s) and repeating the same tap
+  sequence with 10-25s gaps that had reliably failed before -- zero failures
+  across four attempts afterward, versus the near-certain failure rate
+  before. Uvicorn was closing idle keep-alive connections at 5s; OkHttp
+  didn't know and reused the dead socket, producing exactly this error on
+  the first request after any gap longer than that. Not an OkHttp
+  connection-pool bug, and not something a technician would see behind a
+  real server/proxy with a normal 60-75s keep-alive -- just start the dev
+  server with a longer `--timeout-keep-alive` during manual testing.
+  Separately, also found and fixed a real (if minor, given the above) client
+  gap while investigating this: `ApiClient`'s `OkHttpClient` had
+  `retryOnConnectionFailure(false)`, with a comment justifying it as
+  guarding against double-sending a non-idempotent `ask_question` POST --
+  but per-turn `Idempotency-Key` support (see `ChatViewModel.send` /
+  `routes_chat.py`'s dedup on `conversation_id`+key) landed in an earlier
+  slice this session, making that guard stale and the retry-disable no
+  longer necessary. Removed it (default is enabled) -- confirmed live
+  2026-08-25 by reverting the dev server to its default 5s keep-alive (the
+  exact condition that reliably failed before) and repeating the same tap
+  sequence: five consecutive clean loads, no error banner, no visible retry
+  latency. This is now genuine defense-in-depth against the same class of
+  error on a real network (a Wi-Fi idle-drop, an AP/NAT timeout), not just
+  a workaround for the dev server's default.
 
 ## Handled during review (worth knowing about)
 
@@ -231,9 +252,9 @@ The existing administrator account also works and reaches the same screens
   same pattern as `MachinesViewModelTest`, driving `refresh()` explicitly
   since the ViewModel no longer self-starts. **Verified live on the Tab
   A9+ (2026-08-25)** in both single-pane and two-pane layouts, including a
-  real backend restart mid-session (see the "unexpected end of stream"
-  entry below) and a genuine two-pane bug this testing found -- see the next
-  entry.
+  real backend restart mid-session (see the "unexpected end of stream" /
+  `--timeout-keep-alive` note in the known-issues list above) and a genuine
+  two-pane bug this testing found -- see the next entry.
 - **Two-pane History->Chat `ViewModel`-caching bug, found and fixed via live
   testing (2026-08-25).** The original comment on `key(selectedId) {
   ChatScreen(...) }` in `TwoPaneHome` (`AppNav.kt`) claimed picking a
