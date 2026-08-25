@@ -4,7 +4,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 from app.providers.base import (
     AIProvider,
     GeneratedAnswer,
@@ -82,7 +86,7 @@ class OpenAIProvider(AIProvider):
         )
 
         raw_text = self._call(messages)
-        result = parse_and_validate(raw_text, passages, self.name)
+        result = parse_and_validate(raw_text, passages, self.name, machine_label)
         if result is not None:
             return result
 
@@ -102,10 +106,18 @@ class OpenAIProvider(AIProvider):
             },
         ]
         raw_text_2 = self._call(repair_messages)
-        result = parse_and_validate(raw_text_2, passages, self.name)
+        result = parse_and_validate(raw_text_2, passages, self.name, machine_label)
         if result is not None:
             return result
 
+        # See the matching comment in anthropic_provider.py -- neither
+        # attempt survived parse_and_validate, so log both raw responses
+        # server-side to give an administrator something to investigate
+        # instead of a dead end.
+        logger.warning(
+            "Both attempts failed validation for conversation; provider=%s\n--- attempt 1 ---\n%s\n--- attempt 2 ---\n%s",
+            self.name, raw_text, raw_text_2,
+        )
         return GeneratedAnswer(answer=UNVERIFIED_ANSWER, is_no_answer=True, provider=self.name)
 
     def _call(self, messages: list[dict]) -> str:

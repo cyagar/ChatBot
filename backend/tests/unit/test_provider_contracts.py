@@ -144,6 +144,103 @@ def test_anthropic_recovers_on_the_repair_retry(anthropic_provider, monkeypatch)
     assert "81-118-31" in result.answer
 
 
+def test_anthropic_no_answer_explanation_mentioning_the_machine_name_is_not_rejected(
+    anthropic_provider, monkeypatch
+):
+    """Found live 2026-08-25: a technician on the "Ultra-1/Ultra-2" got the
+    generic UNVERIFIED_ANSWER fallback for several honestly-unanswerable
+    questions in a row. The model's real no_answer_explanation was fine each
+    time -- it just naturally referenced the machine by name, and that name
+    has two digits ("1", "2") scattered in it, which _material_tokens
+    flagged as an unverifiable claim even though it's prompt-given context,
+    not something the model could be fabricating."""
+    explanation = (
+        "The provided excerpts do not contain an Electrical Setup procedure "
+        "for the Ultra-1/Ultra-2. Please consult the Installation section."
+    )
+    response = json.dumps({
+        "is_no_answer": True, "no_answer_explanation": explanation,
+        "claims": [], "steps": [], "warnings": [],
+    })
+    monkeypatch.setattr(
+        anthropic_provider._client.messages, "create", lambda **k: _AnthropicResponse(response)
+    )
+    result = anthropic_provider.generate("How to do electrical setup", "Ultra-1/Ultra-2", [_passage()])
+    assert result.is_no_answer is True
+    assert result.answer == explanation, "the model's real explanation, not the generic fallback"
+
+
+def test_anthropic_no_answer_explanation_with_an_unrelated_material_token_still_falls_back(
+    anthropic_provider, monkeypatch
+):
+    """Regression guard for P0-5 (independent review): the machine-name
+    exemption above must not become a blanket exemption for every material
+    token. A part number/voltage/error code that has nothing to do with the
+    machine's own name is still exactly the fabrication risk that check
+    exists for."""
+    explanation = "Bypass the interlock at 600V to test the control board."
+    response = json.dumps({
+        "is_no_answer": True, "no_answer_explanation": explanation,
+        "claims": [], "steps": [], "warnings": [],
+    })
+    monkeypatch.setattr(
+        anthropic_provider._client.messages, "create", lambda **k: _AnthropicResponse(response)
+    )
+    result = anthropic_provider.generate("Why?", "Ultra-1/Ultra-2", [_passage()])
+    assert result.is_no_answer is True
+    assert result.answer != explanation
+    assert "could not produce a verified" in result.answer.lower()
+
+
+def test_anthropic_claim_mentioning_the_machine_name_is_not_rejected(anthropic_provider, monkeypatch):
+    """Same bug, second location: found live 2026-08-25 immediately after
+    the no_answer_explanation case above -- a *claim* (not just a no-answer
+    explanation) naturally referencing the machine by name hit the same
+    false-positive rejection, since claims go through _claim_supported, a
+    separate function with its own material-token check. A technician's
+    "what can I ask you" got the generic fallback because one of six claims
+    said "...for the Ultra-1/Ultra-2" -- the other five were all fine, but
+    validation is all-or-nothing per response."""
+    passage = _passage(content="Replace hopper drum seal every 12 months.")
+    response = json.dumps({
+        "is_no_answer": False, "no_answer_explanation": None,
+        "claims": [{
+            "text": "The excerpts cover the 12 month maintenance schedule for the Ultra-1/Ultra-2.",
+            "cited_excerpt_numbers": [1],
+        }],
+        "steps": [], "warnings": [],
+    })
+    monkeypatch.setattr(
+        anthropic_provider._client.messages, "create", lambda **k: _AnthropicResponse(response)
+    )
+    result = anthropic_provider.generate("What can I ask you?", "Ultra-1/Ultra-2", [passage])
+    assert result.is_no_answer is False
+    assert "12 month maintenance" in result.answer.lower()
+
+
+def test_anthropic_claim_with_an_unrelated_material_token_still_falls_back(anthropic_provider, monkeypatch):
+    """Regression guard for P0-7 (independent review): the machine-name
+    exemption in _claim_supported must not become a blanket exemption for
+    every material token in a claim either -- a fabricated part number
+    unrelated to the machine's own name is still exactly the risk that
+    check exists for."""
+    passage = _passage(content="Replace hopper drum seal every 12 months.")
+    response = json.dumps({
+        "is_no_answer": False, "no_answer_explanation": None,
+        "claims": [{
+            "text": "Replace part 99-999-99 on the Ultra-1/Ultra-2 every 12 months.",
+            "cited_excerpt_numbers": [1],
+        }],
+        "steps": [], "warnings": [],
+    })
+    monkeypatch.setattr(
+        anthropic_provider._client.messages, "create", lambda **k: _AnthropicResponse(response)
+    )
+    result = anthropic_provider.generate("What can I ask you?", "Ultra-1/Ultra-2", [passage])
+    assert result.is_no_answer is True
+    assert "could not produce a verified" in result.answer.lower()
+
+
 def test_anthropic_empty_content_safety_refusal_shape_degrades_gracefully(anthropic_provider, monkeypatch):
     """A safety-filtered/refused response with no text blocks at all must be
     treated the same as any other malformed response -- fall back cleanly,
@@ -264,6 +361,27 @@ def test_openai_recovers_on_the_repair_retry(openai_provider, monkeypatch):
     result = openai_provider.generate("Why?", "Axiom", [_passage()])
     assert result.is_no_answer is False
     assert "81-118-31" in result.answer
+
+
+def test_openai_no_answer_explanation_mentioning_the_machine_name_is_not_rejected(
+    openai_provider, monkeypatch
+):
+    """Parity with the equivalent Anthropic test -- both providers share
+    parse_and_validate, so both share this bug and this fix."""
+    explanation = (
+        "The provided excerpts do not contain an Electrical Setup procedure "
+        "for the Ultra-1/Ultra-2. Please consult the Installation section."
+    )
+    response = json.dumps({
+        "is_no_answer": True, "no_answer_explanation": explanation,
+        "claims": [], "steps": [], "warnings": [],
+    })
+    monkeypatch.setattr(
+        openai_provider._client.chat.completions, "create", lambda **k: _OpenAIResponse(response)
+    )
+    result = openai_provider.generate("How to do electrical setup", "Ultra-1/Ultra-2", [_passage()])
+    assert result.is_no_answer is True
+    assert result.answer == explanation, "the model's real explanation, not the generic fallback"
 
 
 def test_openai_empty_or_none_content_safety_refusal_shape_degrades_gracefully(openai_provider, monkeypatch):

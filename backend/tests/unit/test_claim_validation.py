@@ -182,3 +182,65 @@ def test_no_answer_explanation_without_technical_content_still_passes():
     result = parse_and_validate(raw, passages, "test")
     assert result is not None
     assert result.is_no_answer is True
+
+
+def test_no_answer_explanation_naming_the_machine_is_not_rejected():
+    """Found live 2026-08-25: a technician on the "Ultra-1/Ultra-2" got
+    UNVERIFIED_ANSWER for several honestly-unanswerable questions in a row.
+    The model's real explanation was fine each time -- it just naturally
+    named the machine it was told about, and that name has two digits ("1",
+    "2") scattered in it, which _material_tokens flagged the same as it
+    would a fabricated part number. The machine name is prompt-given
+    context (see AnthropicProvider.generate's "Selected machine:" line),
+    not something the model could be fabricating, so parse_and_validate now
+    takes it as a parameter and exempts its own tokens from this check."""
+    passages = [_passage(1, 1, "This manual covers routine maintenance only.")]
+    raw = json.dumps({
+        "is_no_answer": True,
+        "no_answer_explanation": "The provided excerpts do not contain an Electrical "
+                                  "Setup procedure for the Ultra-1/Ultra-2.",
+        "claims": [], "steps": [], "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test", machine_label="Ultra-1/Ultra-2")
+    assert result is not None
+    assert result.is_no_answer is True
+    assert "Ultra-1/Ultra-2" in result.answer
+
+
+def test_claim_naming_the_machine_is_not_rejected():
+    """Same bug, second location: a *claim* (not just a no-answer
+    explanation) naturally referencing the machine by name goes through
+    _claim_supported, a separate function with its own material-token
+    check, and hit the identical false positive live 2026-08-25 -- a
+    "what can I ask you" summary claim said "...for the Ultra-1/Ultra-2"
+    and got the whole six-claim answer rejected over that one phrase."""
+    passages = [_passage(1, 1, "Replace hopper drum seal every 12 months.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{
+            "text": "The excerpts cover the 12 month maintenance schedule for the Ultra-1/Ultra-2.",
+            "cited_excerpt_numbers": [1],
+        }],
+        "steps": [], "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test", machine_label="Ultra-1/Ultra-2")
+    assert result is not None
+    assert result.is_no_answer is False
+
+
+def test_claim_naming_the_machine_plus_an_unrelated_fabrication_is_still_rejected():
+    """Regression guard: the machine-name exemption must not become a
+    blanket exemption for every material token in a claim that happens to
+    also mention the machine -- a fabricated part number unrelated to the
+    machine's own name is still exactly the risk _claim_supported exists
+    to catch."""
+    passages = [_passage(1, 1, "Replace hopper drum seal every 12 months.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{
+            "text": "Replace part 99-999-99 on the Ultra-1/Ultra-2 every 12 months.",
+            "cited_excerpt_numbers": [1],
+        }],
+        "steps": [], "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test", machine_label="Ultra-1/Ultra-2") is None

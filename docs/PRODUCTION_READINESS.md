@@ -953,6 +953,44 @@ done than it is.
       docstring already says this plainly; this fix closes the one path
       (`is_no_answer`) that had *no* check at all, it doesn't upgrade the
       check itself.
+- [x] **The material-token check had a false-positive blind spot: the
+      machine's own name** (found live 2026-08-25, a technician on the
+      "Bunn-O-Matic Ultra-1/Ultra-2" hit `UNVERIFIED_ANSWER` for several
+      genuinely-unanswerable questions in a row -- "how to do electrical
+      setup," "parts list," "what can I ask you"). The model's real
+      responses were fine every time; they just naturally named the machine
+      it was told about ("...for the Ultra-1/Ultra-2"), and that name has
+      two digits scattered in it ("1", "2"), which `_material_tokens`
+      flagged as an unverified claim exactly like it would a fabricated
+      part number -- in both the `is_no_answer` explanation path (the P0-5
+      fix above) and, separately, in `_claim_supported` for a real claim.
+      The machine name is prompt-given context (`AnthropicProvider.generate`
+      / `OpenAIProvider.generate`'s "Selected machine:" line), not something
+      the model could be fabricating, so penalizing it for repeating it back
+      was never the intent of either check. Root-caused live by adding
+      temporary raw-response logging (kept on, permanently, as a
+      `logger.warning` on the final `UNVERIFIED_ANSWER` fallback in both
+      providers -- there was no way to diagnose this class of issue in
+      production before that) and replaying the captured response against
+      the real cited passages with a standalone script. `parse_and_validate`
+      and `_claim_supported` (`backend/app/providers/base.py`) now take an
+      optional `machine_label` and exempt its own material tokens from the
+      check; both provider call sites pass it through. Six new tests across
+      `tests/unit/test_claim_validation.py` (direct, `parse_and_validate`-
+      and `_claim_supported`-level) and `tests/unit/test_provider_contracts.py`
+      (full `generate()`-level, both providers) -- three prove the exemption
+      fires for a no-answer explanation and for a claim; three are
+      regression guards proving an unrelated fabricated token (a part
+      number, a "bypass the interlock at 600V") is still rejected exactly
+      as before. Full backend suite (282 passed, 1 skipped) re-run clean.
+      **Not done:** the harder, separate case surfaced by the same live
+      session -- a claim paraphrasing table data ("J15-12pin Connector",
+      summarizing 12 individually-numbered rows `J15-1`...`J15-12`) still
+      correctly fails, since "J15-12PIN" never appears as a literal
+      substring anywhere in the excerpt. The underlying fact is accurate,
+      but this is a semantic-entailment gap, not a machine-name false
+      positive -- the same "not built" limitation the P0-5 entry above
+      already names.
 - [x] **Ingestion run records are persisted before the 202, not inside the
       background task** (2026-08-24 independent follow-up review, P0-6,
       bounded slice). `POST /api/admin/ingestion/reindex` returns 202

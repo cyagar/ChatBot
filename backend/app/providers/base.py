@@ -163,8 +163,15 @@ def _normalize_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().upper()
 
 
-def _claim_supported(item_text: str, cited_content: str) -> bool:
-    tokens = _material_tokens(item_text)
+def _claim_supported(item_text: str, cited_content: str, machine_label: str | None = None) -> bool:
+    """A claim's material tokens must each appear verbatim in its cited
+    excerpt -- except a token that's actually just the machine's own name
+    (see parse_and_validate's docstring): the model is frequently going to
+    contextualize a claim by naming the machine it was told about
+    ("...for the Ultra-1/Ultra-2"), and that's prompt-given context, not
+    something drawn from -- or fabricated against -- the excerpt itself, so
+    it's the wrong thing to require the excerpt to contain."""
+    tokens = _material_tokens(item_text) - _material_tokens(machine_label or "")
     if not tokens:
         return True
     haystack = _normalize_ws(cited_content)
@@ -252,7 +259,9 @@ def _item_citations(item: _ClaimItem, passages: list) -> list[Citation]:
     return out
 
 
-def parse_and_validate(raw_text: str, passages: list, provider_name: str) -> GeneratedAnswer | None:
+def parse_and_validate(
+    raw_text: str, passages: list, provider_name: str, machine_label: str | None = None
+) -> GeneratedAnswer | None:
     """Strictly validate a provider's JSON response. Returns None if the
     response is malformed, cites a nonexistent excerpt, or contains any
     claim/step/warning whose material content (a number, identifier, or
@@ -265,7 +274,22 @@ def parse_and_validate(raw_text: str, passages: list, provider_name: str) -> Gen
     (P0-7, independent follow-up review). The `answer` shown to the
     technician is assembled here from the validated claims/steps, never
     taken as free prose from the model, so nothing unvalidated reaches
-    display."""
+    display.
+
+    `machine_label` is the machine name given to the model in the prompt
+    (see `_JSON_SHAPE_INSTRUCTION`'s "Selected machine:" line) -- passed
+    through purely so a `no_answer_explanation` naturally referencing that
+    name (e.g. "the excerpts don't cover this for the Ultra-1/Ultra-2")
+    isn't rejected by the material-token check below. Found live 2026-08-25:
+    a technician on the "Ultra-1/Ultra-2" got the generic UNVERIFIED_ANSWER
+    fallback for several genuinely-unanswerable questions in a row, even
+    though the model's actual explanation was honest and specific each time
+    -- `_material_tokens` flagged the machine's own model number (it has two
+    digits, "1" and "2", however far apart) as an unverifiable claim, since
+    that check has no cited excerpt to verify a no-answer explanation
+    against and rejects unconditionally on any material token. The machine
+    name is prompt-given context, not something the model could be
+    fabricating, so it's the wrong thing to be suspicious of here."""
     try:
         match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         if not match:
@@ -295,7 +319,8 @@ def parse_and_validate(raw_text: str, passages: list, provider_name: str) -> Gen
         # it the same as any other unsupported claim -- reject the response
         # so the caller retries with a repair prompt or falls back to
         # UNVERIFIED_ANSWER, rather than display it.
-        if _material_tokens(explanation):
+        unexplained_tokens = _material_tokens(explanation) - _material_tokens(machine_label or "")
+        if unexplained_tokens:
             return None
         return GeneratedAnswer(
             answer=explanation,
@@ -318,7 +343,7 @@ def parse_and_validate(raw_text: str, passages: list, provider_name: str) -> Gen
         return None
 
     for item in claims + steps:
-        if not _claim_supported(item.text, _cited_content(item, passages)):
+        if not _claim_supported(item.text, _cited_content(item, passages), machine_label):
             return None
     for item in warnings:
         if not _warning_supported(item.text, _cited_content(item, passages)):
