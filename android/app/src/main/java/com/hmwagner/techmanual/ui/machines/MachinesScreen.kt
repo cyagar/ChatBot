@@ -23,6 +23,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -104,10 +105,19 @@ fun MachinesScreen(
                 )
             }
 
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items(listToShow, key = { it.id }) { machine ->
-                    MachineRow(machine, enabled = !state.creatingConversation) {
-                        vm.selectMachine(machine, onCreated = onMachineSelected)
+            // Scoped to the list itself, not the search field/buttons above --
+            // refresh() re-runs whichever of recents/search is currently
+            // showing (see the comment on MachinesViewModel.refresh()).
+            PullToRefreshBox(
+                isRefreshing = state.refreshing,
+                onRefresh = vm::refresh,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            ) {
+                LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    items(listToShow, key = { it.id }) { machine ->
+                        MachineRow(machine, enabled = !state.creatingConversation) {
+                            vm.selectMachine(machine, onCreated = onMachineSelected)
+                        }
                     }
                 }
             }

@@ -19,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -76,17 +77,29 @@ fun HistoryScreen(
                 )
             }
 
-            if (state.loading) {
+            // The centered spinner only covers the true first load (nothing
+            // to show yet); a subsequent pull-to-refresh instead relies on
+            // PullToRefreshBox's own top indicator below, so the existing
+            // list stays visible underneath while it reloads.
+            if (state.loading && state.conversations.isEmpty()) {
                 CircularProgressIndicator(modifier = Modifier.padding(16.dp))
-            } else if (state.conversations.isEmpty()) {
-                Text(
-                    "No past conversations yet -- ask a question to start one.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    items(state.conversations, key = { it.id }) { conv ->
-                        ConversationRow(conv, onClick = { onConversationSelected(conv.id, conv.machine_label) })
+                PullToRefreshBox(
+                    isRefreshing = state.loading,
+                    onRefresh = vm::refresh,
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    if (state.conversations.isEmpty()) {
+                        Text(
+                            "No past conversations yet -- ask a question to start one.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            items(state.conversations, key = { it.id }) { conv ->
+                                ConversationRow(conv, onClick = { onConversationSelected(conv.id, conv.machine_label) })
+                            }
+                        }
                     }
                 }
             }

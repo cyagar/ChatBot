@@ -142,6 +142,58 @@ class MachinesViewModelTest {
     }
 
     @Test
+    fun `pull-to-refresh with a blank query reloads recents`() {
+        server.enqueue(jsonResponse("[]"))
+        vm = MachinesViewModel()
+        awaitRequestCount(1)
+
+        server.enqueue(jsonResponse(
+            """[{"id": 3, "manufacturer": "Hoshizaki", "model_name": "KM-515", "document_count": 2}]"""
+        ))
+        vm.refresh()
+        awaitState { !it.refreshing }
+
+        assertEquals(1, vm.state.value.recent.size)
+        assertEquals("Hoshizaki", vm.state.value.recent[0].manufacturer)
+        // Refreshing recents must not touch results, which stay whatever
+        // they were (empty here, since no search was ever run).
+        assertTrue(vm.state.value.results.isEmpty())
+    }
+
+    @Test
+    fun `pull-to-refresh with an active query re-runs the search, not recents`() {
+        server.enqueue(jsonResponse("[]"))
+        vm = MachinesViewModel()
+        awaitRequestCount(1)
+
+        server.enqueue(jsonResponse("[]"))
+        vm.onQueryChange("Hobart")
+        awaitState { !it.loading }
+
+        server.enqueue(jsonResponse(
+            """[{"id": 4, "manufacturer": "Hobart", "model_name": "HL600", "document_count": 5}]"""
+        ))
+        vm.refresh()
+        awaitState { !it.refreshing }
+
+        assertEquals(1, vm.state.value.results.size)
+        assertEquals("Hobart", vm.state.value.results[0].manufacturer)
+    }
+
+    @Test
+    fun `a failed pull-to-refresh surfaces an error`() {
+        server.enqueue(jsonResponse("[]"))
+        vm = MachinesViewModel()
+        awaitRequestCount(1)
+
+        server.enqueue(MockResponse().setResponseCode(500))
+        vm.refresh()
+        awaitState { !it.refreshing }
+
+        assertTrue(vm.state.value.error?.contains("500") == true)
+    }
+
+    @Test
     fun `a failed conversation creation surfaces an error and does not invoke the callback`() {
         server.enqueue(jsonResponse("[]"))
         vm = MachinesViewModel()

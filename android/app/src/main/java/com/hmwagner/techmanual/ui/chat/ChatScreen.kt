@@ -33,6 +33,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -109,31 +110,41 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
         bottomBar = { Composer(state, vm) },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
-            if (state.loadingHistory) {
+            // The centered spinner only covers the true first load (nothing
+            // to show yet); a subsequent pull-to-refresh instead relies on
+            // PullToRefreshBox's own top indicator below, so the existing
+            // messages stay visible underneath while it reloads.
+            if (state.loadingHistory && state.messages.isEmpty()) {
                 CircularProgressIndicator(Modifier.align(Alignment.Center))
             } else {
-                LazyColumn(
-                    state = listState,
+                PullToRefreshBox(
+                    isRefreshing = state.loadingHistory,
+                    onRefresh = vm::refresh,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    items(state.messages, key = { it.id }) { msg ->
-                        MessageBubble(msg, onCitationClick = vm::openCitation, onRetry = { vm.retry(msg.id) },
-                            onClarifyingSelect = vm::selectClarifyingMachine,
-                            onFeedback = { rating -> vm.submitFeedback(msg.id, rating) },
-                            onSave = { vm.saveAnswer(msg.id) },
-                            feedbackGiven = state.feedbackGiven[msg.id],
-                            saved = state.savedMessageIds.contains(msg.id))
-                    }
-                    state.pendingEcho?.let { echo ->
-                        item(key = "pending-${echo.id}") {
-                            PendingUserBubble(
-                                echo.content,
-                                sending = state.sending,
-                                uncertain = state.pendingEchoUncertain,
-                                onRetry = vm::retryPendingSend,
-                            )
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        items(state.messages, key = { it.id }) { msg ->
+                            MessageBubble(msg, onCitationClick = vm::openCitation, onRetry = { vm.retry(msg.id) },
+                                onClarifyingSelect = vm::selectClarifyingMachine,
+                                onFeedback = { rating -> vm.submitFeedback(msg.id, rating) },
+                                onSave = { vm.saveAnswer(msg.id) },
+                                feedbackGiven = state.feedbackGiven[msg.id],
+                                saved = state.savedMessageIds.contains(msg.id))
+                        }
+                        state.pendingEcho?.let { echo ->
+                            item(key = "pending-${echo.id}") {
+                                PendingUserBubble(
+                                    echo.content,
+                                    sending = state.sending,
+                                    uncertain = state.pendingEchoUncertain,
+                                    onRetry = vm::retryPendingSend,
+                                )
+                            }
                         }
                     }
                 }

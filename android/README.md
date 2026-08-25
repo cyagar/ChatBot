@@ -143,11 +143,13 @@ The existing administrator account also works and reaches the same screens
 
 ## Known correctness gaps worth fixing before showing this beyond an internal demo
 
-- No pull-to-refresh or explicit "reconnect and check" affordance for the
-  ambiguous "lost connection while sending" state described in
-  `ChatViewModel.send()` — it now has a one-tap "Retry" affordance that
-  safely reuses the same idempotency key (see "Handled during review" below),
-  but there's still no general pull-to-refresh anywhere else in the app.
+- ~~No pull-to-refresh anywhere in the app~~ **Added and verified live on the
+  Tab A9+ (2026-08-25).** See "Handled during review" below. The ambiguous
+  "lost connection while sending" state described in `ChatViewModel.send()`
+  still has its own dedicated one-tap "Retry" affordance instead (safely
+  reuses the same idempotency key) rather than being folded into the new
+  pull-to-refresh -- that state is about a specific in-flight send, not "the
+  list is stale," so a separate, scoped affordance stays the right fit.
 - ~~A code-level accessibility pass happened (2026-08-24); a device-verified
   one hasn't~~ **Partially closed out on the Tab A9+ (2026-08-25)** — see
   "Handled during review" below. Verified via the real accessibility node
@@ -239,6 +241,38 @@ The existing administrator account also works and reaches the same screens
 
 ## Handled during review (worth knowing about)
 
+- **Pull-to-refresh on Machines, History, and Chat (2026-08-25).** Added
+  `PullToRefreshBox` (Material3, stable in this project's compose-bom) around
+  the scrollable content of all three screens. `HistoryViewModel.refresh()`
+  and `ChatViewModel.refresh()` already existed (used for the initial load);
+  wired the same functions to the pull gesture. `MachinesViewModel` needed a
+  new `refresh()`, since neither of its existing load paths (`loadRecent()`,
+  private `search()`) was reusable as-is: `refresh()` re-runs whichever list
+  is currently on screen -- recents when the search box is blank, the active
+  search otherwise -- rather than always reloading recents, so pulling to
+  refresh mid-search doesn't silently discard the search. Uses its own
+  `refreshing` state field, separate from `loading` (which stays scoped to
+  the search-as-you-type spinner), so the two don't interfere. Three new
+  `MachinesViewModelTest` cases (refresh with blank query, refresh with an
+  active query, a failed refresh surfaces an error).
+
+  Each screen's centered "nothing to show yet" spinner is now gated on
+  `loading && list.isEmpty()` rather than `loading` alone -- otherwise every
+  refresh (pull or programmatic) would blank the whole list back to a bare
+  spinner instead of showing `PullToRefreshBox`'s own top indicator over the
+  still-visible stale content, which is the standard pattern and what a
+  technician would expect. This incidentally fixes a latent flicker in Chat:
+  `loadMessages()` is also called from two in-conversation paths (the
+  send-uncertainty recovery path, and after picking a clarifying machine),
+  and previously either would have blanked the entire message list for the
+  duration of that reload; now it doesn't, since `state.messages` is
+  non-empty by then.
+
+  Verified live on the Tab A9+ (2026-08-25): a swipe-down gesture on each of
+  the three screens fired the expected fresh request (confirmed via the
+  backend log) and re-rendered correctly, including a pull-to-refresh on
+  Machines while a search query was active, which correctly re-ran the
+  search (`GET /api/machines?q=...`) rather than switching back to recents.
 - **Conversation-history/resume screen (2026-08-25).** The backend's
   `GET /conversations` (P1-3) had no Android UI at all -- tapping a machine
   always started a new conversation, with no way back to a past one for the

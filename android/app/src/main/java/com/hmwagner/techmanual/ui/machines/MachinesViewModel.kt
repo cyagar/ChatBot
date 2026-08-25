@@ -14,6 +14,7 @@ data class MachinesUiState(
     val recent: List<MachineOut> = emptyList(),
     val results: List<MachineOut> = emptyList(),
     val loading: Boolean = false,
+    val refreshing: Boolean = false,
     val creatingConversation: Boolean = false,
     val error: String? = null,
 )
@@ -36,6 +37,42 @@ class MachinesViewModel : ViewModel() {
             } catch (_: Exception) {
                 // Recents are a convenience, not critical -- fail quietly and
                 // let the technician search instead.
+            }
+        }
+    }
+
+    /**
+     * Pull-to-refresh: re-runs whichever list is currently on screen (recents
+     * when the search box is blank, otherwise the active search) rather than
+     * always reloading recents -- pulling to refresh mid-search should
+     * refresh the search results, not silently discard them for the recent
+     * list. Unlike the quiet-failure `loadRecent()` above, a pull is a
+     * deliberate user action, so a failure here does surface an error.
+     */
+    fun refresh() {
+        viewModelScope.launch {
+            _state.value = _state.value.copy(refreshing = true, error = null)
+            val q = _state.value.query
+            try {
+                if (q.isBlank()) {
+                    val resp = ApiClient.service.recentMachines()
+                    if (resp.isSuccessful) {
+                        _state.value = _state.value.copy(recent = resp.body().orEmpty())
+                    } else {
+                        _state.value = _state.value.copy(error = "Couldn't refresh (code ${resp.code()}).")
+                    }
+                } else {
+                    val resp = ApiClient.service.searchMachines(query = q)
+                    if (resp.isSuccessful) {
+                        _state.value = _state.value.copy(results = resp.body().orEmpty())
+                    } else {
+                        _state.value = _state.value.copy(error = "Couldn't refresh (code ${resp.code()}).")
+                    }
+                }
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(error = "Can't reach the server. Check your connection.")
+            } finally {
+                _state.value = _state.value.copy(refreshing = false)
             }
         }
     }
