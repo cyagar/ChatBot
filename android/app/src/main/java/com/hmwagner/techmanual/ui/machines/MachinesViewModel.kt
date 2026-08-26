@@ -1,10 +1,14 @@
 package com.hmwagner.techmanual.ui.machines
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.CreateConversationRequest
 import com.hmwagner.techmanual.network.MachineOut
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -50,7 +54,15 @@ class MachinesViewModel : ViewModel() {
      * deliberate user action, so a failure here does surface an error.
      */
     fun refresh() {
-        viewModelScope.launch {
+        // Shares searchJob with onQueryChange() below (P0A-3): cancelling
+        // any pending/in-flight search before a pull-to-refresh avoids a
+        // wasted duplicate request for the same query, and -- the direction
+        // that actually matters -- lets a keystroke landing DURING a refresh
+        // cancel it in turn via the same searchJob?.cancel() there, instead
+        // of a slower refresh response landing after a newer search result
+        // and overwriting it.
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
             _state.value = _state.value.copy(refreshing = true, error = null)
             val q = _state.value.query
             try {
@@ -63,12 +75,17 @@ class MachinesViewModel : ViewModel() {
                     }
                 } else {
                     val resp = ApiClient.service.searchMachines(query = q)
+                    // Same staleness guard as search() below -- the query
+                    // could have changed while this request was in flight.
+                    if (_state.value.query != q) return@launch
                     if (resp.isSuccessful) {
                         _state.value = _state.value.copy(results = resp.body().orEmpty())
                     } else {
                         _state.value = _state.value.copy(error = "Couldn't refresh (code ${resp.code()}).")
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e // structured concurrency: never swallow a real cancellation
             } catch (_: Exception) {
                 _state.value = _state.value.copy(error = "Can't reach the server. Check your connection.")
             } finally {
@@ -77,24 +94,70 @@ class MachinesViewModel : ViewModel() {
         }
     }
 
-    fun onQueryChange(q: String) {
-        _state.value = _state.value.copy(query = q)
-        search(q)
+    // The one in-flight (or debouncing) search job, if any -- P0A-3: search()
+    // used to launch a brand new, uncancelled coroutine on every keystroke,
+    // so an older, slower response could land AFTER a newer one and silently
+    // overwrite its results with stale data. Cancelling the previous job
+    // before starting a new one closes that at the source; the query-match
+    // check inside search() below is a second, independent guard for the
+    // rare case a response is already in flight by the time cancel() lands.
+    private var searchJob: Job? = null
+
+    private companion object {
+        // Long enough to skip the request entirely for someone still
+        // actively typing, short enough not to feel unresponsive.
+        const val SEARCH_DEBOUNCE_MS = 300L
+        const val TAG = "MachinesViewModel"
     }
 
-    private fun search(q: String) {
-        viewModelScope.launch {
-            _state.value = _state.value.copy(loading = true, error = null)
+    fun onQueryChange(q: String) {
+        _state.value = _state.value.copy(query = q, error = null)
+        searchJob?.cancel()
+        if (q.isBlank()) {
+            // Matches existing behavior: a blank query shows `recent`, not
+            // `results` (see MachinesScreen), so there's nothing to search.
+            _state.value = _state.value.copy(loading = false)
+            return
+        }
+        // Immediate, not deferred until after the debounce delay below --
+        // the technician should see something happened right away, even
+        // though the actual request is intentionally delayed.
+        _state.value = _state.value.copy(loading = true)
+        searchJob = viewModelScope.launch {
             try {
-                val resp = ApiClient.service.searchMachines(query = q)
-                if (resp.isSuccessful) {
-                    _state.value = _state.value.copy(loading = false, results = resp.body().orEmpty())
-                } else {
-                    _state.value = _state.value.copy(loading = false, error = "Search failed (code ${resp.code()}).")
+                delay(SEARCH_DEBOUNCE_MS)
+                search(q)
+            } finally {
+                // If this job was cancelled before search() ran (e.g. by
+                // refresh() or a newer keystroke) it never got to clear
+                // `loading` itself. Only clear it here if a newer keystroke
+                // hasn't already claimed `loading` for its own query.
+                if (_state.value.query == q) {
+                    _state.value = _state.value.copy(loading = false)
                 }
-            } catch (_: Exception) {
-                _state.value = _state.value.copy(loading = false, error = "Can't reach the server. Check your connection.")
             }
+        }
+    }
+
+    private suspend fun search(q: String) {
+        try {
+            val resp = ApiClient.service.searchMachines(query = q)
+            // The technician may have kept typing while this request was in
+            // flight -- searchJob's own cancellation is the first line of
+            // defense, but this check is what actually prevents a response
+            // that was ALREADY in flight when a newer keystroke landed from
+            // overwriting that newer query's results (P0A-3).
+            if (_state.value.query != q) return
+            if (resp.isSuccessful) {
+                _state.value = _state.value.copy(loading = false, results = resp.body().orEmpty())
+            } else {
+                _state.value = _state.value.copy(loading = false, error = "Search failed (code ${resp.code()}).")
+            }
+        } catch (e: CancellationException) {
+            throw e // structured concurrency: never swallow a real cancellation
+        } catch (_: Exception) {
+            if (_state.value.query != q) return
+            _state.value = _state.value.copy(loading = false, error = "Can't reach the server. Check your connection.")
         }
     }
 
@@ -106,14 +169,42 @@ class MachinesViewModel : ViewModel() {
                 val resp = ApiClient.service.createConversation(CreateConversationRequest(machine.id))
                 if (resp.isSuccessful) {
                     val conv = resp.body()!!
-                    ApiClient.service.touchMachine(machine.id)
                     _state.value = _state.value.copy(creatingConversation = false)
                     onCreated(conv.id, conv.machine_label)
+                    // Best-effort and independently observable (P0A-3): this
+                    // used to be awaited HERE, before onCreated -- if it threw
+                    // (a network exception between the two calls), the whole
+                    // function's catch block reported total failure even
+                    // though the conversation was already committed
+                    // server-side, so it never opened AND a retry could
+                    // create a second, empty conversation for the same
+                    // machine. touchMachine is a recency/favorites
+                    // convenience, not part of the conversation itself -- its
+                    // failure must never block navigation to an already
+                    // -created conversation or turn it into a reported error.
+                    touchMachineBestEffort(machine.id)
                 } else {
                     _state.value = _state.value.copy(creatingConversation = false, error = "Couldn't start a conversation (code ${resp.code()}).")
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(creatingConversation = false, error = "Can't reach the server. Check your connection.")
+            }
+        }
+    }
+
+    private fun touchMachineBestEffort(machineId: Int) {
+        viewModelScope.launch {
+            try {
+                val resp = ApiClient.service.touchMachine(machineId)
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "touchMachine($machineId) failed: HTTP ${resp.code()}")
+                }
+            } catch (e: Exception) {
+                // Recency/favorites tracking only -- never blocks or reports
+                // failure on the conversation this was attached to, which
+                // has already opened by the time this runs. Logged (not
+                // silently swallowed) so it's independently observable.
+                Log.w(TAG, "touchMachine($machineId) failed", e)
             }
         }
     }

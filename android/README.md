@@ -598,6 +598,56 @@ The existing administrator account also works and reaches the same screens
   against; it needs its own fix (likely: disable sending a new question
   while one is genuinely uncertain/still-processing, not just while
   `sending`).
+- **P0A-3: removed three Android request-order/partial-success races.**
+  - `MachinesViewModel` used to launch a brand new, uncancelled coroutine on
+    every keystroke in the search box -- an older, slower response could
+    land after a newer one and silently overwrite its results with stale
+    data. `onQueryChange` now debounces (300ms, `SEARCH_DEBOUNCE_MS`),
+    cancels the previous `searchJob` before starting a new one, and
+    `search()`/`refresh()` both apply their response only if
+    `_state.value.query` still equals the query they were sent for -- the
+    debounce/cancellation are the first line of defense, the query-match
+    check is the actual backstop if a response was already in flight when a
+    newer keystroke landed.
+  - `selectMachine()` used to await `touchMachine()` *inside* the same try
+    block as `createConversation()`, before calling `onCreated` -- a network
+    exception there (a real one; confirmed via a throwaway diagnostic that
+    `Response<Unit>`'s converter never actually parses the body, so this
+    needs a genuine connection failure, not a bad response) reported total
+    failure even though the conversation was already committed server-side:
+    it never opened, and retrying could create a second, empty conversation
+    for the same machine. `onCreated` now fires immediately once
+    `createConversation` succeeds; `touchMachine` runs in its own detached,
+    best-effort coroutine (`touchMachineBestEffort`) that can never block
+    navigation or turn an already-committed conversation into a reported
+    error -- it's a recency/favorites convenience, not part of the
+    conversation itself. Its failure is logged (`Log.w`, tag
+    `MachinesViewModel`) rather than silently swallowed, so it's
+    independently observable rather than just "best-effort" in name only;
+    this needed `testOptions.unitTests.isReturnDefaultValues = true` in
+    `app/build.gradle.kts` so the unmocked `android.util.Log` call doesn't
+    throw in plain JVM unit tests.
+  - Chat refresh racing an in-flight send was already closed as part of
+    P0A-2 above (`loadMessages()`'s `sendInFlight` guard) -- this is the
+    same race P0A-3 names separately, not new work.
+  - Review caught a bug the four tests above didn't: `refresh()` cancelling a
+    still-debouncing search job (needed so a pull-to-refresh doesn't race a
+    stale search) could cancel that job *before* it ever reached `search()`
+    -- and `search()` was the only place that ever cleared `loading`, so the
+    spinner could get stranded on-screen forever even though the refresh
+    itself completed normally. Fixed with a `finally` block around the
+    debounced search that clears `loading` on cancellation too, guarded so a
+    newer keystroke's own `loading = true` is never clobbered by an older
+    job's cleanup.
+  - Covered by 5 new `MachinesViewModelTest` cases (13 total now, see below),
+    all confirmed to actually fail against the pre-fix code before being
+    kept. Two race tests are deterministic via a blocking `Dispatcher`/
+    `CountDownLatch`, the same pattern as `ChatViewModelTest`'s clarifying
+    -machine race test, not timing luck. The debounce itself needed an
+    explicit `TestCoroutineScheduler` passed to `UnconfinedTestDispatcher` in
+    the test class (`awaitState`/`awaitRequestCount` now call
+    `advanceUntilIdle()`) -- a bare `delay()` never resumes under the
+    default scheduler in a plain JUnit test with no `runTest {}` driving it.
 - **The clarifying-machine flow is now reachable**: "Not sure which machine?"
   on the machine picker starts a conversation with no machine selected, so
   asking a question exercises the server's real clarify-instead-of-guess path
@@ -738,12 +788,27 @@ a real Android `Context` a JVM unit test doesn't have):
 - `LoginViewModelTest` (4 tests): blank-credential validation short-circuits
   before any network call, successful login, wrong-password message, lost
   connection.
-- `MachinesViewModelTest` (8 tests): recent-machines load, search, selecting
+- `MachinesViewModelTest` (13 tests): recent-machines load, search, selecting
   a machine (conversation created + touched + label reported), starting
   without a machine (null label reported), a failed conversation creation,
-  and pull-to-refresh (blank query reloads recents, an active query
-  re-searches instead of reloading recents, and a failed refresh surfaces an
-  error).
+  pull-to-refresh (blank query reloads recents, an active query re-searches
+  instead of reloading recents, and a failed refresh surfaces an error), and
+  (P0A-3, all five confirmed to actually fail against the pre-fix code) five
+  more: search genuinely waits out its debounce before contacting the server
+  (via `takeRequest`'s own timeout, not an immediate `requestCount` read
+  racing the same call it's ruling out); rapid typing before the debounce
+  elapses fires only one request, for the final query; a slow response for
+  an older query can't overwrite a newer one's results (deterministic via a
+  blocking `Dispatcher`, same pattern as `ChatViewModelTest`'s clarifying
+  -machine race test); a `touchMachine` failure doesn't block navigation
+  or report the conversation as failed (needed `Connection: close` on the
+  preceding response to force a fresh connection -- a throwaway diagnostic
+  confirmed `Response<Unit>`'s converter never actually parses the body at
+  all, so only a real connection-level failure, not a malformed body, can
+  exercise this path; the same `Connection: close` need is already
+  documented on `ChatViewModelTest`'s network-failure-on-save test); and
+  (caught in review, not by the other four) `refresh()` cancelling a
+  still-debouncing search doesn't leave `loading` stuck true forever.
 - `HistoryViewModelTest` (4 tests): past conversations load on `refresh()`
   (no longer on `init{}` — `HistoryScreen`'s own `LaunchedEffect(Unit)` drives
   the first load so a retained instance still refreshes on re-entry), an

@@ -42,6 +42,13 @@ android {
         compose = true
         buildConfig = true
     }
+
+    testOptions {
+        // Lets android.util.Log (used for best-effort-failure visibility,
+        // e.g. MachinesViewModel.touchMachineBestEffort) return its default
+        // rather than throwing "not mocked" in plain JVM unit tests.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
