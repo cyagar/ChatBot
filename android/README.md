@@ -222,12 +222,18 @@ The existing administrator account also works and reaches the same screens
   measured defect, now fixed. **Still genuinely open:** whether the
   error-text live regions actually get announced by a screen reader —
   `uiautomator dump` doesn't surface Compose's `liveRegion` semantics
-  property at all, so this needs a human accessibility-service listening
-  session to confirm, not just a node-tree inspection. This device's own
-  spoken-feedback accessibility service must never be enabled
-  programmatically (over adb or otherwise) to check this — that makes the
-  physical device start speaking out loud unattended, which is disruptive
-  and not something to trigger remotely (found the hard way, 2026-08-25).
+  property at all, so confirming this would need a human listening session,
+  not a node-tree inspection. This device's own spoken-feedback
+  accessibility service must never be enabled programmatically (over adb or
+  otherwise) to check this — that makes the physical device start speaking
+  out loud unattended, which is disruptive and not something to trigger
+  remotely (found the hard way, 2026-08-25).
+  **Owner decision (2026-08-26): that listening session is waived and will
+  not be performed** — see `docs/OWNER_DECISION_GATE.md` section 12. This
+  item is therefore closed as *deliberately unverified*, not as verified.
+  The `liveRegion` markers are present in the Compose source and correct by
+  inspection; whether a screen reader actually voices them on this device
+  is knowingly untested.
 - ~~`LoginViewModel`, `MachinesViewModel`, and `ChatViewModel` are covered by
   unit tests now; `AppNav`'s session-expiry redirect and the screens
   themselves (Compose UI) are not~~ **`AppNav`'s session-expiry redirect had
@@ -877,15 +883,24 @@ The existing administrator account also works and reaches the same screens
       matrix above already exercises, so it wasn't expected to discriminate
       differently, but this wasn't independently confirmed.
     - **A human accessibility-service listening session** for focus order
-      (plan: "accessibility-node inspection alone is insufficient") cannot
-      be done from this environment -- this device's spoken-feedback
-      accessibility service must never be enabled programmatically (over
-      adb or otherwise); only a person listening can do this.
+      and live-region announcements (plan: "accessibility-node inspection
+      alone is insufficient") is **waived by owner decision, 2026-08-26** --
+      see `docs/OWNER_DECISION_GATE.md` section 12. It could never have been
+      done from this environment anyway (this device's spoken-feedback
+      service must never be enabled programmatically), but it is now
+      formally not going to happen rather than pending. Closed as
+      *deliberately unverified*: the semantics/`liveRegion` markers are
+      correct by code inspection, and the node tree was checked with
+      `uiautomator dump`, but nothing confirms what a screen reader
+      actually voices.
     - **At least one real phone**, per the plan's device list, was not
       tested -- no phone hardware is available in this environment, only
-      the Tab A9+.
-    P0A-5 is therefore still partial after this pass, with a smaller,
-    explicitly-named open set rather than a fully closed matrix.
+      the Tab A9+. This is the one item still genuinely pending rather
+      than waived.
+    P0A-5 is therefore still partial after this pass. Its remaining open
+    set is now just the real-phone run plus literal rotation/split-screen;
+    keyboard-open was since closed on-device (above), and the
+    accessibility listening session was waived rather than completed.
 - **The clarifying-machine flow is now reachable**: "Not sure which machine?"
   on the machine picker starts a conversation with no machine selected, so
   asking a question exercises the server's real clarify-instead-of-guess path
@@ -1139,10 +1154,13 @@ Requires a connected device or running emulator. Run with:
 Not covered yet: the Compose screens beyond the session-expiry redirect and
 the two `ChatScreenLayoutTest` layout cases above — everything else in the
 JVM suite is ViewModel-level. See the P0A-5 bullet above for the specific
-remaining gaps (a human accessibility-service session, a real phone, and
-literal device rotation/multi-window as opposed to the reasoned
-width-equivalence tested here) -- keyboard-open was since checked live on
-the Tab A9+, not simulated, and is no longer on this list.
+remaining gaps (a real phone, and literal device rotation/multi-window as
+opposed to the reasoned width-equivalence tested here). Two items that used
+to be on this list are off it for different reasons: keyboard-open was
+since checked live on the Tab A9+ (verified), and the human
+accessibility-service listening session was waived by owner decision
+(deliberately unverified, not verified) -- see
+`docs/OWNER_DECISION_GATE.md` section 12.
 
 ## Things I did that you should know about
 

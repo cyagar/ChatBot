@@ -147,6 +147,32 @@ retention window (days of point-in-time recovery) should be confirmed
 against their current published limits before this is treated as a firm
 guarantee, not assumed from this record.
 
+## 12. Accessibility listening session — waived (2026-08-26)
+
+**Decision:** The plan's P0A-5 requirement to "perform a human TalkBack
+session to verify error live-region announcements and logical focus order"
+(UpdatedNextSteps.txt line 266) will **not** be performed. Waived by the
+owner, consistent with the standing instruction that this fleet's devices
+are not to be made to speak aloud.
+
+**What this means, stated plainly rather than quietly dropped:** P0A-5's
+exit gate explicitly says "accessibility-node inspection alone is
+insufficient," so this item is closed as **deliberately unverified**, not
+as verified. What *is* known: the Compose `semantics`/`liveRegion` markers
+are present and correct by code inspection; the real on-device
+accessibility node tree was checked with `adb shell uiautomator dump`,
+which found and fixed a genuine touch-target defect and confirmed the
+citation chip doesn't double-read. What is **not** known: whether a screen
+reader actually voices the error live regions, and whether focus order is
+logical when driven by an accessibility service. If this app is ever put in
+front of a technician who relies on a screen reader, that gap is real and
+should be closed first.
+
+**Standing constraint, unchanged by this waiver:** no spoken-feedback
+accessibility service may be enabled programmatically (adb or otherwise) on
+these devices. The waiver removes the obligation to test; it does not
+authorize turning the service on.
+
 ---
 
 **Required output per the plan** ("version-controlled architecture,
