@@ -20,12 +20,14 @@ treated as the plan's own allowed fallback ("If there is no IdP, approve a
 temporary mobile token flow"); no SSO migration deadline is set at this
 scale.
 
-**Concrete implication for Phase 1:** the plan's Phase 1 deliverable "Implement
-Authorization Code with PKCE through the system browser/custom tab... Android
-Keystore-backed token storage" is **waived by this decision**, not merely
-deferred silently — Phase 1's actual scope, if pursued, excludes the
-OIDC/PKCE rework and keeps today's session-cookie auth. Revisit this decision
-explicitly if user count or an actual IdP later becomes available.
+**Apparent implication for Phase 1, not yet separately confirmed:** the
+plan's Phase 1 deliverable "Implement Authorization Code with PKCE through
+the system browser/custom tab... Android Keystore-backed token storage"
+looks like it no longer applies given this decision — but that is an
+inference drawn while writing this record, not something the owner was
+asked about directly. Phase 1's actual scope should confirm this explicitly
+before dropping the PKCE work, rather than treating it as already settled
+by decision #2 alone.
 
 ## 3. Cloud, region, and managed services
 
@@ -39,10 +41,12 @@ Concrete service selections:
   container.
 - **Database:** **Neon** (managed Postgres with pgvector support), not Cloud
   SQL — Cloud SQL has no perpetual free tier, so it doesn't fit the "near
-  -zero-cost" decision. Neon was chosen over Supabase specifically because
-  decision #2 keeps the existing auth system and #3 already covers object
-  storage separately — Supabase's bundled auth/storage would be unused
-  surface area.
+  -zero-cost" decision. This specific vendor pick (Neon over Supabase) was
+  an engineering recommendation made while writing this record, not put to
+  the owner as its own choice — the reasoning offered was that decision #2
+  keeps the existing auth system, so Supabase's bundled auth/storage would
+  be unused surface area. Flagged here in case it should be confirmed
+  explicitly rather than accepted by default.
 - **Object storage:** Google Cloud Storage (free-tier allowance).
 - **Secret manager:** Google Secret Manager.
 - **Telemetry:** Google Cloud Logging/Monitoring.
