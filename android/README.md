@@ -164,9 +164,16 @@ The existing administrator account also works and reaches the same screens
   adb to check this** — doing so makes the physical device start speaking
   out loud unattended, which is disruptive and not something to trigger
   remotely (found the hard way, 2026-08-25).
-- `LoginViewModel`, `MachinesViewModel`, and `ChatViewModel` are covered by
+- ~~`LoginViewModel`, `MachinesViewModel`, and `ChatViewModel` are covered by
   unit tests now; `AppNav`'s session-expiry redirect and the screens
-  themselves (Compose UI) are not.
+  themselves (Compose UI) are not~~ **`AppNav`'s session-expiry redirect now
+  has instrumented coverage, verified live on the Tab A9+ (2026-08-25).** See
+  "Instrumented (androidTest) coverage" below. Still genuinely open: the rest
+  of the Compose screens (Login/Machines/History/Chat) have no UI-level
+  assertions of their own, only the ViewModel unit tests underneath them —
+  this closed the one item that was actually untestable at the JVM-unit-test
+  layer (a real OkHttp interceptor pipeline needs a real Android Keystore),
+  not the full "every screen has Compose UI tests" gap.
 - ~~The Keystore-backed cookie encryption has not been verified on a physical
   device~~ **Verified live on the Tab A9+ (2026-08-24).** Installed this
   build directly over an existing pre-Keystore install that had an active
@@ -598,7 +605,7 @@ confidence this doesn't actually have. It's verified by `assembleDebug` and
 code audit only; see the accessibility bullet above for exactly which parts
 that does and doesn't cover.
 
-Three ViewModels have unit test coverage, all driven against a real
+Four ViewModels have unit test coverage, all driven against a real
 `MockWebServer` rather than a mocked `ApiService` (via
 `ApiClient.overrideServiceForTest`, a test-only seam — `init(context)` needs
 a real Android `Context` a JVM unit test doesn't have):
@@ -612,26 +619,73 @@ a real Android `Context` a JVM unit test doesn't have):
   physical device: confirm a session survives an app restart, and confirm
   installing this build over a pre-encryption install forces a clean
   re-login instead of crashing on the old plaintext data.
-- `ChatViewModelTest` (7 tests): correct user-then-assistant message
+- `ChatViewModelTest` (10 tests): correct user-then-assistant message
   ordering, the uncertain-pending-echo state, the clarifying-machine reload
   race (verified to actually fail against the pre-fix code before being
   kept), the feedback/save success+failure paths, `retryPendingSend()`
   reusing the original `Idempotency-Key` header rather than a fresh one, and
   a `409` triggering an automatic refresh that resolves the pending echo.
+  `ChatViewModel.refresh()` (what `ChatScreen`'s pull-to-refresh calls) has
+  no test of its own, but it's a thin wrapper around the same
+  `loadMessages()` every one of these tests already exercises via `init{}`,
+  so it has indirect coverage rather than a dedicated one.
 - `LoginViewModelTest` (4 tests): blank-credential validation short-circuits
   before any network call, successful login, wrong-password message, lost
   connection.
-- `MachinesViewModelTest` (5 tests): recent-machines load, search, selecting
+- `MachinesViewModelTest` (8 tests): recent-machines load, search, selecting
   a machine (conversation created + touched + label reported), starting
-  without a machine (null label reported), and a failed conversation
-  creation.
+  without a machine (null label reported), a failed conversation creation,
+  and pull-to-refresh (blank query reloads recents, an active query
+  re-searches instead of reloading recents, and a failed refresh surfaces an
+  error).
+- `HistoryViewModelTest` (4 tests): past conversations load on `refresh()`
+  (no longer on `init{}` — `HistoryScreen`'s own `LaunchedEffect(Unit)` drives
+  the first load so a retained instance still refreshes on re-entry), an
+  empty history isn't treated as an error, a failed load surfaces one, and a
+  second `refresh()` replaces the list rather than appending to it.
 
 Run with:
 ```
 .\gradlew.bat testDebugUnitTest
 ```
-Not covered yet: `AppNav`'s session-expiry redirect, and the Compose screens
-themselves (no UI/instrumented tests — everything above is ViewModel-level).
+
+### Instrumented (androidTest) coverage
+
+One thing the JVM unit tests above structurally can't reach: `AppNav`'s
+`sessionExpired` redirect (`AppNav.kt`, the `LaunchedEffect(sessionExpired)`
+block) is driven by `ApiClient`'s `authExpiryInterceptor`, a real OkHttp
+interceptor that only exists once `ApiClient.init`/`initForTest` has built the
+actual client pipeline — every ViewModel test above swaps in its own bare
+Retrofit+`MockWebServer` client via `overrideServiceForTest` instead and never
+wires that interceptor up at all, so this redirect had never actually been
+exercised by any test, only verified by hand on the tablet.
+
+`AppNavSessionExpiryTest` (2 tests, `android/app/src/androidTest/...`) closes
+that gap by running for real on-device: it logs in against a real
+`MockWebServer` instance (so `PersistentCookieJar` stores a real
+Keystore-encrypted session cookie, same as production), composes `AppNav`
+directly, then asserts that a 401 on the first authenticated request
+(`MachinesViewModel.init{}`'s `recentMachines()` call) redirects to the login
+screen and clears the session, while a 200 does not. This needed two small
+production-code additions, both scoped narrowly to test support:
+
+- `ApiClient.initForTest(context, baseUrl)` — `init(context)` is a one-shot
+  guarded by `::service.isInitialized`, and by the time a test runs,
+  `TechManualApp`'s real `Application.onCreate` has already called it against
+  the real `BuildConfig.BASE_URL`. `initForTest` rebuilds the whole pipeline
+  (fresh cookie jar included) against a test-supplied base URL instead.
+- `localhost`/`127.0.0.1` added to `network_security_config_debug.xml`'s
+  cleartext allowlist, alongside the existing dev-machine LAN IP and emulator
+  loopback alias — the on-device `MockWebServer` instance this test talks to
+  binds to loopback on the tablet itself, not the dev machine's LAN IP.
+
+Requires a connected device or running emulator. Run with:
+```
+.\gradlew.bat connectedDebugAndroidTest
+```
+Not covered yet: the Compose screens themselves beyond the session-expiry
+redirect above (no other UI/instrumented tests — everything else above is
+ViewModel-level).
 
 ## Things I did that you should know about
 

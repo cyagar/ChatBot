@@ -191,9 +191,19 @@ def _conversation_title(conn, conversation_id: int, stored_title: str | None) ->
 @router.get("/conversations", response_model=list[ConversationOut])
 def list_conversations(user: CurrentUser = Depends(get_current_user), limit: int = 20):
     with get_conn() as conn:
+        # create_conversation runs the moment a technician taps a machine (or
+        # "Not sure which machine?") -- before any question is typed, so the
+        # conversation row exists even if they back out without asking
+        # anything. Every real question always inserts the user's message
+        # first (ask_question, above), so "has at least one message" is
+        # exactly "a question was actually asked" -- excluding conversations
+        # with none keeps abandoned/empty ones out of History (reported live
+        # on the tablet, 2026-08-25).
         rows = conn.execute(
             "SELECT id, machine_id, title, started_at, updated_at FROM conversations "
-            "WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+            "WHERE user_id = ? AND EXISTS ("
+            "    SELECT 1 FROM messages WHERE messages.conversation_id = conversations.id"
+            ") ORDER BY updated_at DESC LIMIT ?",
             (user.id, limit),
         ).fetchall()
         out = []

@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -46,6 +48,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
@@ -214,6 +217,44 @@ private fun PendingUserBubble(text: String, sending: Boolean, uncertain: Boolean
     }
 }
 
+private val NUMBERED_LINE = Regex("""^(\d+)\.\s(.*)""")
+
+/**
+ * The backend emits a small, fixed markdown subset for assistant answers --
+ * claims as "- " bullets, then (if any steps) a literal "**Steps:**" header
+ * line followed by "N. " numbered lines (see parse_and_validate in
+ * base.py) -- never general Markdown. A plain Text(msg.content) showed that
+ * literally: raw "- " dashes and literal "**" asterisks around "Steps:",
+ * which is what looked bad. This renders that exact fixed shape instead of
+ * pulling in a full Markdown library for three line patterns.
+ */
+@Composable
+private fun FormattedAnswer(content: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (line in content.split("\n")) {
+            val numbered = NUMBERED_LINE.matchEntire(line)
+            when {
+                line.isBlank() -> Spacer(Modifier.height(4.dp))
+                line.startsWith("**") && line.endsWith("**") && line.length > 4 -> Text(
+                    line.removePrefix("**").removeSuffix("**"),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                line.startsWith("- ") -> Row {
+                    Text("•", modifier = Modifier.padding(end = 8.dp))
+                    Text(line.removePrefix("- "), modifier = Modifier.weight(1f))
+                }
+                numbered != null -> Row {
+                    Text("${numbered.groupValues[1]}.", modifier = Modifier.padding(end = 8.dp))
+                    Text(numbered.groupValues[2], modifier = Modifier.weight(1f))
+                }
+                else -> Text(line)
+            }
+        }
+    }
+}
+
 @Composable
 private fun MessageBubble(
     msg: MessageOut,
@@ -266,7 +307,7 @@ private fun MessageBubble(
                     }
                 }
 
-                Text(msg.content)
+                FormattedAnswer(msg.content)
 
                 if (msg.answer_status == "failed") {
                     TextButton(onClick = onRetry) { Text("Retry") }

@@ -47,7 +47,23 @@ object ApiClient {
 
     fun init(context: Context) {
         if (::service.isInitialized) return
+        build(context, BuildConfig.BASE_URL)
+    }
 
+    // Instrumented-test seam only: init(context) is a one-shot guarded by
+    // ::service.isInitialized, and by the time a test runs, TechManualApp's
+    // real Application.onCreate has already called it against the real
+    // BuildConfig.BASE_URL -- there's no way back in through init() alone.
+    // This rebuilds the whole pipeline (fresh cookie jar included) against a
+    // test-supplied base URL, e.g. a MockWebServer instance, so instrumented
+    // tests exercise the real authExpiryInterceptor rather than bypassing it
+    // the way overrideServiceForTest's JVM unit tests do.
+    fun initForTest(context: Context, baseUrl: String) {
+        _sessionExpired.value = false
+        build(context, baseUrl)
+    }
+
+    private fun build(context: Context, baseUrl: String) {
         cookieJar = PersistentCookieJar(context)
 
         val logging = HttpLoggingInterceptor().apply {
@@ -111,7 +127,7 @@ object ApiClient {
             .build()
 
         val retrofit = Retrofit.Builder()
-            .baseUrl(BuildConfig.BASE_URL)
+            .baseUrl(baseUrl)
             .client(okHttpClient)
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
