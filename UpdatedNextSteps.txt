@@ -1,0 +1,616 @@
+TECHNICIAN MANUAL ASSISTANT
+ANDROID PHONE AND TABLET NEXT-STEPS PLAN
+
+Updated: 26 August 2026
+Repository: https://github.com/cyagar/ChatBot
+Reviewed branch: master
+Reviewed commit: aa3d04363fc1d675dfca03cf0c035a5ed35a8d40
+Previous baseline: f8395416df13a5c1b67e064b793f9fd6b88704dc
+Primary users: Field technicians using Android phones and Samsung Galaxy Tab A9+
+Connectivity: Internet is required for AI answers.
+
+This document supersedes the 24 August 2026 rewrite plan and its 25 August
+phone-scope addendum. It records what is now implemented, what was independently
+verified in this review, and the work that should happen next. It is a delivery
+plan, not a claim that the present demo is production-ready.
+
+
+1. EXECUTIVE DECISION
+
+Keep the native Kotlin/Jetpack Compose Android application and continue toward
+the production architecture already selected in the original plan:
+
+- Android is the technician client for phones and tablets; no WebView.
+- A versioned Node.js/TypeScript API is the only public application service.
+- Python remains internal for RAG, provider validation, extraction, OCR, and
+  ingestion.
+- PostgreSQL/pgvector becomes the source of truth.
+- A durable queue plus transactional outbox owns answer and ingestion jobs.
+- Private object storage serves manuals and rendered evidence.
+- Redis or an equivalent managed service is used only for distributed limits,
+  locks, short-lived event delivery, and cache.
+- The administrator experience remains web-based. The current FastAPI/Jinja
+  admin may remain temporarily behind an agreed retirement date; Next.js is
+  still the target control plane.
+
+Do not discard the working Android vertical slice. Stabilize it first, freeze its
+behavior in tests, and then replace the temporary API/auth/storage boundaries one
+vertical path at a time.
+
+
+2. CURRENT IMPLEMENTATION AT THE REVIEWED COMMIT
+
+2.1 Native Android work completed
+
+- A native Kotlin/Compose application exists under android/; it is not a WebView.
+- The app implements sign-in, machine search, recent/favorite indicators,
+  conversation creation, chat, clarification, failed-answer retry, feedback,
+  saving, conversation history/resume, citations, evidence page images, and
+  pull-to-refresh.
+- Expanded windows use a two-pane machine/history plus chat layout. Narrower
+  windows use a single-pane flow. The decision is based on window width, not a
+  device-model check.
+- Warnings, revision conflicts, and no-answer states have distinct, non-color-only
+  presentation.
+- The session cookie is encrypted at rest with an Android Keystore AES-GCM key.
+- Question submission sends a stable per-turn Idempotency-Key, and a manual retry
+  reuses that key.
+- The repository documents live checks on a Galaxy Tab A9+, including rotation,
+  two-pane selection, session persistence, pull-to-refresh, history/resume, and
+  accessibility-node inspection.
+- There are 29 Android JVM test methods across cookie serialization and the login,
+  machine, history, and chat ViewModels.
+
+2.2 Backend work completed
+
+- The existing FastAPI backend remains the active API, PWA, and administrator
+  service.
+- SQLite migrations 0010 and 0011 add per-conversation question idempotency and a
+  unique saved-answer constraint.
+- Duplicate question keys cannot insert two user turns. A completed duplicate can
+  replay its original assistant response.
+- Message hydration now returns the current user's latest feedback rating and
+  saved status, allowing Android state to rehydrate after navigation/restart.
+- Conversation history/resume is exposed to Android.
+- Grounding validation now permits the selected machine's own name while still
+  rejecting unrelated unsupported identifier/material tokens.
+- Existing retrieval, approval, revision, ingestion, invitation, concurrency,
+  citation, prompt-injection, and provider-contract protections remain present.
+
+2.3 Work still explicitly in demo form
+
+- Android talks directly to unversioned /api FastAPI routes.
+- Authentication is a long-lived browser-style cookie, not OIDC/OAuth with PKCE.
+- Chat is one synchronous POST; there is no answer-attempt resource, outbox,
+  durable queue, status endpoint, or resumable event stream.
+- Data remains in SQLite and local object storage; scheduling and locks are
+  process-local.
+- There is no Node.js mobile API, PostgreSQL/pgvector deployment, managed queue,
+  Redis coordination layer, private production object storage, or Next.js admin.
+- Android has no Room/DataStore draft persistence, Hilt, generated API client,
+  build flavors, release endpoint, release signing pipeline, crash telemetry,
+  minimum-version enforcement, or instrumented UI tests.
+- minSdk 26, version 0.1.0-demo, and the release endpoint are placeholders.
+- The app has been exercised on a Galaxy Tab A9+, but not on a real Android phone.
+
+
+3. INDEPENDENT REVIEW EVIDENCE
+
+Repository state:
+
+- HEAD was clean at aa3d04363fc1d675dfca03cf0c035a5ed35a8d40.
+- The old plan's baseline was eight commits behind HEAD.
+- No release/baseline tag exists.
+- No .github/workflows CI configuration exists.
+- android/gradlew is committed as mode 100644, so ./gradlew fails on Unix-like
+  systems unless invoked through bash or its executable bit is fixed.
+
+Backend verification:
+
+- 283 tests were collected.
+- 275 tests passed in one clean run with the 7 real-embedding tests and 1 live
+  Google Drive sandbox test deliberately deselected.
+- The clean command completed in 120.94 seconds with one Starlette TestClient
+  deprecation warning.
+- Provider-contract setup inherited this review host's unavailable SOCKS proxy on
+  the first run. With ambient proxy variables cleared, all 23 provider-contract
+  tests passed. The suite should be isolated from host proxy state or explicitly
+  support the configured proxy dependency.
+- The 7 real-model tests were not run because the sentence-transformer/Torch model
+  stack and cache were unavailable. The live Drive test was not run because no
+  sandbox credentials were supplied.
+
+Android verification:
+
+- Source, Gradle configuration, manifests, ViewModels, screens, routes, tests, and
+  repository documentation were inspected.
+- Android tests/builds could not be independently rerun on this review host: the
+  repository requests a Gradle daemon JDK 25, the host started with JDK 17, and no
+  Android SDK was installed. Gradle's automatic external toolchain download was
+  unavailable to the Gradle process.
+- The plan therefore distinguishes repository-documented prior build/device
+  results from checks independently rerun during this review.
+- There are no androidTest/Compose instrumented test files.
+
+
+4. PHASE 0A -- FIX CURRENT DEMO BLOCKERS FIRST
+
+These are not long-term architecture items. They are correctness, privacy, and
+reproducibility gaps in the current Android demo and should be fixed before a
+wider technician demonstration.
+
+P0A-1. Enforce an account boundary and add logout
+
+Current evidence:
+
+- ApiService defines logout(), but the Android UI never calls it and exposes no
+  logout control.
+- AppNav redirects to login after a 401 but does not clear the activity-scoped
+  selected conversation ID/label.
+- A later login can therefore reopen the prior account's conversation ID/label
+  and may retain user-scoped screen state until the unauthorized reload fails.
+
+Required change:
+
+- Add a visible logout action reachable from every signed-in layout.
+- Call server logout when reachable, then always clear the local credential.
+- On logout, 401, account disablement, and successful login as a different user,
+  clear selected conversation, drafts, cached machines/history, evidence, and all
+  user-scoped ViewModels/repositories.
+- Validate the stored session through /me on launch instead of treating the mere
+  presence of a cookie as proof of a valid signed-in user.
+- Reject or redirect administrator accounts from the technician app unless the
+  owner explicitly approves admins using it.
+- Add tests for user A -> logout/expiry -> user B, including two-pane mode and a
+  previously open citation.
+
+Exit gate: No state, label, message, evidence, saved status, or selection from one
+account is visible after another account signs in.
+
+P0A-2. Correct the unresolved 409 answer state
+
+Current evidence:
+
+- The backend returns 409 when a duplicate idempotency key has a persisted user
+  turn but no assistant reply yet.
+- Android then refreshes messages.
+- ChatViewModel.loadMessages() unconditionally clears pendingEcho and
+  pendingEchoUncertain on any successful GET, even when the response contains only
+  the user turn. The retry/processing affordance can disappear while no answer
+  exists, especially after a server crash.
+- The existing 409 Android test only covers the favorable case where refresh
+  immediately returns an assistant answer.
+
+Required interim change:
+
+- Add a regression test where POST returns 409 and GET returns only the user turn.
+- Preserve an explicit "accepted/unknown or still processing" state and a manual
+  refresh action until an assistant result is present.
+- Ensure pull-to-refresh or an initial load cannot clear an in-flight local echo.
+- Do not create a new key or a second user turn.
+
+Permanent fix: Phase 2 must replace this ambiguous row-order inference with a
+durable answer-attempt resource and server-authoritative status.
+
+Exit gate: A dropped connection or server restart can never leave a question that
+looks complete, silently disappears, or loses its recoverable status.
+
+P0A-3. Remove Android request-order and partial-success races
+
+Current evidence:
+
+- MachinesViewModel starts an uncancelled search coroutine on every keystroke.
+  An older, slower response can overwrite results for the current query.
+- After createConversation succeeds, selectMachine awaits a separate touchMachine
+  call before navigating. If that secondary call throws, the conversation exists
+  server-side but Android reports total failure and does not open it; a retry can
+  create an extra empty conversation.
+- Chat refresh and send can run concurrently, while loadMessages clears pending
+  state without checking whether a send is active.
+
+Required change:
+
+- Debounce machine search, cancel the prior search job, and apply results only if
+  their query still equals the current query.
+- Make recent-machine recording part of successful conversation creation on the
+  server, or navigate immediately after creation and make touch best-effort and
+  independently observable.
+- Serialize or merge chat refresh/send state so refresh cannot erase an in-flight
+  or uncertain question.
+- Add deterministic delayed-response tests for all three races.
+
+Exit gate: Stale responses cannot replace current results, and a secondary
+analytics/convenience failure cannot turn a committed conversation into a visible
+failure.
+
+P0A-4. Fix navigation and evidence failure handling
+
+Current evidence:
+
+- Routes.chat() interpolates machineLabel directly into a navigation query string.
+  Real model labels contain reserved characters such as "/"; future labels may
+  contain "&", "?", or "%".
+- Citation evidence requests silently close/fall through on non-2xx responses or
+  exceptions; no useful error or retry is shown.
+
+Required change:
+
+- Prefer passing only conversationId and loading its machine label from the
+  server. If a label remains a route argument, URI-encode and decode it.
+- Model evidence as loading/success/error, check isSuccessful before body(), and
+  offer retry without losing the citation context.
+- Add route tests with AJ/AJX-style labels and evidence tests for 401, 403, 404,
+  500, timeout, and image-load failure.
+
+Exit gate: All valid machine labels navigate correctly, and evidence failures are
+honest, recoverable, and accessible.
+
+P0A-5. Make compact-phone and large-text layouts genuinely safe
+
+Current evidence:
+
+- Clarifying choices, citation chips, and Helpful/Incorrect/Save actions use plain
+  Rows that do not wrap or scroll.
+- These can overflow at 360-430dp phone widths, with long model/manual names, or
+  under large font scaling.
+- No real phone or instrumented screenshot/accessibility suite has verified the
+  expanded device requirement.
+
+Required change:
+
+- Use FlowRow, responsive stacking, or horizontal scrolling as appropriate.
+- Keep warning text and primary repair actions visible before secondary actions.
+- Test 360dp, 411dp, Medium tablet, Expanded tablet, portrait, landscape,
+  split-screen, 200 percent font scale, display scaling, keyboard open, and long
+  localized-like strings.
+- Perform a human TalkBack session to verify error live-region announcements and
+  logical focus order; accessibility-node inspection alone is insufficient.
+- Test at least one real phone plus the lowest-spec Galaxy Tab A9+ fleet unit.
+
+Exit gate: No clipping, unreachable action, horizontal truncation, or focus-order
+failure exists in the supported matrix.
+
+P0A-6. Repair build, credential, and documentation hygiene
+
+Current evidence:
+
+- The public repository includes a plaintext demo credential in android/README.
+- The debug API host is a hardcoded LAN address and the release endpoint is
+  https://CHANGE-ME.invalid/.
+- gradlew lacks its Unix executable bit.
+- The Gradle daemon JDK 25 requirement and Android SDK 37 requirement are not
+  documented as developer/CI prerequisites.
+- android/README contains stale/contradictory statements: an early section says no
+  physical-device run occurred, while later sections document multiple live Tab
+  A9+ verifications; its Android test counts are also outdated.
+
+Required change:
+
+- Remove the committed demo password, rotate/delete that account anywhere it was
+  seeded, and replace manual SQL seeding with a repeatable dev-only script or
+  environment-controlled fixture.
+- Commit gradlew as executable and document the exact supported Android Studio,
+  daemon JDK, Android SDK, and build commands; remove accidental host-specific
+  toolchain criteria if they are not intentional.
+- Add development, staging, and production endpoint configuration without source
+  edits or hardcoded personal LAN addresses. Release builds must fail when no real
+  HTTPS endpoint is configured.
+- Update Android documentation to one truthful current-state section.
+- Tag the reviewed baseline before the next implementation series.
+- Isolate mocked provider tests from ambient proxy settings or explicitly install
+  and test the supported proxy transport.
+
+Exit gate: A fresh developer/CI environment can build and test from documented
+inputs; no known credential or placeholder endpoint can ship.
+
+
+5. OWNER DECISION GATE
+
+Make and record these decisions before Phase 1 exits. The Android vertical slice
+has now made enough progress that the previously deferred production architecture
+decision should be revisited explicitly.
+
+1. Confirm that the next milestone is a production-capable pilot, not continued
+   expansion of the temporary FastAPI/SQLite demo.
+2. Select the enterprise identity provider and claim/group mapping. If there is no
+   IdP, approve a temporary mobile token flow and an SSO migration deadline.
+3. Select cloud, region, PostgreSQL/pgvector service, queue, object storage, Redis
+   equivalent, secret manager, telemetry platform, backup policy, and owners.
+4. Confirm whether Google Drive remains the manual source of truth.
+5. Define BYOD versus company-managed scope. Personal phones cannot assume the
+   same Knox/fully-managed controls as company tablets; define work-profile,
+   screenshot/copy/share, local-cache, remote-revocation, and offboarding policy.
+6. Inventory the real tablet fleet and supported phone OS range before finalizing
+   minSdk.
+7. Decide whether the PWA remains a tested fallback and for how long.
+8. Decide how to remediate the 71 grandfather-approved manuals and assign the
+   reviewers. Production release cannot silently treat bulk migration approval as
+   evidence of individual review.
+
+Required output: version-controlled architecture, identity, data-retention,
+device-management, and corpus-approval decision records with named owners.
+
+
+6. PHASE 1 -- VERSIONED CONTRACT, AUTHENTICATION, AND ANDROID FOUNDATION
+
+Deliverables:
+
+- Define /api/v1/mobile in an OpenAPI contract and publish it in CI.
+- Standardize safe errors: code, display message, correlation ID, retryability,
+  field errors, and HTTP status.
+- Add GET /config and GET /me with maintenance state, feature flags, minimum
+  supported version, role/capabilities, support link, and safe status text.
+- Add stable cursor pagination for machines, history, messages, and saved answers.
+- Return UTC ISO-8601 timestamps with offsets.
+- Bootstrap the Node.js/TypeScript public API and keep Python services private.
+- Implement Authorization Code with PKCE through the system browser/custom tab,
+  short-lived access tokens, rotating refresh tokens, revocation, logout, disabled
+  users, clock skew, and Android Keystore-backed token storage.
+- Add Android development/staging/production variants, Hilt, repository
+  boundaries, and a generated or contract-tested API model layer.
+- Keep the first slice narrow: authenticate, call /me, search/select one eligible
+  machine, and display a traceable request ID.
+
+Tests:
+
+- OpenAPI compatibility and generated-client compilation.
+- Expired/revoked/reused refresh token; disabled user; invalid issuer/audience;
+  IdP cancel; device clock skew; logout elsewhere; account switch.
+- Server-side machine eligibility: API callers cannot select a machine with no
+  approved/current manual merely because the UI filtered it out.
+- Minimum-version and maintenance-mode behavior.
+
+Exit gate: A clean staging Android install signs in with the approved identity
+flow, calls the versioned API, and reaches one eligible machine without cookie
+auth, hardcoded hosts, or privileged secrets.
+
+
+7. PHASE 2 -- POSTGRESQL, DURABLE ANSWER ATTEMPTS, AND RECONNECT
+
+Deliverables:
+
+- Migrate the required vertical-slice tables to PostgreSQL: users/identity map,
+  machines, approvals, documents/chunks, conversations/messages, answer_attempts,
+  citations, idempotency, feedback/saves, outbox, and audit records.
+- Create answer_attempt with explicit queued/running/completed/failed/cancelled
+  states, retry lineage, timestamps, and terminal error codes.
+- Require a valid Idempotency-Key on question creation; bind it to user,
+  operation, and request fingerprint. Reject missing, blank, malformed, or reused
+  keys with a different payload.
+- Commit user message, attempt, and outbox row in one PostgreSQL transaction.
+- Process jobs through a durable queue. Persist every authoritative status/event.
+- Return 202 with messageId, attemptId, status URL, and event URL.
+- Add resumable Server-Sent Events with event IDs, heartbeat, bounded stream life,
+  and a final event; status polling remains authoritative.
+- Make retry create a new auditable attempt for the same user turn without a
+  duplicate message. Preserve prior attempt metadata.
+- On Android, persist draft, conversation ID, attempt ID, and last event ID using
+  SavedStateHandle/Room/DataStore as appropriate. Reattach after rotation, process
+  death, app restart, or network change without resubmitting the question.
+- Support honest cancellation semantics: stopping display is distinct from safely
+  cancelling server work.
+
+Tests:
+
+- Duplicate taps, concurrent duplicate keys, same key/different payload, commit
+  before queue outage, worker crash, API restart, queue delay, provider timeout,
+  stream drop, duplicate/out-of-order events, process death, and reconnect after
+  completion.
+- Assert exactly one user turn and one original attempt for one accepted key.
+- Assert an incomplete stream is never rendered as a verified final answer.
+
+Exit gate: Every server-accepted question has a recoverable authoritative attempt;
+there is no 409 dead end and no client-side inference from adjacent message rows.
+
+
+8. PHASE 3 -- ANDROID FEATURE PARITY AND FIELD USABILITY
+
+Deliverables:
+
+- Add favorite/unfavorite controls; the current app only displays favorite state.
+- Add a saved-answers screen, unsave, and return-to-source-conversation flow.
+- Add an explicit change-machine/new-conversation flow with confirmation; never
+  silently change the machine for an existing repair context.
+- Add server-paginated/searchable history beyond the current first 20 rows.
+- Build a full authenticated manual viewer at the cited page with zoom, pan, page
+  navigation, revision identity, loading/error states, and policy-compliant cache.
+  The current one-page image bottom sheet is evidence preview, not a full viewer.
+- Persist unsent drafts and minimal non-sensitive state. Do not cache manuals or
+  answers beyond the approved device/BYOD policy.
+- Add standard offline, weak-connection, maintenance, authorization, retrieval,
+  provider, timeout, and no-answer states.
+- Add Compose UI/instrumented tests, screenshot tests, accessibility tests,
+  macrobenchmarks, and a Baseline Profile.
+- Verify real phones and tablets, including the lowest-memory tablet, rotation,
+  split-screen, keyboard, low storage, process death, VPN/proxy, and DeX if used.
+
+Optional after the field pilot:
+
+- Voice input after noisy-room testing.
+- QR/barcode identification only after an authoritative asset-to-model mapping.
+
+Exit gate: Technician-facing behavior retained from the PWA is present, accessible,
+recoverable, and verified on the approved phone/tablet matrix.
+
+
+9. PHASE 4 -- CORPUS, OBJECT STORAGE, ADMIN, AND DATA MIGRATION
+
+Deliverables:
+
+- Move original manuals and rendered pages to private encrypted object storage;
+  authorize every evidence/file request and use authenticated streaming or
+  short-lived delivery.
+- Build a version-controlled Drive manifest keyed by Drive ID, SHA-256, document
+  version, review state, and replacement/supersession relation.
+- Resolve the grandfather-approved corpus through an owner-approved review and
+  quarantine process; add two-person review for ambiguous/high-risk documents.
+- Add safe source-disappearance reconciliation: quarantine only after a complete,
+  successful listing proves removal; never infer deletion from an outage/partial
+  listing.
+- Turn pipeline-version detection into tested re-extraction/re-chunking/
+  re-embedding tooling that preserves review history and supports rollback.
+- Add explicit revision-chain/supersession workflow.
+- Migrate conversations, messages, citations, feedback, saved answers, approvals,
+  ingestion/audit history, and legacy IDs with counts/checksums/mapping reports.
+- Rebuild embeddings with an approved, pinned model/pipeline version.
+- Move admin control to Next.js or formally retain the existing admin temporarily
+  with a compatibility plan and retirement date.
+- Rehearse backup, point-in-time restore, migration, rollback, and corpus rebuild.
+
+Exit gate: Migration and restore reports reconcile; every retrievable document is
+approved/current, source-traceable, and recoverable.
+
+
+10. PHASE 5 -- CI/CD, SECURITY, OBSERVABILITY, AND RELEASE ENGINEERING
+
+CI requirements:
+
+- Backend formatting/lint/type checks, fast tests on every change, model-backed
+  retrieval tests in a prepared environment, and a separately gated live Drive
+  sandbox job.
+- Android formatting/lint, JVM tests, debug/release assembly, Compose/instrumented
+  tests, screenshots, dependency checks, and generated-client compatibility.
+- Secret scanning, dependency/container scanning, SBOM, license review, signed
+  artifacts, migration checks, and reproducible environment documentation.
+- Resolve the TestClient deprecation warning before its replacement becomes a
+  breaking upgrade; use dependency automation rather than ad hoc upgrades.
+
+Operations requirements:
+
+- Correlation IDs across Android -> Node API -> outbox/queue -> Python RAG -> AI
+  provider -> persisted attempt.
+- Redacted crash/ANR and service telemetry. Do not send questions, answers, manual
+  text, tokens, or proprietary identifiers to routine analytics.
+- Alerts for auth failures, attempt latency/stuck states, queue depth, provider
+  failures, no-answer rate, evidence delivery, corpus freshness, ingestion errors,
+  backup failures, and minimum-version adoption.
+- Controlled signing keys and managed Google Play tracks: development, internal,
+  pilot, staged production.
+- Incident runbooks for identity compromise, lost device, provider outage,
+  ingestion failure, data restore, and rollback.
+
+Exit gate: A signed staging release is built by CI, installed through the approved
+channel, observable end to end, and recoverable through tested runbooks.
+
+
+11. PHASE 6 -- PHYSICAL-DEVICE PILOT AND CUTOVER
+
+Deliverables:
+
+- Pilot across real phones and Galaxy Tab A9+ units, representative Android/One UI
+  versions, cases/gloves, sites, machines, Wi-Fi/cellular, VPN, and weak signal.
+- Measure task completion, selected-machine recognition, warning recognition,
+  citation access, first progress, first content, final answer, reconnect, crash,
+  ANR, no-answer, and support rates without logging protected content.
+- Keep the PWA as a controlled fallback only if its real-browser, offline cache,
+  logout/account-switch, and authorization-transition matrix is tested.
+- Roll out in rings: engineering, operations, representative technicians, broader
+  fleet/BYOD population.
+- Preserve a tested rollback endpoint/app version and stabilization window.
+
+Exit gate: Technician representative, product, security, and operations approve
+the evidence; no P0/P1 issue is open; rollback remains available.
+
+
+12. RELEASE-BLOCKING BACKEND AND CORPUS ITEMS THAT MUST NOT DISAPPEAR
+
+Track these explicitly even when the Android team is focused elsewhere:
+
+- The 71-document grandfather approval and unreconstructible historical Drive
+  source pairing require a business-approved remediation and published mapping.
+- Backup/restore has not been rehearsed.
+- Multi-user concurrent load has not been measured; SQLite is not a multi-replica
+  production database.
+- In-process ingestion scheduling/jobs do not survive crashes or coordinate
+  replicas.
+- Automatic pipeline reprocessing and revision supersession are incomplete.
+- Source deletion/quarantine reconciliation is incomplete.
+- OpenAI live-provider behavior, generative revision-conflict behavior, OCR quality
+  at scale, and real legacy .doc quality remain unverified.
+- Short unsupported bare-code queries can return low-information but honestly cited
+  passages; add a focused evaluation set before changing thresholds.
+- If the PWA is retained as fallback, its browser UI, service worker, offline cache,
+  account disablement, shared-device account switch, and retry controls require
+  real-browser verification.
+
+
+13. REQUIRED TESTS FOR THE NEXT ANDROID CHANGE SET
+
+Add these before expanding features:
+
+1. Account A state is absent after logout/401 and Account B login.
+2. POST 409 plus GET containing only the persisted user turn stays visibly pending.
+3. Pull-to-refresh during send cannot clear the pending idempotency key/question.
+4. A slow old machine-search response cannot replace a newer query's results.
+5. createConversation success plus touchMachine failure still opens exactly the
+   committed conversation and does not create a duplicate on retry.
+6. Machine labels with slash, ampersand, percent, space, and Unicode navigate.
+7. Evidence 401/403/404/500/timeout/image failure shows an accessible retry state.
+8. Clarification/citation/action controls fit compact portrait at 200 percent text.
+9. Session expiry while a citation sheet is open returns to a clean login state.
+10. Logout remains safe when the server is unreachable.
+
+
+14. RECOMMENDED IMPLEMENTATION ORDER
+
+Change set 1 -- Current demo safety:
+
+- P0A-1 through P0A-5 with their regression tests.
+- Remove/rotate the committed demo credential.
+- Update Android documentation to match reality.
+
+Change set 2 -- Reproducible delivery:
+
+- Fix Gradle wrapper/toolchain/endpoint configuration.
+- Add CI for backend and Android deterministic checks.
+- Tag the audited baseline.
+
+Change set 3 -- Decision records and contract:
+
+- Close the identity, device/BYOD, hosting, corpus-review, and PWA-fallback
+  decisions.
+- Publish /api/v1/mobile OpenAPI and error/config/me contracts.
+
+Change set 4 -- One production vertical slice:
+
+- OIDC/PKCE -> approved machine -> idempotent question -> PostgreSQL attempt ->
+  outbox/queue -> Python grounded answer -> resumable event/status -> citation.
+- Demonstrate it on one real phone and one Galaxy Tab A9+.
+
+Change sets 5+ -- Expand only from the proven slice:
+
+- Complete Android parity, corpus migration, admin migration, observability,
+  release engineering, and pilot gates in sections 8-11.
+
+
+15. BUILDER RULES
+
+1. Do not call the present app production-ready because it builds or works on one
+   tablet.
+2. Do not delete or weaken a safety/concurrency test to make a migration pass.
+3. Treat server state as authoritative for identity, machine scope, approval,
+   revision, attempts, citations, and final-answer status.
+4. Never place AI keys, database/Drive/object-storage credentials, manuals,
+   embeddings, or an on-device model in the APK.
+5. Never infer a machine switch silently.
+6. Never render a partial stream as a verified answer.
+7. Every feature change includes its failure, account-switch, accessibility, and
+   process-death behavior where applicable.
+8. Every migration has reconciliation and rollback evidence.
+9. Every release claim is supported by CI output, a staging trace, a migration or
+   restore report, or a physical-device checklist/recording.
+10. Stop for owner input at the decision gate; do not invent identity, retention,
+    BYOD, cache, or corpus-approval policy.
+
+
+16. PLANNING RANGE
+
+The native demo reduces product-discovery risk, but it does not materially remove
+the production identity, data, durable-job, migration, security, CI/CD, or pilot
+work. Keep the original 12-18 week range as an initial planning band for a small,
+experienced cross-functional team from decision closure through a limited pilot;
+re-estimate after Phase 1 and the durable vertical slice. This is not a delivery
+promise.
+
+
+END OF UPDATED PLAN
