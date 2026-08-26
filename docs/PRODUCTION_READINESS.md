@@ -1520,6 +1520,36 @@ done than it is.
       finding itself (bare-thread concurrency tests in this suite are weaker
       evidence than they look) is recorded rather than silently fixed
       everywhere.
+- **Phase 1 (narrowed scope, 2026-08-26 -- see docs/OWNER_DECISION_GATE.md
+      section 9 for why it's narrowed: no new Node.js/TS service, no OAuth/
+      PKCE, no Android refactor) is implemented against the existing FastAPI
+      app.** `GET /api/config` (new, public): maintenance state, feature
+      flags, minimum supported version, support contact, and a status/
+      status_message derived from the same corpus-staleness check
+      `GET /api/admin/ingestion/status` already used. `GET /api/auth/me`
+      gains `capabilities`, mechanically derived from role (lists exactly
+      what `require_admin` already gates, not a new permission layer). Every
+      error response now carries `code`/`message`/`correlation_id`/
+      `retryable`/`field_errors`/`status` (`app/api/errors.py`) alongside the
+      original `detail` string, kept unchanged in meaning since
+      `app/web/static/js/app.js` and `admin.js` already read `body.detail`.
+      Every timestamp response field is now ISO-8601 with an explicit UTC
+      offset (`app/api/common.py`'s `iso_utc()`) instead of SQLite's bare
+      `'YYYY-MM-DD HH:MM:SS'`. Stable cursor pagination
+      (`app/api/pagination.py`) was added to machines/recent-machines/
+      history/messages/saved-answers via `X-Next-Cursor`/`X-Has-More`
+      response headers, not a body-shape change, so no existing client
+      (Android or the web UI) needed updating. `backend/openapi.json` is a
+      committed, regeneratable (`scripts/export_openapi.py`) snapshot of the
+      live schema -- "published" here means version-controlled and
+      diffable, not served from a separate versioned route namespace, since
+      no new service was authorized; `tests/unit/test_openapi_contract.py`
+      fails if it goes stale, as the proportionate stand-in for "CI checks
+      it" until CI itself exists (change set 2, not built yet).
+      Every new/changed response shape was checked against both existing
+      consumers (grepped the Android app and the web UI's JS) before
+      committing -- none of this needed a client-side change. Full backend
+      suite: 305 passed (was 283 entering this item).
 
 ## Documented substitutions (functional, not the plan's first-choice stack)
 

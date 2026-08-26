@@ -20,6 +20,10 @@ data/manuals_incoming/*
 # Google service-account credentials (Drive ingestion) -- a private key file,
 # same trust tier as backend/.env. Never commit.
 backend/*.json
+# Phase 1's published OpenAPI contract (scripts/export_openapi.py) is not a
+# secret -- it's meant to be committed and diffed, unlike everything else
+# this rule blocks.
+!backend/openapi.json
 .claude/
 .idea/
 _pipcheck/

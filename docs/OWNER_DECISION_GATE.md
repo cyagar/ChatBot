@@ -127,6 +127,11 @@ pagination for machines/history/messages/saved answers, UTC ISO-8601
 timestamps with offsets, and publishing an OpenAPI contract for the
 existing FastAPI routes — done against the current app, not a new one.
 
+**All five items above are implemented (2026-08-26, commits `826811b`,
+`6fc65f3`, and the OpenAPI-contract commit that follows this record's own
+update)** — see the new "Phase 1" bullet in `docs/PRODUCTION_READINESS.md`
+for the detailed accounting. Phase 1 (narrowed scope) is done.
+
 ## 11. Backup and data-retention policy (2026-08-26)
 
 **Decision:** Rely on Neon's built-in backup/point-in-time-recovery on its

@@ -1,0 +1,3905 @@
+{
+  "components": {
+    "schemas": {
+      "CitationOut": {
+        "properties": {
+          "chunk_id": {
+            "title": "Chunk Id",
+            "type": "integer"
+          },
+          "document_id": {
+            "title": "Document Id",
+            "type": "integer"
+          },
+          "excerpt": {
+            "title": "Excerpt",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "page_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Number"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "section_heading": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Heading"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "chunk_id",
+          "document_id",
+          "filename",
+          "title",
+          "page_number",
+          "section_heading",
+          "revision",
+          "excerpt"
+        ],
+        "title": "CitationOut",
+        "type": "object"
+      },
+      "ConfigOut": {
+        "properties": {
+          "feature_flags": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Feature Flags",
+            "type": "object"
+          },
+          "maintenance_message": {
+            "title": "Maintenance Message",
+            "type": "string"
+          },
+          "maintenance_mode": {
+            "title": "Maintenance Mode",
+            "type": "boolean"
+          },
+          "minimum_supported_version": {
+            "title": "Minimum Supported Version",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "status_message": {
+            "title": "Status Message",
+            "type": "string"
+          },
+          "support_contact": {
+            "title": "Support Contact",
+            "type": "string"
+          }
+        },
+        "required": [
+          "maintenance_mode",
+          "maintenance_message",
+          "feature_flags",
+          "minimum_supported_version",
+          "support_contact",
+          "status",
+          "status_message"
+        ],
+        "title": "ConfigOut",
+        "type": "object"
+      },
+      "ConversationOut": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "machine_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Id"
+          },
+          "machine_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Label"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "machine_id",
+          "machine_label",
+          "title",
+          "started_at",
+          "updated_at"
+        ],
+        "title": "ConversationOut",
+        "type": "object"
+      },
+      "CreateConversationRequest": {
+        "properties": {
+          "machine_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Id"
+          }
+        },
+        "title": "CreateConversationRequest",
+        "type": "object"
+      },
+      "DocumentOut": {
+        "properties": {
+          "doc_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doc Number"
+          },
+          "doc_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doc Type"
+          },
+          "file_type": {
+            "title": "File Type",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "ingested_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingested At"
+          },
+          "is_current_revision": {
+            "title": "Is Current Revision",
+            "type": "boolean"
+          },
+          "machine_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Machine Ids",
+            "type": "array"
+          },
+          "machines": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Machines",
+            "type": "array"
+          },
+          "manufacturer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manufacturer"
+          },
+          "needs_reprocessing": {
+            "title": "Needs Reprocessing",
+            "type": "boolean"
+          },
+          "original_filename": {
+            "title": "Original Filename",
+            "type": "string"
+          },
+          "page_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Count"
+          },
+          "review_status": {
+            "title": "Review Status",
+            "type": "string"
+          },
+          "reviewed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed At"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "status_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Reason"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "id",
+          "original_filename",
+          "file_type",
+          "status",
+          "status_reason",
+          "manufacturer",
+          "doc_type",
+          "title",
+          "revision",
+          "doc_number",
+          "page_count",
+          "is_current_revision",
+          "machines",
+          "machine_ids",
+          "ingested_at",
+          "review_status",
+          "reviewed_at",
+          "needs_reprocessing"
+        ],
+        "title": "DocumentOut",
+        "type": "object"
+      },
+      "DocumentReviewRequest": {
+        "properties": {
+          "decision": {
+            "pattern": "^(approved|rejected)$",
+            "title": "Decision",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "DocumentReviewRequest",
+        "type": "object"
+      },
+      "FeedbackRequest": {
+        "properties": {
+          "comment": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          },
+          "rating": {
+            "pattern": "^(helpful|incorrect|missing_info)$",
+            "title": "Rating",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rating"
+        ],
+        "title": "FeedbackRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "InvitationCreate": {
+        "properties": {
+          "email": {
+            "format": "email",
+            "title": "Email",
+            "type": "string"
+          },
+          "expires_in_hours": {
+            "default": 72,
+            "maximum": 720.0,
+            "minimum": 1.0,
+            "title": "Expires In Hours",
+            "type": "integer"
+          },
+          "role": {
+            "default": "technician",
+            "pattern": "^(technician|administrator)$",
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "InvitationCreate",
+        "type": "object"
+      },
+      "InvitationOut": {
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
+          },
+          "used_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used At"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "created_at",
+          "expires_at",
+          "used_at",
+          "revoked_at"
+        ],
+        "title": "InvitationOut",
+        "type": "object"
+      },
+      "LinkReviewRequest": {
+        "properties": {
+          "decision": {
+            "pattern": "^(approved|rejected)$",
+            "title": "Decision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "LinkReviewRequest",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "email": {
+            "format": "email",
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "MessageIn": {
+        "properties": {
+          "content": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "MessageIn",
+        "type": "object"
+      },
+      "MessageOut": {
+        "properties": {
+          "answer_status": {
+            "default": "completed",
+            "title": "Answer Status",
+            "type": "string"
+          },
+          "citations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CitationOut"
+            },
+            "title": "Citations",
+            "type": "array"
+          },
+          "clarifying_options": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Clarifying Options",
+            "type": "array"
+          },
+          "conflict_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conflict Note"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "feedback_rating": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback Rating"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_clarifying_question": {
+            "title": "Is Clarifying Question",
+            "type": "boolean"
+          },
+          "is_no_answer": {
+            "title": "Is No Answer",
+            "type": "boolean"
+          },
+          "is_saved": {
+            "default": false,
+            "title": "Is Saved",
+            "type": "boolean"
+          },
+          "retry_count": {
+            "default": 0,
+            "title": "Retry Count",
+            "type": "integer"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "safety_warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Safety Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "content",
+          "is_clarifying_question",
+          "is_no_answer",
+          "created_at"
+        ],
+        "title": "MessageOut",
+        "type": "object"
+      },
+      "MetadataCorrection": {
+        "properties": {
+          "doc_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doc Type"
+          },
+          "is_current_revision": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Current Revision"
+          },
+          "machine_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Ids"
+          },
+          "manufacturer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manufacturer Name"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "MetadataCorrection",
+        "type": "object"
+      },
+      "PendingLinkOut": {
+        "properties": {
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "integer"
+          },
+          "manufacturer": {
+            "title": "Manufacturer",
+            "type": "string"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "review_status": {
+            "title": "Review Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "machine_id",
+          "model_name",
+          "manufacturer",
+          "confidence",
+          "review_status"
+        ],
+        "title": "PendingLinkOut",
+        "type": "object"
+      },
+      "QueryTestRequest": {
+        "properties": {
+          "include_superseded": {
+            "default": false,
+            "title": "Include Superseded",
+            "type": "boolean"
+          },
+          "machine_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Id"
+          },
+          "question": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          },
+          "top_k": {
+            "default": 6,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "title": "QueryTestRequest",
+        "type": "object"
+      },
+      "RegisterRequest": {
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "email": {
+            "format": "email",
+            "title": "Email",
+            "type": "string"
+          },
+          "invite_token": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Invite Token",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 72,
+            "minLength": 8,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password",
+          "invite_token"
+        ],
+        "title": "RegisterRequest",
+        "type": "object"
+      },
+      "ReviewQueueDocumentOut": {
+        "properties": {
+          "doc_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doc Type"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "ingested_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ingested At"
+          },
+          "links": {
+            "items": {
+              "$ref": "#/components/schemas/PendingLinkOut"
+            },
+            "title": "Links",
+            "type": "array"
+          },
+          "manufacturer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manufacturer"
+          },
+          "original_filename": {
+            "title": "Original Filename",
+            "type": "string"
+          },
+          "review_status": {
+            "title": "Review Status",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "id",
+          "original_filename",
+          "doc_type",
+          "manufacturer",
+          "title",
+          "status",
+          "review_status",
+          "ingested_at",
+          "links"
+        ],
+        "title": "ReviewQueueDocumentOut",
+        "type": "object"
+      },
+      "SavedAnswerOut": {
+        "properties": {
+          "answer": {
+            "$ref": "#/components/schemas/MessageOut"
+          },
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "integer"
+          },
+          "machine_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Label"
+          },
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question"
+          }
+        },
+        "required": [
+          "conversation_id",
+          "machine_label",
+          "question",
+          "answer"
+        ],
+        "title": "SavedAnswerOut",
+        "type": "object"
+      },
+      "SetMachineRequest": {
+        "properties": {
+          "machine_id": {
+            "title": "Machine Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "machine_id"
+        ],
+        "title": "SetMachineRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "app__api__routes_admin__MachineOut": {
+        "properties": {
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "manufacturer": {
+            "title": "Manufacturer",
+            "type": "string"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "manufacturer",
+          "model_name",
+          "family"
+        ],
+        "title": "MachineOut",
+        "type": "object"
+      },
+      "app__api__routes_admin__UserOut": {
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_disabled": {
+            "title": "Is Disabled",
+            "type": "boolean"
+          },
+          "last_login_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Login At"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "display_name",
+          "is_disabled",
+          "created_at",
+          "last_login_at"
+        ],
+        "title": "UserOut",
+        "type": "object"
+      },
+      "app__api__routes_machines__MachineOut": {
+        "properties": {
+          "document_count": {
+            "title": "Document Count",
+            "type": "integer"
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_favorite": {
+            "default": false,
+            "title": "Is Favorite",
+            "type": "boolean"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "machine_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Type"
+          },
+          "manufacturer": {
+            "title": "Manufacturer",
+            "type": "string"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "manufacturer",
+          "model_name",
+          "family",
+          "machine_type",
+          "document_count"
+        ],
+        "title": "MachineOut",
+        "type": "object"
+      },
+      "app__auth__routes__UserOut": {
+        "properties": {
+          "capabilities": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "display_name"
+        ],
+        "title": "UserOut",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Technician Manual Assistant",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "index__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Index"
+      }
+    },
+    "/admin": {
+      "get": {
+        "operationId": "admin_page_admin_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Admin Page"
+      }
+    },
+    "/api/admin/documents": {
+      "get": {
+        "operationId": "list_documents_api_admin_documents_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status_filter",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status Filter"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_deactivated",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Deactivated",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DocumentOut"
+                  },
+                  "title": "Response List Documents Api Admin Documents Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Documents",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/documents/{document_id}": {
+      "patch": {
+        "operationId": "correct_metadata_api_admin_documents__document_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MetadataCorrection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Correct Metadata",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/documents/{document_id}/deactivate": {
+      "post": {
+        "operationId": "deactivate_document_api_admin_documents__document_id__deactivate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reason",
+            "required": false,
+            "schema": {
+              "default": "Deactivated by administrator.",
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Deactivate Document",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/documents/{document_id}/machines/{machine_id}/review": {
+      "post": {
+        "operationId": "review_document_machine_link_api_admin_documents__document_id__machines__machine_id__review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "machine_id",
+            "required": true,
+            "schema": {
+              "title": "Machine Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Document Machine Link",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/documents/{document_id}/review": {
+      "post": {
+        "description": "Independent follow-up review P0-2 (2026-08-24 follow-up): approving a\nreplacement is the cutover point, not ingestion. `_ingest_one` deliberately\nleaves the document a replacement is superseding active (deactivated_at\nIS NULL) so a pending or rejected replacement never takes a manual away\nfrom technicians. Approving the replacement here is what atomically\nretires whatever else is still active at the same source_ref -- one\nSQLite transaction, so there's never a moment with either zero or two\napproved documents live at that source_ref.\n\nP1-6 (2026-08-24 independent follow-up review, \"concurrent ... approval\n... and promotion tests\"): the review_status UPDATE below used to carry\nno WHERE-clause guard against a concurrent supersession, relying only on\nthe SELECT above -- a separate, unguarded read -- to have already\nconfirmed `deactivated_at IS NULL`. Two admins approving two DIFFERENT\npending replacement candidates at the SAME source_ref concurrently could\nboth pass that initial SELECT before either committed, then both writes\nwould proceed: the second admin's UPDATE would set\nreview_status='approved' on a document the FIRST admin's supersede step\nhad just deactivated, producing an \"approved but deactivated\" row, and\nthat second admin's own supersede step would then deactivate the FIRST\nadmin's candidate too -- leaving ZERO active approved documents at that\nsource_ref, the exact failure mode P0-2 already fixed for the\ningestion-time deactivation, reintroduced here at the approval layer\ninstead. The UPDATE now re-checks `deactivated_at IS NULL` as part of\nthe same atomic write (the same claim-UPDATE pattern used everywhere\nelse in this codebase): the losing concurrent approval sees rowcount 0\nand gets a clean 404, exactly as if it had raced the SELECT and lost\nthere.",
+        "operationId": "review_document_api_admin_documents__document_id__review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Document",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/duplicates": {
+      "get": {
+        "operationId": "list_duplicates_api_admin_duplicates_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Duplicates",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/feedback": {
+      "get": {
+        "operationId": "list_feedback_api_admin_feedback_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Feedback",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/ingestion/reindex": {
+      "post": {
+        "description": "Independent follow-up review 2026-08-24 P0-6: the ingestion_runs row\nused to be created inside ingest_all(), which only executes once this\nBackgroundTask actually runs -- after this response is already sent. If\nthe process restarted in that gap, an admin who was told a run started\nwould see no evidence one ever was. The row is now created here,\nsynchronously, before the 202 goes out.",
+        "operationId": "trigger_reindex_api_admin_ingestion_reindex_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trigger Reindex",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/ingestion/runs": {
+      "get": {
+        "operationId": "list_ingestion_runs_api_admin_ingestion_runs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Ingestion Runs",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/ingestion/runs/{run_id}/report": {
+      "get": {
+        "description": "The plan's required ingestion report: every source file as indexed,\nduplicate, partially processed, failed, or unsupported, with a reason.",
+        "operationId": "get_ingestion_report_api_admin_ingestion_runs__run_id__report_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Ingestion Report",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/ingestion/status": {
+      "get": {
+        "description": "P1-4: \"visible last-success timestamp/source snapshot\" and a\nstale-corpus alert against the configured operational SLA, so freshness\ndoesn't depend on an admin remembering to check the run list and do the\nstaleness math themselves.",
+        "operationId": "get_ingestion_status_api_admin_ingestion_status_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Ingestion Status",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/invitations": {
+      "get": {
+        "operationId": "list_invitations_api_admin_invitations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InvitationOut"
+                  },
+                  "title": "Response List Invitations Api Admin Invitations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Invitations",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "operationId": "create_invitation_api_admin_invitations_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvitationCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Invitation",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/invitations/{invitation_id}/revoke": {
+      "post": {
+        "operationId": "revoke_invitation_api_admin_invitations__invitation_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "invitation_id",
+            "required": true,
+            "schema": {
+              "title": "Invitation Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Invitation",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/machines": {
+      "get": {
+        "description": "Every machine in the catalog, unlike GET /api/machines which only\nreturns machines that already have a document linked \u2014 an admin fixing a\ndocument's association needs to be able to pick a machine that has zero\n(or wrong) links today.",
+        "operationId": "list_all_machines_api_admin_machines_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/app__api__routes_admin__MachineOut"
+                  },
+                  "title": "Response List All Machines Api Admin Machines Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List All Machines",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/query-test": {
+      "post": {
+        "operationId": "query_test_api_admin_query_test_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Query Test",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/review-queue": {
+      "get": {
+        "description": "Every active document that either isn't approved itself, or has at\nleast one non-approved (pending/rejected) machine link -- the second half\nmatters even for an already-approved document, since a re-index can\npropose a *new* link on an existing approved document at any time.",
+        "operationId": "review_queue_api_admin_review_queue_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReviewQueueDocumentOut"
+                  },
+                  "title": "Response Review Queue Api Admin Review Queue Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Queue",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/unanswered": {
+      "get": {
+        "description": "Questions the system explicitly could not answer (is_no_answer=1 on the\nassistant's reply), most recent first \u2014 surfaces gaps in manual coverage.",
+        "operationId": "frequently_unanswered_api_admin_unanswered_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Frequently Unanswered",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/users": {
+      "get": {
+        "operationId": "list_users_api_admin_users_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/app__api__routes_admin__UserOut"
+                  },
+                  "title": "Response List Users Api Admin Users Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Users",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/users/{user_id}/disable": {
+      "post": {
+        "operationId": "disable_user_api_admin_users__user_id__disable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disable User",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/users/{user_id}/enable": {
+      "post": {
+        "operationId": "enable_user_api_admin_users__user_id__enable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Enable User",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "operationId": "login_api_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/app__auth__routes__UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "operationId": "logout_api_auth_logout_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "operationId": "me_api_auth_me_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/app__auth__routes__UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Me",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/register": {
+      "post": {
+        "description": "Independent follow-up review P0-5: public self-registration used to let\nanyone become administrator by winning a race to register first, and any\nother email through unconditionally once domain-restricted. Registration\nnow requires a valid, unexpired, unused, email-bound invitation issued by\nan existing administrator (POST /api/admin/invitations) -- there is no\npath from an anonymous request to an account anymore. The very first\nadministrator is created by scripts/bootstrap_admin.py, not this endpoint.\n\nP1-6 (2026-08-24 independent follow-up review, \"concurrent ...\ninvitation ... tests\"): the invite used to be consumed with a\ncheck-then-act read (the `used_at is not None` check below) followed by\nan unconditional UPDATE at the end -- two requests racing on the SAME\ninvite token both read used_at=NULL and both proceeded to INSERT a user,\nrelying entirely on users.email's UNIQUE constraint to stop the second\none. That constraint does stop a duplicate account, but the loser's\nINSERT raised an unhandled sqlite3.IntegrityError instead of the same\nclean 403 every other invitation-rejection path returns. The invite is\nnow claimed atomically, before any user row is touched, via the same\nclaim-UPDATE pattern used everywhere else in this codebase for exactly\nthis reason (conversations.pending_message_id, messages.answer_status):\nonly a request that flips used_at from NULL to non-NULL proceeds.",
+        "operationId": "register_api_auth_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/app__auth__routes__UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/config": {
+      "get": {
+        "operationId": "get_config_api_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Config",
+        "tags": [
+          "config"
+        ]
+      }
+    },
+    "/api/conversations": {
+      "get": {
+        "operationId": "list_conversations_api_conversations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConversationOut"
+                  },
+                  "title": "Response List Conversations Api Conversations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Conversations",
+        "tags": [
+          "chat"
+        ]
+      },
+      "post": {
+        "operationId": "create_conversation_api_conversations_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConversationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Conversation",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/conversations/{conversation_id}/machine": {
+      "post": {
+        "description": "The ONLY way a conversation's machine is set once clarification is\nneeded, or changed later (\"Change machine\"). This is always an explicit,\nconfirmed technician action -- never inferred from a later message body,\nwhich is what let a conversation's machine silently drift in the reviewed\nversion (concern #5/#6).\n\nIf a clarifying question is pending (the technician asked something\nbefore the machine was known), confirming the machine here resumes and\nanswers that ORIGINAL stored question -- it does not require the caller\nto resubmit it as a new user turn (P1-8). The resumed answer is\ngenerated and persisted as usual; this endpoint's own response stays\nConversationOut either way, so the caller reloads\nGET /conversations/{id}/messages to see it, the same as after any other\nanswer.",
+        "operationId": "set_conversation_machine_api_conversations__conversation_id__machine_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMachineRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Conversation Machine",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/conversations/{conversation_id}/messages": {
+      "get": {
+        "operationId": "get_messages_api_conversations__conversation_id__messages_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MessageOut"
+                  },
+                  "title": "Response Get Messages Api Conversations  Conversation Id  Messages Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Messages",
+        "tags": [
+          "chat"
+        ]
+      },
+      "post": {
+        "operationId": "ask_question_api_conversations__conversation_id__messages_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessageIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ask Question",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/conversations/{conversation_id}/messages/{message_id}/retry": {
+      "post": {
+        "description": "Independent follow-up review 2026-08-24 P1-1: \"Retry still resends the\nprevious user question as a new message... creating another user turn\nand provider/retrieval attempt.\" app.js's retry button used to call\nsendQuestion() with the original question text, which is exactly that --\na second user turn plus a second, unrelated assistant message, doubling\nboth the visible history and the billable provider call for what the\ntechnician experiences as one logical retry.\n\nThis regenerates and updates the SAME failed assistant message in place\n(no new user turn, no new assistant message) -- the original question is\nlooked up server-side from the preceding user message, never resent by\nthe client, the same \"resume the stored question\" pattern P1-8 already\nuses for pending-clarification resumption. Idempotent via the same\nclaim-UPDATE pattern as conversations.pending_message_id: only a request\nthat successfully flips answer_status from 'failed' to 'retrying'\nproceeds to call the provider, so a double-tap on the retry button can\ntrigger at most one provider call, not two concurrent ones.",
+        "operationId": "retry_answer_api_conversations__conversation_id__messages__message_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Answer",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/machines": {
+      "get": {
+        "description": "Autocomplete search across model name, family, and manufacturer. Only\nmachines that actually have at least one indexed, approved, current\ndocument (with an approved link) are returned -- otherwise the picker\nwould offer a machine that then dead-ends into \"no manuals\" the moment\nretrieval applies its own approval/revision filters (independent\nfollow-up review P0-6, P1-6). The eligibility rules here are deliberately\nthe same set retrieval enforces, including the current-revision rule\n(P1-11): a machine whose only manual is superseded has nothing\nretrievable and must not appear.\n\nRequires auth: the equipment catalog is proprietary to the deployment\n(concern #20 -- this endpoint leaked it to unauthenticated requests).",
+        "operationId": "search_machines_api_machines_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/app__api__routes_machines__MachineOut"
+                  },
+                  "title": "Response Search Machines Api Machines Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Machines",
+        "tags": [
+          "machines"
+        ]
+      }
+    },
+    "/api/machines/recent": {
+      "get": {
+        "description": "Applies the exact same eligibility rules and `HAVING document_count > 0`\nas `search_machines()` above -- a machine a technician favorited or\nrecently used, whose only manual has since been deactivated/unapproved/\nsuperseded, is dropped rather than shown with `document_count: 0`\n(independent follow-up review P1-6's \"apply the rules consistently to\nsearch and recent machines\": found, during this pass, that this endpoint\nwas missing the `HAVING` clause `search_machines()` already had, so a\ndead manual could resurface here even though the picker correctly hid\nit). The tradeoff is explicit: a favorited-but-now-empty machine\ndisappears from recents instead of dead-ending into \"no manuals\" --\nconsistent with what the picker already does, not a new UX decision.",
+        "operationId": "recent_machines_api_machines_recent_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/app__api__routes_machines__MachineOut"
+                  },
+                  "title": "Response Recent Machines Api Machines Recent Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recent Machines",
+        "tags": [
+          "machines"
+        ]
+      }
+    },
+    "/api/machines/{machine_id}/favorite": {
+      "post": {
+        "operationId": "set_favorite_api_machines__machine_id__favorite_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "machine_id",
+            "required": true,
+            "schema": {
+              "title": "Machine Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "favorite",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Favorite",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Favorite",
+        "tags": [
+          "machines"
+        ]
+      }
+    },
+    "/api/machines/{machine_id}/touch": {
+      "post": {
+        "operationId": "touch_recent_api_machines__machine_id__touch_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "machine_id",
+            "required": true,
+            "schema": {
+              "title": "Machine Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Touch Recent",
+        "tags": [
+          "machines"
+        ]
+      }
+    },
+    "/api/manuals/{document_id}/chunks/{chunk_id}/evidence": {
+      "get": {
+        "description": "Backs the 'View manual evidence' expandable panel: the exact excerpt text\nplus (for PDFs) a link to the rendered page image.\n\nGated on review_status='approved' for everyone except administrators, same\nas get_manual_file -- this is a second path to full chunk content (concern #6).",
+        "operationId": "get_evidence_api_manuals__document_id__chunks__chunk_id__evidence_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "chunk_id",
+            "required": true,
+            "schema": {
+              "title": "Chunk Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Evidence",
+        "tags": [
+          "manuals"
+        ]
+      }
+    },
+    "/api/manuals/{document_id}/file": {
+      "get": {
+        "description": "Serves the raw file. The frontend appends #page=N (browser-native PDF\nnavigation, supported by Chrome/Edge/Safari, including iPadOS) to deep-link\nto the cited page without needing a bundled PDF.js viewer.\n\nGated on review_status='approved' for everyone except administrators --\nthe raw file and evidence endpoints are a second path to document content\nthat must honor the same P0-6 approval boundary as retrieval, not just be\nreachable via an old citation or a guessed document id (concern #6).",
+        "operationId": "get_manual_file_api_manuals__document_id__file_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Manual File",
+        "tags": [
+          "manuals"
+        ]
+      }
+    },
+    "/api/manuals/{document_id}/pages/{page_number}/image": {
+      "get": {
+        "operationId": "get_page_image_api_manuals__document_id__pages__page_number__image_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "page_number",
+            "required": true,
+            "schema": {
+              "title": "Page Number",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Page Image",
+        "tags": [
+          "manuals"
+        ]
+      }
+    },
+    "/api/messages/{message_id}/feedback": {
+      "post": {
+        "operationId": "submit_feedback_api_messages__message_id__feedback_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Feedback",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/messages/{message_id}/save": {
+      "post": {
+        "operationId": "save_answer_api_messages__message_id__save_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Answer",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/saved-answers": {
+      "get": {
+        "description": "P1-3 (2026-08-24 independent follow-up review): a saved-answer view is\nuseless without knowing which conversation/machine/question it came from\n-- MessageOut alone (the old response shape) carries none of that. Each\nentry now also names which conversation it can be resumed from, so the\nUI can offer \"Open conversation\" rather than showing an orphaned answer.",
+        "operationId": "list_saved_answers_api_saved_answers_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SavedAnswerOut"
+                  },
+                  "title": "Response List Saved Answers Api Saved Answers Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Saved Answers",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz"
+      }
+    },
+    "/manifest.webmanifest": {
+      "get": {
+        "operationId": "manifest_manifest_webmanifest_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Manifest"
+      }
+    },
+    "/service-worker.js": {
+      "get": {
+        "operationId": "service_worker_service_worker_js_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Service Worker"
+      }
+    }
+  }
+}
