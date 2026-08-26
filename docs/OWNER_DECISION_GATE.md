@@ -127,16 +127,24 @@ pagination for machines/history/messages/saved answers, UTC ISO-8601
 timestamps with offsets, and publishing an OpenAPI contract for the
 existing FastAPI routes — done against the current app, not a new one.
 
-## 10. Still open
+## 11. Backup and data-retention policy (2026-08-26)
 
-- **Backup/retention policy** (from decision #3) — not decided.
-- **Data-retention generally** — plan section 5's required output names
-  this explicitly; it was never one of the plan's eight numbered items and
-  has not been decided in any pass so far.
+**Decision:** Rely on Neon's built-in backup/point-in-time-recovery on its
+free tier (typically a few days of restore window) rather than a separate
+backup mechanism. No separate data-retention policy for conversation/
+message content — kept indefinitely, since there's no compliance driver
+requiring deletion at this scale.
+
+**What this does NOT cover:** an actual account-offboarding data policy
+(what happens to a departed technician's conversation history) was not
+asked about separately and isn't decided here. Neon's exact free-tier
+retention window (days of point-in-time recovery) should be confirmed
+against their current published limits before this is treated as a firm
+guarantee, not assumed from this record.
 
 ---
 
 **Required output per the plan** ("version-controlled architecture,
 identity, data-retention, device-management, and corpus-approval decision
-records with named owners") is this file — except data-retention, see
-section 10 above.
+records with named owners") is this file in full, including
+data-retention — see section 11 above.
