@@ -853,17 +853,24 @@ The existing administrator account also works and reaches the same screens
       paths a real rotation or split-screen would hit. That is a reasoned
       equivalence backed by code inspection and real width coverage, not a
       device observation of rotation or multi-window itself.
-    - **Keyboard open** is genuinely different in kind (a height, not
-      width, change) and isn't simulated at all. `Composer`'s `Row`
-      already has `.imePadding()` alongside `.navigationBarsPadding()`
-      (added earlier for an unrelated gesture-nav overlap bug, confirmed
-      live on this tablet), and the manifest sets
-      `windowSoftInputMode="adjustResize"` -- the pieces that should make
-      this correct are present, but real on-device IME behavior (does the
-      composer/send button actually stay visible above a real keyboard)
-      was not exercised this pass, deliberately: a test that fakes an IME
-      appearing would be worse than no test, since it could pass without
-      proving anything.
+    - **Keyboard open: now checked for real (2026-08-26, later pass, Tab A9+
+      reconnected).** `Composer`'s `Row` already has `.imePadding()`
+      alongside `.navigationBarsPadding()`, and the manifest sets
+      `windowSoftInputMode="adjustResize"`. Confirmed live, not simulated:
+      tapped the composer to bring up the tablet's real on-screen keyboard
+      (`adb shell dumpsys window InputMethod` showed `mHasSurface=true
+      isReadyForDisplay()=true` -- a genuine IME surface, not assumed from
+      the manifest setting alone), and compared the composer/send button's
+      `uiautomator`-dumped bounds before and after: before, the composer sat
+      at the bottom of the 1920px-tall screen (bounds bottom 1830/1812);
+      with the keyboard open, both moved up to bottom 1284/1266 -- fully
+      above the keyboard, not clipped or hidden. The send button at its new
+      position was then actually tapped (not just visually confirmed) as
+      part of a live end-to-end chat round trip in the same session, which
+      succeeded. This closes the one specific worry this bullet used to
+      flag -- that the composer/send button might not actually stay visible
+      above a real keyboard -- though it's still just this one
+      screen/device/keyboard combination, not the full matrix.
     - **Display scaling** (Android's separate "screen zoom" density
       setting, distinct from font scale) was not tested as its own axis --
       it shares the same density/measurement plumbing the font-scale
@@ -1132,9 +1139,10 @@ Requires a connected device or running emulator. Run with:
 Not covered yet: the Compose screens beyond the session-expiry redirect and
 the two `ChatScreenLayoutTest` layout cases above — everything else in the
 JVM suite is ViewModel-level. See the P0A-5 bullet above for the specific
-remaining gaps (keyboard-open, a human accessibility-service session, a
-real phone, and literal device rotation/multi-window as opposed to the
-reasoned width-equivalence tested here).
+remaining gaps (a human accessibility-service session, a real phone, and
+literal device rotation/multi-window as opposed to the reasoned
+width-equivalence tested here) -- keyboard-open was since checked live on
+the Tab A9+, not simulated, and is no longer on this list.
 
 ## Things I did that you should know about
 
