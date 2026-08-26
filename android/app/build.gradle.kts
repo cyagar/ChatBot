@@ -1,8 +1,35 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
 }
+
+// P0A-6: BASE_URL used to be a hardcoded personal LAN IP checked into git,
+// with no way to change it without editing this file and rebuilding. Now
+// read from local.properties (already gitignored -- see local.properties.example
+// for the keys) or an environment variable of the same name, so a per-developer
+// or CI endpoint never needs a source edit or a commit.
+val localProperties = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
+fun resolveBaseUrl(propertyKey: String, envVar: String, default: String): String =
+    (System.getenv(envVar) ?: localProperties.getProperty(propertyKey) ?: default).trim()
+
+// No real device/emulator reaches a personal LAN IP by default, so debug
+// falls back to the emulator's host-loopback alias -- works out of the box
+// for anyone using an emulator; a physical device needs one local.properties
+// line (see README "Configuring the backend endpoint").
+val debugBaseUrl = resolveBaseUrl(
+    "techManual.baseUrl.debug", "TECHMANUAL_BASE_URL_DEBUG", "http://10.0.2.2:8000/"
+)
+val releaseBaseUrlPlaceholder = "https://CHANGE-ME.invalid/"
+val releaseBaseUrl = resolveBaseUrl(
+    "techManual.baseUrl.release", "TECHMANUAL_BASE_URL_RELEASE", releaseBaseUrlPlaceholder
+)
 
 android {
     namespace = "com.hmwagner.techmanual"
@@ -22,14 +49,15 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
-            // Dev backend reachable over plain HTTP on the local network; see
-            // src/debug/res/xml/network_security_config_debug.xml for the
-            // matching cleartext exception, which only applies to this build type.
-            buildConfigField("String", "BASE_URL", "\"http://192.168.1.71:8000/\"")
+            // Dev backend reachable over plain HTTP; src/debug/res/xml/
+            // network_security_config_debug.xml permits cleartext broadly
+            // for this build type only, so any dev-machine LAN IP or
+            // hostname works here without also editing that file.
+            buildConfigField("String", "BASE_URL", "\"$debugBaseUrl\"")
         }
         release {
             isMinifyEnabled = false
-            buildConfigField("String", "BASE_URL", "\"https://CHANGE-ME.invalid/\"")
+            buildConfigField("String", "BASE_URL", "\"$releaseBaseUrl\"")
         }
     }
 
@@ -49,6 +77,27 @@ android {
         // rather than throwing "not mocked" in plain JVM unit tests.
         unitTests.isReturnDefaultValues = true
     }
+}
+
+// Fails a release build with no real HTTPS endpoint configured, instead of
+// silently shipping the https://CHANGE-ME.invalid/ placeholder. Registered
+// as its own task and wired in via dependsOn (not a check inline in the
+// release {} block above) so it only runs -- and only fails -- when a
+// release-assembling task actually executes; assembleDebug,
+// testDebugUnitTest, and connectedDebugAndroidTest never evaluate it.
+tasks.register("verifyReleaseBaseUrl") {
+    doLast {
+        check(releaseBaseUrl.startsWith("https://") && releaseBaseUrl != releaseBaseUrlPlaceholder) {
+            "Release BASE_URL is not configured (currently '$releaseBaseUrl'). Set " +
+                "techManual.baseUrl.release in local.properties, or the " +
+                "TECHMANUAL_BASE_URL_RELEASE environment variable, to a real https:// " +
+                "endpoint before building a release variant."
+        }
+    }
+}
+
+tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
+    dependsOn("verifyReleaseBaseUrl")
 }
 
 dependencies {

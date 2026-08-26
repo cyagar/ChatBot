@@ -1,0 +1,20 @@
+# Copy this file to local.properties (already gitignored -- never commit it)
+# and fill in whichever keys you need. Any key left out falls back to its
+# default; see app/build.gradle.kts's resolveBaseUrl() for the exact logic.
+# An environment variable of the matching name (see below) overrides
+# whatever is set here, which is what CI should use instead of a file.
+
+# sdk.dir is normally written here automatically by Android Studio on sync.
+# sdk.dir=C:\\Users\\you\\AppData\\Local\\Android\\Sdk
+
+# Debug build's BASE_URL. Defaults to 10.0.2.2 (the Android emulator's
+# host-loopback alias) if unset -- works out of the box for an emulator.
+# A physical device on your LAN needs this set to your dev machine's LAN IP.
+# Env var override: TECHMANUAL_BASE_URL_DEBUG
+# techManual.baseUrl.debug=http://192.168.1.50:8000/
+
+# Release build's BASE_URL. No working default -- assembleRelease/
+# bundleRelease fail until this (or the env var) names a real https://
+# endpoint, so a placeholder can never ship silently.
+# Env var override: TECHMANUAL_BASE_URL_RELEASE
+# techManual.baseUrl.release=https://api.example.com/

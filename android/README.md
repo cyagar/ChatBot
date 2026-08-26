@@ -61,9 +61,9 @@ Build from the command line:
    ```
 2. Confirm `APP_ENV=development` in `backend/.env` — the session cookie is
    marked `Secure` otherwise and silently stops working over plain HTTP.
-3. The tablet and this machine must be on the same Wi-Fi. Update
-   `BASE_URL` in `app/build.gradle.kts` (debug build type) if this machine's
-   LAN IP isn't `192.168.1.71` anymore, then rebuild.
+3. The tablet and this machine must be on the same Wi-Fi. A physical device
+   needs this machine's LAN IP set in `local.properties` — see "Configuring
+   the backend endpoint" below; an emulator needs no configuration.
 4. Windows Firewall must allow inbound TCP on port 8000, or a tablet on the
    LAN can't reach the backend at all.
 5. Open this `android/` folder in Android Studio, or run:
@@ -73,6 +73,37 @@ Build from the command line:
    The APK lands at `app/build/outputs/apk/debug/app-debug.apk`. Install it
    on a physical Galaxy Tab A9+ (USB debugging enabled) via Android Studio's
    Run button, or `adb install -r app-debug.apk`.
+
+### Configuring the backend endpoint (P0A-6, 2026-08-26)
+
+`BASE_URL` used to be a personal LAN IP hardcoded in `app/build.gradle.kts`
+and checked into git — no way to point at a different backend without
+editing source and rebuilding, and a real problem if this repo is ever
+shared beyond one machine. It's now resolved at build time from (in order)
+an environment variable, then `local.properties` (already gitignored), then
+a default — see `resolveBaseUrl()` near the top of `app/build.gradle.kts`.
+Copy `local.properties.example` to `local.properties` and fill in what you
+need:
+
+- **Debug** (`techManual.baseUrl.debug` / env `TECHMANUAL_BASE_URL_DEBUG`):
+  defaults to `http://10.0.2.2:8000/`, the Android emulator's host-loopback
+  alias — works with no configuration if you're using an emulator. A
+  physical device on your LAN needs this set to your dev machine's actual
+  LAN IP. `src/debug/res/xml/network_security_config_debug.xml` permits
+  cleartext broadly for this build type only (not release), so any LAN IP
+  or hostname works here without also editing that file.
+- **Release** (`techManual.baseUrl.release` / env `TECHMANUAL_BASE_URL_RELEASE`):
+  no working default. `assembleRelease`/`bundleRelease` now fail with a
+  clear error if this isn't set to a real `https://` endpoint — confirmed
+  by running `assembleRelease` both with nothing configured (fails on the
+  placeholder) and with `TECHMANUAL_BASE_URL_RELEASE` set (succeeds).
+  `assembleDebug`, `testDebugUnitTest`, and `connectedDebugAndroidTest` were
+  confirmed unaffected either way — the check only runs as part of
+  assembling a release variant, never at Gradle configuration time.
+
+There's no staging build type/flavor yet — not needed while this stays a
+single-backend demo. The same `resolveBaseUrl()` mechanism extends to one
+if a real staging environment shows up later.
 
 ### Demo login
 
@@ -1064,6 +1095,14 @@ landscape/split-screen matrix (see the P0A-5 bullet above) hasn't been run.
   password is no longer valid to assume is current since the script now
   owns account creation. If you seeded the account before this script
   existed, re-run the script with a new `--password` to rotate it.
+- **`BASE_URL` is no longer a hardcoded personal LAN IP in git** — moved to
+  `local.properties`/env-var resolution, with release builds now failing
+  closed on a missing endpoint. See "Configuring the backend endpoint"
+  above. **If you were relying on the old hardcoded `192.168.1.71` default,
+  add `techManual.baseUrl.debug=http://192.168.1.71:8000/` (or your current
+  LAN IP) to `local.properties` before your next debug build against a
+  physical device** — the emulator-alias default that replaced it won't
+  reach anything on your LAN.
 - **`data/app.db` (0 bytes, shows as untracked in `git status`) is stale** —
   the real database is at `data/db/app.db` per `backend/.env`'s `DB_PATH`. I
   didn't delete it since I wasn't sure if it's leftover from something else;
