@@ -55,12 +55,28 @@ def _resp(status_code):
     return httpx.Response(status_code, request=_req())
 
 
+def _clear_ambient_proxy_env(monkeypatch):
+    """AnthropicProvider/OpenAIProvider construct a real SDK http client,
+    whose httpx transport honors *_PROXY env vars from the developer's
+    shell by default (trust_env). If one names a socks5:// proxy -- common
+    behind a corporate VPN -- httpx raises ImportError at construction
+    unless the optional `socksio` package is installed, failing these
+    mocked contract tests for a reason with nothing to do with the
+    provider contract they're checking. Confirmed by reproducing: setting
+    ALL_PROXY=socks5://127.0.0.1:1 fails test_anthropic_timeout_becomes_
+    provider_error with exactly that ImportError without this fixture."""
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Anthropic
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def anthropic_provider(test_env, monkeypatch):
+    _clear_ambient_proxy_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     from app.config import get_settings
     get_settings.cache_clear()
@@ -280,6 +296,7 @@ def test_anthropic_no_passages_short_circuits_without_calling_the_provider(anthr
 
 @pytest.fixture
 def openai_provider(test_env, monkeypatch):
+    _clear_ambient_proxy_env(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     from app.config import get_settings
     get_settings.cache_clear()

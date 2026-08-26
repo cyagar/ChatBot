@@ -27,6 +27,32 @@ pipeline, and OIDC. The app talks directly to the current FastAPI backend's
 existing JSON endpoints. (Material 3 Adaptive's list-detail layout *was*
 added on 2026-08-24 — see "Scope decisions" below.)
 
+## Prerequisites
+
+- **Android Studio** recent enough to support AGP 9.3.2, Kotlin 2.4.10, and
+  `compileSdk`/`targetSdk` 37 (Narwhal or newer as of this writing). Opening
+  `android/` in Android Studio and letting it sync is the easiest path — it
+  handles the rest of this list for you.
+- **JDK for the Gradle daemon: 25**, pinned in `gradle/gradle-daemon-jvm.properties`.
+  You do not need to install this yourself or set `JAVA_HOME` to it — Gradle
+  provisions/downloads it automatically (via the foojay resolver) the first
+  time you build, regardless of what `java -version` reports for your shell.
+  This was confirmed on a machine whose only installed JDK was 1.8: the
+  Gradle wrapper still built and ran instrumented tests successfully, because
+  only the daemon needs JDK 25, not the launcher.
+- **Gradle itself**: don't install it — always use `.\gradlew.bat` (the
+  wrapper), which downloads the pinned Gradle version (9.7.1) on first use.
+- **Android SDK Platform 37** and build-tools matching it. Android Studio's
+  SDK Manager installs this; command-line-only setups need
+  `sdkmanager "platforms;android-37"`.
+
+Build from the command line:
+```
+.\gradlew.bat assembleDebug        # build the debug APK
+.\gradlew.bat testDebugUnitTest    # JVM unit tests, no device needed
+.\gradlew.bat connectedDebugAndroidTest   # instrumented tests, needs a connected device/emulator
+```
+
 ## Running it
 
 1. Start the backend from `../backend`:
@@ -50,12 +76,19 @@ added on 2026-08-24 — see "Scope decisions" below.)
 
 ### Demo login
 
-A local-only technician account was seeded directly into `data/db/app.db`
-for this demo (not through the invitation flow — this is dev-only seeding,
-not something to do against a real deployment):
+A local-only technician account is created with `backend/scripts/seed_dev_technician.py`
+(not through the invitation flow — this is dev-only seeding, refuses to run
+unless `APP_ENV=development`, and is not something to do against a real
+deployment). From `backend/`:
 
-- Email: `tech.demo@hmwagner.com`
-- Password: `DemoPass123!`
+```
+py scripts/seed_dev_technician.py
+```
+
+It defaults to email `tech.demo@hmwagner.com` and prompts for a password
+(so nothing lands in shell history or in this file). Re-run it any time —
+with the same email and a new `--password` — to rotate the password instead
+of creating a second account.
 
 The existing administrator account also works and reaches the same screens
 (nothing in this slice enforces the technician/administrator split yet).
@@ -173,12 +206,13 @@ The existing administrator account also works and reaches the same screens
   assertions of their own, only the ViewModel unit tests underneath them —
   this closed the one item that was actually untestable at the JVM-unit-test
   layer (a real OkHttp interceptor pipeline needs a real Android Keystore),
-  not the full "every screen has Compose UI tests" gap. **Caveat added during
-  P0A-1 (2026-08-26):** the two tests behind that claim were since modified
-  (to account for the new launch-time `/me` call, see the P0A-1 bullet below)
-  and two more were added alongside them — none of the four have been run
-  on-device since. The "verified live" claim above covers only the
-  now-superseded pre-P0A-1 version of this test file, not its current form.
+  not the full "every screen has Compose UI tests" gap. **Update (2026-08-26,
+  P0A-6 pass):** the caveat that used to live here — that the four
+  post-P0A-1 tests hadn't been run on-device since being modified — is
+  resolved. All 5 `AppNavSessionExpiryTest` cases (the original plus one
+  added for P0A-4) have since been run for real on the Tab A9+; see
+  "Instrumented (androidTest) coverage" below for the current, accurate
+  count and the genuine race that first real run caught.
 - ~~The Keystore-backed cookie encryption has not been verified on a physical
   device~~ **Verified live on the Tab A9+ (2026-08-24).** Installed this
   build directly over an existing pre-Keystore install that had an active
@@ -1016,18 +1050,20 @@ Requires a connected device or running emulator. Run with:
 ```
 .\gradlew.bat connectedDebugAndroidTest
 ```
-Not covered yet: the Compose screens themselves beyond the session-expiry
-redirect above (no other UI/instrumented tests — everything else above is
-ViewModel-level).
+Not covered yet: the Compose screens beyond the session-expiry redirect and
+the one `ChatScreenLayoutTest` layout case above — everything else in the
+JVM suite is ViewModel-level, and P0A-5's wider device/font-scale/tablet/
+landscape/split-screen matrix (see the P0A-5 bullet above) hasn't been run.
 
 ## Things I did that you should know about
 
-- **The demo technician account was seeded by inserting directly into
-  `data/db/app.db`**, bypassing the invitation flow — reasonable for local
-  dev seeding, not something to do against a real deployment. Its password
-  is in this file, in plaintext, above. If this repo (or just this file) ever
-  goes somewhere more shared than your own machine, rotate that password or
-  strip it out first.
+- **The demo technician account is seeded by `backend/scripts/seed_dev_technician.py`**
+  (P0A-6, 2026-08-26), bypassing the invitation flow — reasonable for local
+  dev seeding, not something to do against a real deployment. It used to be a
+  raw SQL INSERT with the password committed here in plaintext; that
+  password is no longer valid to assume is current since the script now
+  owns account creation. If you seeded the account before this script
+  existed, re-run the script with a new `--password` to rotate it.
 - **`data/app.db` (0 bytes, shows as untracked in `git status`) is stale** —
   the real database is at `data/db/app.db` per `backend/.env`'s `DB_PATH`. I
   didn't delete it since I wasn't sure if it's leftover from something else;
