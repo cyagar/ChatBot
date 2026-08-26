@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, field_serializer
 
 from app.api.common import iso_utc
+from app.api.pagination import decode_cursor, paginate, set_pagination_headers
 from app.auth.deps import CurrentUser, get_current_user
 from app.db import get_conn
 
@@ -39,7 +40,13 @@ def _row_to_machine(row) -> MachineOut:
 
 
 @router.get("", response_model=list[MachineOut])
-def search_machines(q: str = "", limit: int = 25, user: CurrentUser = Depends(get_current_user)):
+def search_machines(
+    response: Response,
+    q: str = "",
+    limit: int = 25,
+    cursor: str | None = None,
+    user: CurrentUser = Depends(get_current_user),
+):
     """Autocomplete search across model name, family, and manufacturer. Only
     machines that actually have at least one indexed, approved, current
     document (with an approved link) are returned -- otherwise the picker
@@ -52,6 +59,10 @@ def search_machines(q: str = "", limit: int = 25, user: CurrentUser = Depends(ge
 
     Requires auth: the equipment catalog is proprietary to the deployment
     (concern #20 -- this endpoint leaked it to unauthenticated requests)."""
+    # (manufacturer, model_name, id) -- id as the tiebreaker for stable
+    # cursor pagination (Phase 1, narrowed scope), same reasoning as
+    # routes_chat.py's list_conversations.
+    before_mf, before_model, before_id = decode_cursor(cursor) if cursor else (None, None, None)
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
                COUNT(DISTINCT d.id) AS document_count
@@ -64,17 +75,34 @@ def search_machines(q: str = "", limit: int = 25, user: CurrentUser = Depends(ge
         WHERE (? = '' OR m.model_name LIKE ? OR m.family LIKE ? OR mf.name LIKE ?)
         GROUP BY m.id
         HAVING document_count > 0
-        ORDER BY mf.name, m.model_name
+            AND (
+                ? IS NULL
+                OR mf.name > ?
+                OR (mf.name = ? AND m.model_name > ?)
+                OR (mf.name = ? AND m.model_name = ? AND m.id > ?)
+            )
+        ORDER BY mf.name, m.model_name, m.id
         LIMIT ?
     """
     like = f"%{q}%"
     with get_conn() as conn:
-        rows = conn.execute(sql, [q, like, like, like, limit]).fetchall()
+        rows = conn.execute(sql, [
+            q, like, like, like,
+            before_mf, before_mf, before_mf, before_model, before_mf, before_model, before_id,
+            limit + 1,
+        ]).fetchall()
+    rows, next_cursor = paginate(rows, limit, lambda r: (r["manufacturer"], r["model_name"], r["id"]))
+    set_pagination_headers(response, next_cursor)
     return [_row_to_machine(r) for r in rows]
 
 
 @router.get("/recent", response_model=list[MachineOut])
-def recent_machines(user: CurrentUser = Depends(get_current_user), limit: int = 10):
+def recent_machines(
+    response: Response,
+    user: CurrentUser = Depends(get_current_user),
+    limit: int = 10,
+    cursor: str | None = None,
+):
     """Applies the exact same eligibility rules and `HAVING document_count > 0`
     as `search_machines()` above -- a machine a technician favorited or
     recently used, whose only manual has since been deactivated/unapproved/
@@ -86,6 +114,7 @@ def recent_machines(user: CurrentUser = Depends(get_current_user), limit: int = 
     it). The tradeoff is explicit: a favorited-but-now-empty machine
     disappears from recents instead of dead-ending into "no manuals" --
     consistent with what the picker already does, not a new UX decision."""
+    before_fav, before_last_used, before_id = decode_cursor(cursor) if cursor else (None, None, None)
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
                COUNT(DISTINCT d.id) AS document_count,
@@ -100,11 +129,23 @@ def recent_machines(user: CurrentUser = Depends(get_current_user), limit: int = 
         WHERE r.user_id = ?
         GROUP BY m.id
         HAVING document_count > 0
-        ORDER BY r.is_favorite DESC, r.last_used_at DESC
+            AND (
+                ? IS NULL
+                OR r.is_favorite < ?
+                OR (r.is_favorite = ? AND r.last_used_at < ?)
+                OR (r.is_favorite = ? AND r.last_used_at = ? AND m.id < ?)
+            )
+        ORDER BY r.is_favorite DESC, r.last_used_at DESC, m.id DESC
         LIMIT ?
     """
     with get_conn() as conn:
-        rows = conn.execute(sql, [user.id, limit]).fetchall()
+        rows = conn.execute(sql, [
+            user.id,
+            before_fav, before_fav, before_fav, before_last_used, before_fav, before_last_used, before_id,
+            limit + 1,
+        ]).fetchall()
+    rows, next_cursor = paginate(rows, limit, lambda r: (r["is_favorite"], r["last_used_at"], r["id"]))
+    set_pagination_headers(response, next_cursor)
     return [_row_to_machine(r) for r in rows]
 
 

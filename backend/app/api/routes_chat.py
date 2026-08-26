@@ -5,11 +5,12 @@ import logging
 import re
 import sqlite3
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_serializer
 from rapidfuzz import fuzz
 
 from app.api.common import iso_utc
+from app.api.pagination import decode_cursor, paginate, set_pagination_headers
 from app.auth.deps import CurrentUser, get_current_user
 from app.db import get_conn
 from app.providers.base import GeneratedAnswer, HistoryTurn, ProviderError
@@ -198,7 +199,19 @@ def _conversation_title(conn, conversation_id: int, stored_title: str | None) ->
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
-def list_conversations(user: CurrentUser = Depends(get_current_user), limit: int = 20):
+def list_conversations(
+    response: Response,
+    user: CurrentUser = Depends(get_current_user),
+    limit: int = 20,
+    cursor: str | None = None,
+):
+    # Cursor pagination (Phase 1, narrowed scope): (updated_at, id) rather
+    # than updated_at alone, since two conversations can share an
+    # updated_at (same-second activity) -- id as a tiebreaker is what makes
+    # this "stable" (a page boundary can't land mid-tie and skip/repeat a
+    # row) rather than plain LIMIT/OFFSET, which also shifts under
+    # concurrent inserts.
+    before_updated_at, before_id = decode_cursor(cursor) if cursor else (None, None)
     with get_conn() as conn:
         # create_conversation runs the moment a technician taps a machine (or
         # "Not sure which machine?") -- before any question is typed, so the
@@ -212,9 +225,12 @@ def list_conversations(user: CurrentUser = Depends(get_current_user), limit: int
             "SELECT id, machine_id, title, started_at, updated_at FROM conversations "
             "WHERE user_id = ? AND EXISTS ("
             "    SELECT 1 FROM messages WHERE messages.conversation_id = conversations.id"
-            ") ORDER BY updated_at DESC LIMIT ?",
-            (user.id, limit),
+            ") AND (? IS NULL OR updated_at < ? OR (updated_at = ? AND id < ?)) "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
+            (user.id, before_updated_at, before_updated_at, before_updated_at, before_id, limit + 1),
         ).fetchall()
+        rows, next_cursor = paginate(rows, limit, lambda r: (r["updated_at"], r["id"]))
+        set_pagination_headers(response, next_cursor)
         out = []
         for r in rows:
             label = _machine_label(conn, r["machine_id"])
@@ -574,15 +590,30 @@ def _hydrate_message(conn, row, user_id: int) -> MessageOut:
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageOut])
-def get_messages(conversation_id: int, user: CurrentUser = Depends(get_current_user)):
+def get_messages(
+    conversation_id: int,
+    response: Response,
+    user: CurrentUser = Depends(get_current_user),
+    limit: int = 500,
+    cursor: str | None = None,
+):
+    # Default limit is generous (real conversations in this app today are
+    # nowhere near 500 messages) so an existing caller that never passes
+    # limit/cursor keeps getting exactly what it always did -- a full
+    # conversation in one response. Oldest-first (id ASC), so the cursor
+    # pages forward: "id" alone is a stable, already-unique sort key here,
+    # no tiebreaker column needed the way updated_at needed one above.
+    (after_id,) = decode_cursor(cursor) if cursor else (None,)
     with get_conn() as conn:
         _require_own_conversation(conn, conversation_id, user.id)
         rows = conn.execute(
             "SELECT id, role, content, is_clarifying_question, is_no_answer, "
             "safety_warnings, conflict_note, answer_status, clarifying_options, retry_count, created_at "
-            "FROM messages WHERE conversation_id = ? ORDER BY id",
-            (conversation_id,),
+            "FROM messages WHERE conversation_id = ? AND (? IS NULL OR id > ?) ORDER BY id LIMIT ?",
+            (conversation_id, after_id, after_id, limit + 1),
         ).fetchall()
+        rows, next_cursor = paginate(rows, limit, lambda r: (r["id"],))
+        set_pagination_headers(response, next_cursor)
         return [_hydrate_message(conn, r, user.id) for r in rows]
 
 
@@ -841,23 +872,33 @@ class SavedAnswerOut(BaseModel):
 
 
 @router.get("/saved-answers", response_model=list[SavedAnswerOut])
-def list_saved_answers(user: CurrentUser = Depends(get_current_user)):
+def list_saved_answers(
+    response: Response,
+    user: CurrentUser = Depends(get_current_user),
+    limit: int = 50,
+    cursor: str | None = None,
+):
     """P1-3 (2026-08-24 independent follow-up review): a saved-answer view is
     useless without knowing which conversation/machine/question it came from
     -- MessageOut alone (the old response shape) carries none of that. Each
     entry now also names which conversation it can be resumed from, so the
     UI can offer "Open conversation" rather than showing an orphaned answer."""
+    before_saved_at, before_id = decode_cursor(cursor) if cursor else (None, None)
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT m.id, m.role, m.content, m.is_clarifying_question, m.is_no_answer, "
             "m.safety_warnings, m.conflict_note, m.answer_status, m.retry_count, m.created_at, "
-            "m.conversation_id, c.machine_id "
+            "m.conversation_id, c.machine_id, sa.saved_at "
             "FROM saved_answers sa "
             "JOIN messages m ON m.id = sa.message_id "
             "JOIN conversations c ON c.id = m.conversation_id "
-            "WHERE sa.user_id = ? ORDER BY sa.saved_at DESC",
-            (user.id,),
+            "WHERE sa.user_id = ? "
+            "AND (? IS NULL OR sa.saved_at < ? OR (sa.saved_at = ? AND m.id < ?)) "
+            "ORDER BY sa.saved_at DESC, m.id DESC LIMIT ?",
+            (user.id, before_saved_at, before_saved_at, before_saved_at, before_id, limit + 1),
         ).fetchall()
+        rows, next_cursor = paginate(rows, limit, lambda r: (r["saved_at"], r["id"]))
+        set_pagination_headers(response, next_cursor)
         out = []
         for r in rows:
             question_row = conn.execute(
