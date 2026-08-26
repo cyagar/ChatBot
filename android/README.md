@@ -648,6 +648,59 @@ The existing administrator account also works and reaches the same screens
     the test class (`awaitState`/`awaitRequestCount` now call
     `advanceUntilIdle()`) -- a bare `delay()` never resumes under the
     default scheduler in a plain JUnit test with no `runTest {}` driving it.
+- **P0A-4: fixed navigation and evidence failure handling.**
+  - `Routes.chat()` used to interpolate the machine label directly into the
+    route string (`"chat/$id?label=$label"`) with no encoding at all. A "/"
+    in a real model label would split it into extra path segments and break
+    route matching outright; "&", "?", or "%" would corrupt the query value.
+    Fixed with `android.net.Uri.encode` on the write side -- deliberately
+    not `java.net.URLEncoder`, which form-encodes spaces as `+` rather than
+    `%20`. Confirmed by reading androidx.navigation 2.9.8's own source
+    (`NavDeepLink.kt`'s query-argument branch, backed by `NavUri`, a
+    straight `typealias` for `android.net.Uri` on this platform) that
+    Navigation's route matching already decodes query arguments via
+    `Uri.getQueryParameters` before handing them to the composable -- so the
+    read side (`backStackEntry.arguments?.getString("label")`) needed no
+    change at all; adding a manual decode there would have double-decoded
+    and corrupted any label containing a literal `%`. Covered by a new
+    instrumented test (`aMachineLabelWithReservedUriCharactersNavigatesAndDisplaysCorrectly`
+    in `AppNavSessionExpiryTest`) driving a real `NavController` with a
+    label containing `/`, `&`, `%`, and a space -- compiles here but, like
+    the rest of that file, was never run on a real device/emulator (no
+    `adb`/connected device in this dev environment). A JVM test of the
+    encoding alone was deliberately not written: it would only prove the
+    encoder agrees with itself, not that it round-trips through
+    Navigation's actual (Android-only) matching, so it would read as
+    coverage without being real coverage.
+  - Citation evidence requests used to check neither `isSuccessful` on the
+    response nor catch anything useful on exception -- a non-2xx response
+    left `evidence` null via `resp.body()` returning null, and an exception
+    was swallowed outright. Since `ChatScreen` only shows the evidence sheet
+    for `evidenceLoading || evidence != null`, any failure (401, 403, 404,
+    500, a dropped connection, a timeout) closed the sheet completely
+    silently, with nothing to retry. `ChatUiState` now has `evidenceError`
+    and `evidenceCitation` (the last-requested citation, kept so `Retry` can
+    redrive the identical request); `openCitation`/`retryEvidence` both
+    route through a shared `loadEvidence` that checks `isSuccessful` and
+    sets a visible, retryable error either way. `dismissEvidence` now clears
+    `evidenceError`/`evidenceCitation` too, not just `evidence`, so an error
+    sheet actually closes on dismiss instead of a stale error flashing back.
+    Covered by 4 new `ChatViewModelTest` cases (17 total now, see below),
+    confirmed to genuinely fail against the pre-fix code (a compile error,
+    not just a failing assertion, since `evidenceError`/`retryEvidence`
+    are new API surface the pre-fix `ChatViewModel` doesn't have). A real
+    `SocketTimeoutException` is caught by the same generic
+    `catch (Exception)` a plain connection disconnect is -- the same
+    equivalence this file's other "network failure" tests already rely on
+    -- so no separate timeout-specific test was needed.
+  - Not fixed here, deferred with the rest of the layout/screenshot work
+    (P0A-5): image-load failure for the evidence page image itself
+    (`AsyncImage` in `EvidenceSheet`) still renders nothing on a failed
+    load, rather than falling back to the text excerpt underneath. That
+    needs either a real device or a Robolectric/screenshot harness to
+    verify at all -- there's no way to confirm a Coil error-state fallback
+    actually renders correctly with only JVM unit tests, so it wasn't
+    worth adding unverified UI churn to this otherwise fully-tested commit.
 - **The clarifying-machine flow is now reachable**: "Not sure which machine?"
   on the machine picker starts a conversation with no machine selected, so
   asking a question exercises the server's real clarify-instead-of-guess path
@@ -766,12 +819,12 @@ a real Android `Context` a JVM unit test doesn't have):
   physical device: confirm a session survives an app restart, and confirm
   installing this build over a pre-encryption install forces a clean
   re-login instead of crashing on the old plaintext data.
-- `ChatViewModelTest` (13 tests): correct user-then-assistant message
+- `ChatViewModelTest` (17 tests): correct user-then-assistant message
   ordering, the uncertain-pending-echo state, the clarifying-machine reload
   race (verified to actually fail against the pre-fix code before being
   kept), the feedback/save success+failure paths, `retryPendingSend()`
   reusing the original `Idempotency-Key` header rather than a fresh one, a
-  `409` triggering an automatic refresh that resolves the pending echo, and
+  `409` triggering an automatic refresh that resolves the pending echo,
   (P0A-2, all three confirmed to actually fail against the pre-fix
   `loadMessages()`) three more: a `409` whose reload finds only the
   persisted user turn keeps the question visibly pending and marks it
@@ -784,7 +837,15 @@ a real Android `Context` a JVM unit test doesn't have):
   that send's `pendingEcho` (a real concurrency scenario, driven with the
   same blocking-`Dispatcher`/`CountDownLatch` pattern as the
   clarifying-machine reload race test above, not just a sequential
-  approximation of one).
+  approximation of one); and (P0A-4, all four confirmed to fail against the
+  pre-fix code -- a compile error, since `evidenceError`/`retryEvidence`
+  are new API surface) four evidence-loading tests: a non-2xx response
+  (looped over 401/403/404/500) surfaces a visible, retryable error instead
+  of silently closing the sheet; a network failure (standing in for a real
+  timeout, caught by the same generic exception branch) does the same;
+  `retryEvidence()` redrives the identical citation and can recover after a
+  prior failure; and `dismissEvidence()` actually clears a standing error,
+  not just the evidence itself.
 - `LoginViewModelTest` (4 tests): blank-credential validation short-circuits
   before any network call, successful login, wrong-password message, lost
   connection.
@@ -831,7 +892,7 @@ Retrofit+`MockWebServer` client via `overrideServiceForTest` instead and never
 wires that interceptor up at all, so this redirect had never actually been
 exercised by any test, only verified by hand on the tablet.
 
-`AppNavSessionExpiryTest` (4 tests, `android/app/src/androidTest/...`) closes
+`AppNavSessionExpiryTest` (5 tests, `android/app/src/androidTest/...`) closes
 that gap by running for real on-device: it logs in against a real
 `MockWebServer` instance (so `PersistentCookieJar` stores a real
 Keystore-encrypted session cookie, same as production), composes `AppNav`
@@ -841,8 +902,14 @@ screen and clears the session, while a 200 does not. Two more tests (added
 for P0A-1, see above) open a real conversation through UI clicks, force a
 session expiry, and assert a real re-login through `LoginScreen` lands back
 on the machine list rather than the old conversation; and that `logout()`
-still clears the local session with the server shut down. This needed two
-small production-code additions, both scoped narrowly to test support:
+still clears the local session with the server shut down. A fifth (P0A-4)
+selects a machine whose server-returned `machine_label` contains `/`, `&`,
+`%`, and a space, and asserts `ChatScreen` still navigates to it and
+displays the exact original string — the real route-matching/decoding path
+`Routes.chat()`'s `Uri.encode` fix depends on, which no JVM test can
+exercise since `NavUri` is a straight `android.net.Uri` typealias on this
+platform. This needed two small production-code additions, both scoped
+narrowly to test support:
 
 - `ApiClient.initForTest(context, baseUrl)` — `init(context)` is a one-shot
   guarded by `::service.isInitialized`, and by the time a test runs,

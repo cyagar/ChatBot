@@ -1,5 +1,6 @@
 package com.hmwagner.techmanual.ui.nav
 
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -74,7 +75,15 @@ private object Routes {
     const val MACHINES = "machines"
     const val HISTORY = "history"
     const val CHAT = "chat/{conversationId}?label={label}"
-    fun chat(conversationId: Int, label: String?) = "chat/$conversationId?label=${label ?: ""}"
+    // P0A-4: a raw machine label interpolated directly into the route could
+    // break navigation entirely (a "/" splits it into extra path segments)
+    // or corrupt the query value ("&", "?", "%"). android.net.Uri.encode is
+    // used deliberately, not java.net.URLEncoder: Navigation's own route
+    // matching (NavDeepLink -> NavUri, a straight typealias for
+    // android.net.Uri on this platform) decodes query args via
+    // Uri.getQueryParameters, which is the exact inverse of Uri.encode --
+    // URLEncoder's form-encoding (space -> "+") is not.
+    fun chat(conversationId: Int, label: String?) = "chat/$conversationId?label=${Uri.encode(label ?: "")}"
 }
 
 /**

@@ -2,6 +2,7 @@ package com.hmwagner.techmanual.ui.chat
 
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.ApiService
+import com.hmwagner.techmanual.network.CitationOut
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -439,5 +440,85 @@ class ChatViewModelTest {
         awaitState { !it.sending }
         assertNull("the original send must still resolve normally once it actually completes", vm.state.value.pendingEcho)
         assertEquals(2, vm.state.value.messages.size)
+    }
+
+    private val testCitation = CitationOut(chunk_id = 9, document_id = 3, filename = "manual.pdf", excerpt = "...")
+
+    @Test
+    fun `a non-2xx evidence response surfaces a visible, retryable error instead of silently closing the sheet`() {
+        // P0A-4 regression: openCitation used to check neither isSuccessful
+        // nor anything else on failure -- resp.body() is simply null for a
+        // non-2xx response, so evidence stayed null and evidenceLoading just
+        // went back to false. ChatScreen only shows the sheet for
+        // (evidenceLoading || evidence != null), so a failed request closed
+        // it completely silently, with nothing to retry. Covers the codes
+        // the plan calls out: 401, 403, 404, 500 -- all take the same
+        // isSuccessful-false branch, so one loop is real coverage, not
+        // four copies of the same assertion.
+        for (code in listOf(401, 403, 404, 500)) {
+            server.enqueue(MockResponse().setResponseCode(code))
+            vm.openCitation(testCitation)
+            awaitState { !it.evidenceLoading }
+
+            val state = vm.state.value
+            assertTrue("code $code should surface a visible error", state.evidenceError?.contains(code.toString()) == true)
+            assertNull("a failed request must not report stale/empty evidence as real", state.evidence)
+        }
+    }
+
+    @Test
+    fun `a network failure loading evidence surfaces an error and does not silently close the sheet`() {
+        // Same silent-failure bug as above, via the exception branch instead
+        // of a non-2xx response -- covers what the plan calls "timeout": a
+        // real SocketTimeoutException is caught by the same generic
+        // `catch (Exception)` a connection-level disconnect is, the same
+        // equivalence ChatViewModelTest's other "network failure" tests
+        // already rely on.
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+
+        vm.openCitation(testCitation)
+        awaitState { !it.evidenceLoading }
+
+        val state = vm.state.value
+        assertEquals("Can't reach the server. Check your connection.", state.evidenceError)
+        assertNull(state.evidence)
+    }
+
+    @Test
+    fun `retryEvidence redrives the same citation and can recover after a prior failure`() {
+        server.enqueue(MockResponse().setResponseCode(500))
+        vm.openCitation(testCitation)
+        awaitState { !it.evidenceLoading }
+        assertTrue(vm.state.value.evidenceError != null)
+
+        server.enqueue(jsonResponse(
+            """{"chunk_id": 9, "content": "Turn off power before servicing.", "filename": "manual.pdf"}"""
+        ))
+        vm.retryEvidence()
+        awaitState { !it.evidenceLoading }
+
+        val state = vm.state.value
+        assertNull("a successful retry must clear the earlier error", state.evidenceError)
+        assertEquals("Turn off power before servicing.", state.evidence?.content)
+    }
+
+    @Test
+    fun `dismissing an evidence error actually closes the sheet`() {
+        // dismissEvidence used to only clear evidence/evidenceDocumentId --
+        // if it left evidenceError set, the sheet's visibility condition
+        // (evidenceLoading || evidence != null || evidenceError != null)
+        // would keep it open, or a stale error would flash on the next,
+        // unrelated citation tap.
+        server.enqueue(MockResponse().setResponseCode(500))
+        vm.openCitation(testCitation)
+        awaitState { !it.evidenceLoading }
+        assertTrue(vm.state.value.evidenceError != null)
+
+        vm.dismissEvidence()
+
+        val state = vm.state.value
+        assertNull(state.evidenceError)
+        assertNull(state.evidence)
+        assertNull(state.evidenceDocumentId)
     }
 }

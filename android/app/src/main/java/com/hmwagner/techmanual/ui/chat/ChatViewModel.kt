@@ -51,6 +51,13 @@ data class ChatUiState(
     val evidence: EvidenceOut? = null,
     val evidenceDocumentId: Int? = null,
     val evidenceLoading: Boolean = false,
+    // P0A-4: non-2xx and exceptions used to leave both evidence and this
+    // null, so the sheet (gated on evidenceLoading || evidence != null)
+    // never even opened -- the request silently failed with no visible
+    // error and no way to retry. evidenceCitation is retained so Retry can
+    // redrive the exact same request without the caller re-supplying it.
+    val evidenceError: String? = null,
+    val evidenceCitation: CitationOut? = null,
     // messageId -> rating, only for calls that actually succeeded. Lets
     // ChatScreen show "Marked helpful" instead of the buttons doing nothing
     // visible on tap (README: "no UI indication of success").
@@ -360,19 +367,51 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
     }
 
     fun openCitation(citation: CitationOut) {
+        _state.value = _state.value.copy(
+            evidenceCitation = citation,
+            evidenceLoading = true,
+            evidence = null,
+            evidenceError = null,
+            evidenceDocumentId = citation.document_id,
+        )
+        loadEvidence(citation)
+    }
+
+    /** Redrives the same request as the last [openCitation] call, without losing the citation context. */
+    fun retryEvidence() {
+        val citation = _state.value.evidenceCitation ?: return
+        _state.value = _state.value.copy(evidenceLoading = true, evidence = null, evidenceError = null)
+        loadEvidence(citation)
+    }
+
+    private fun loadEvidence(citation: CitationOut) {
         viewModelScope.launch {
-            _state.value = _state.value.copy(evidenceLoading = true, evidence = null, evidenceDocumentId = citation.document_id)
             try {
                 val resp = ApiClient.service.getEvidence(citation.document_id, citation.chunk_id)
-                _state.value = _state.value.copy(evidenceLoading = false, evidence = resp.body())
+                if (resp.isSuccessful) {
+                    _state.value = _state.value.copy(evidenceLoading = false, evidence = resp.body())
+                } else {
+                    _state.value = _state.value.copy(
+                        evidenceLoading = false,
+                        evidenceError = "Couldn't load this evidence (code ${resp.code()}).",
+                    )
+                }
             } catch (_: Exception) {
-                _state.value = _state.value.copy(evidenceLoading = false)
+                _state.value = _state.value.copy(
+                    evidenceLoading = false,
+                    evidenceError = "Can't reach the server. Check your connection.",
+                )
             }
         }
     }
 
     fun dismissEvidence() {
-        _state.value = _state.value.copy(evidence = null, evidenceDocumentId = null)
+        _state.value = _state.value.copy(
+            evidence = null,
+            evidenceDocumentId = null,
+            evidenceError = null,
+            evidenceCitation = null,
+        )
     }
 
     class Factory(private val conversationId: Int) : ViewModelProvider.Factory {

@@ -171,8 +171,8 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
         }
     }
 
-    if (state.evidenceLoading || state.evidence != null) {
-        EvidenceSheet(state, onDismiss = vm::dismissEvidence)
+    if (state.evidenceLoading || state.evidence != null || state.evidenceError != null) {
+        EvidenceSheet(state, onDismiss = vm::dismissEvidence, onRetry = vm::retryEvidence)
     }
 }
 
@@ -459,12 +459,20 @@ private fun Composer(state: ChatUiState, vm: ChatViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit) {
+private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: () -> Unit) {
     val sheetState = rememberModalBottomSheetState()
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (state.evidenceLoading) {
                 CircularProgressIndicator()
+            } else if (state.evidenceError != null) {
+                // P0A-4: this used to be unreachable -- a non-2xx or a
+                // thrown exception left both evidence and this null, and
+                // the sheet is only shown for (evidenceLoading || evidence
+                // != null), so the request just silently failed with no
+                // visible error and no way to retry.
+                Text(state.evidenceError, color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = onRetry) { Text("Retry") }
             } else if (state.evidence != null) {
                 val evidence = state.evidence
                 Text(evidence.title ?: evidence.filename, style = MaterialTheme.typography.titleMedium)

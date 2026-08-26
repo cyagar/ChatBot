@@ -245,6 +245,59 @@ class AppNavSessionExpiryTest {
         composeTestRule.onNodeWithText("Ask about a machine").assertExists()
     }
 
+    // P0A-4: Routes.chat() used to interpolate the machine label directly
+    // into the route string ("chat/$id?label=$label"). A "/" would split it
+    // into extra path segments (breaking route matching entirely); "&" or
+    // "%" would corrupt the query value; a real model label ("AJ/AX 100 &
+    // Co. 50%-rated") could contain any of these. Uri.encode() on the write
+    // side is deliberately paired with NO manual decode on the read side --
+    // confirmed by reading androidx.navigation 2.9.8's own source
+    // (NavDeepLink.kt's query-argument branch, backed by NavUri, a straight
+    // typealias for android.net.Uri on this platform) that
+    // Uri.getQueryParameters already returns a decoded value; adding a
+    // second decode would corrupt any label containing a literal "%".
+    @Test
+    fun aMachineLabelWithReservedUriCharactersNavigatesAndDisplaysCorrectly() {
+        val trickyLabel = "AJ/AX 100 & Co. 50%"
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"id": 1, "email": "tech.demo@hmwagner.com", "role": "technician"}"""),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""[{"id": 7, "manufacturer": "Acme", "model_name": "X100", "family": null, "document_count": 1, "is_favorite": false}]"""),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody(
+                    """{"id": 42, "machine_id": 7, "machine_label": "$trickyLabel", "title": null, "started_at": "", "updated_at": ""}""",
+                ),
+        )
+        server.enqueue(MockResponse().setResponseCode(200)) // touchMachine
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("[]"),
+        ) // ChatViewModel's initial getMessages
+
+        composeTestRule.setContent {
+            AppNav(windowSizeClass = compactWindowSizeClass)
+        }
+
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodesWithText("Acme X100").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.onNodeWithText("Acme X100").performClick()
+
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodesWithText(trickyLabel).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.onNodeWithText(trickyLabel).assertExists()
+    }
+
     // P0A-1 exit gate + test list item 10: a technician must always be able
     // to sign out of THIS device, even if the server can't be reached to
     // revoke the session server-side.
