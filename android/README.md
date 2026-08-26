@@ -815,30 +815,70 @@ The existing administrator account also works and reaches the same screens
     didn't actually catch the pre-fix bug on the first attempt; caught by
     following this repo's own verify-tests-actually-fail discipline, not
     by inspection.
-  - Covered by a new instrumented test,
-    `ChatScreenLayoutTest.clarifyingOptionChipsWrapInsteadOfCollapsingAt360dpWidth`
-    (`android/app/src/androidTest/.../ui/chat/`): renders `ChatScreen`
-    inside a `Box(Modifier.width(360.dp))` -- the narrowest width the
-    plan's device matrix names -- with four deliberately long clarifying
-    -option labels, and asserts every chip has a genuinely positive width
-    as well as staying within the container's bounds. **Run for real on
-    the Tab A9+ (2026-08-26)**, confirmed to fail against the pre-fix
-    `Row` (once the assertion was corrected to catch the actual collapse
-    failure mode, not just an out-of-bounds one) and pass with `FlowRow`.
-    Only the clarifying-options site got its own test; the citation-chip
-    and Helpful/Incorrect/Save sites share the exact same `Row`-collapse
-    mechanism and the exact same `FlowRow` fix, so a second and third copy
-    of the same test would prove the same thing again, not add real
-    coverage.
+  - Covered by two instrumented tests in `ChatScreenLayoutTest`
+    (`android/app/src/androidTest/.../ui/chat/`), both run for real on the
+    Tab A9+ (2026-08-26, two passes):
+    `clarifyingOptionChipsWrapAcrossTheSupportedWidthAndFontScaleMatrix`
+    (four deliberately long clarifying-option labels) and
+    `citationChipsWrapWithManyShortChipsAcrossTheWidthAndFontScaleMatrix`
+    (eight short citation chips -- citation labels are always the compact
+    `"[N] p.NN"` form, so their overflow risk is chip *count*, not label
+    length). Each renders `ChatScreen` once inside a `Box` whose width and
+    a `CompositionLocalProvider(LocalDensity provides ...)` font-scale
+    override are driven by mutable state, then walks 8 cases -- widths
+    360/411dp (the plan's named phone widths) and 700/900dp (standing in
+    for the Medium/Expanded tablet window-size classes, since this
+    tablet's own 800dp screen never gets narrow enough on its own) each at
+    the default and a 200% font scale -- re-measuring the same already
+    -rendered chips at each step rather than recomposing from scratch.
+    Before trusting the font-scale override, a throwaway on-device probe
+    confirmed it actually reaches `AssistChip`'s rendered text (chip height
+    grew from 48dp -- the Material3 minimum touch target, which dominates
+    at default scale -- to 56dp at a 2x override); the first draft's
+    assertion (right edge in bounds) still wouldn't have caught the real
+    collapse failure mode from pass 1, so both tests keep the corrected
+    positive-width assertion. Confirmed both tests fail against the
+    pre-fix plain `Row` at multiple points in the matrix, not just the
+    original 360dp case -- a plain `Row` given four long labels collapses
+    chips even at 900dp, no large font scale needed to trigger it there.
+    The Helpful/Incorrect/Save row shares the exact same `Row`-collapse
+    mechanism and the exact same `FlowRow` fix as the other two, so a
+    third copy of the same test would prove the same thing again, not add
+    real coverage.
   - **What this does NOT close out**, per the plan's own P0A-5 exit gate:
-    the wider device/config matrix (411dp, Medium/Expanded tablet,
-    landscape, split-screen, 200% font scale, display scaling, keyboard
-    open, long localized-length strings beyond the one case tested above),
-    and a human accessibility-service listening session for focus order --
-    none of these were run. This tablet's own physical screen is 800dp
-    wide (1200x1920px @ 240dpi), so even on-device, only the
-    width-constrained instrumented test above exercises a genuinely narrow
-    layout; the rest of the matrix still needs to be run by hand.
+    - **Portrait/landscape and split-screen** are not exercised as literal
+      device rotations or multi-window states -- `MessageBubble` has no
+      orientation- or window-mode-conditional code (confirmed by reading
+      it), so the width matrix above is taken as covering the same layout
+      paths a real rotation or split-screen would hit. That is a reasoned
+      equivalence backed by code inspection and real width coverage, not a
+      device observation of rotation or multi-window itself.
+    - **Keyboard open** is genuinely different in kind (a height, not
+      width, change) and isn't simulated at all. `Composer`'s `Row`
+      already has `.imePadding()` alongside `.navigationBarsPadding()`
+      (added earlier for an unrelated gesture-nav overlap bug, confirmed
+      live on this tablet), and the manifest sets
+      `windowSoftInputMode="adjustResize"` -- the pieces that should make
+      this correct are present, but real on-device IME behavior (does the
+      composer/send button actually stay visible above a real keyboard)
+      was not exercised this pass, deliberately: a test that fakes an IME
+      appearing would be worse than no test, since it could pass without
+      proving anything.
+    - **Display scaling** (Android's separate "screen zoom" density
+      setting, distinct from font scale) was not tested as its own axis --
+      it shares the same density/measurement plumbing the font-scale
+      matrix above already exercises, so it wasn't expected to discriminate
+      differently, but this wasn't independently confirmed.
+    - **A human accessibility-service listening session** for focus order
+      (plan: "accessibility-node inspection alone is insufficient") cannot
+      be done from this environment -- this device's spoken-feedback
+      accessibility service must never be enabled programmatically (over
+      adb or otherwise); only a person listening can do this.
+    - **At least one real phone**, per the plan's device list, was not
+      tested -- no phone hardware is available in this environment, only
+      the Tab A9+.
+    P0A-5 is therefore still partial after this pass, with a smaller,
+    explicitly-named open set rather than a fully closed matrix.
 - **The clarifying-machine flow is now reachable**: "Not sure which machine?"
   on the machine picker starts a conversation with no machine selected, so
   asking a question exercises the server's real clarify-instead-of-guess path
@@ -1054,10 +1094,13 @@ narrowly to test support:
   `TechManualApp`'s real `Application.onCreate` has already called it against
   the real `BuildConfig.BASE_URL`. `initForTest` rebuilds the whole pipeline
   (fresh cookie jar included) against a test-supplied base URL instead.
-- `localhost`/`127.0.0.1` added to `network_security_config_debug.xml`'s
-  cleartext allowlist, alongside the existing dev-machine LAN IP and emulator
-  loopback alias — the on-device `MockWebServer` instance this test talks to
-  binds to loopback on the tablet itself, not the dev machine's LAN IP.
+- Cleartext support for the on-device `MockWebServer` instance this test
+  talks to (binds to loopback on the tablet itself, not the dev machine's
+  LAN IP): originally added as a `localhost`/`127.0.0.1` entry in
+  `network_security_config_debug.xml`'s per-host allowlist; that allowlist
+  was replaced entirely by a broad debug-only cleartext allowance as part
+  of P0A-6's endpoint-configuration work (see that bullet below), which
+  covers this case without needing its own entry anymore.
 
 **All 5 tests run for real on the Tab A9+ (2026-08-26)**, the first time
 this file was ever actually executed rather than just compiled -- and it
@@ -1066,25 +1109,32 @@ surfacing a genuine race in `AppNav.kt`'s session-expiry handling that no
 JVM test could ever have caught (see the P0A-1 bullet above for the full
 mechanism and fix). All 5 pass after that fix.
 
-`ChatScreenLayoutTest` (1 test, `android/app/src/androidTest/.../ui/chat/`,
-added for P0A-5, also run for real on the Tab A9+ 2026-08-26) closes a
-different structural gap: whether a Compose layout actually wraps instead
-of overflowing/collapsing at a given width is a real measurement-pass
-question no JVM/Robolectric-free unit test can answer honestly. It renders
-`ChatScreen` inside a `Box(Modifier.width(360.dp))` with several long
-clarifying-option labels and inspects the real semantics tree's laid-out
-bounds. See the P0A-5 bullet above for why the first draft's assertion
-(right edge in bounds) didn't actually catch the pre-fix bug, and what the
-real failure mode turned out to be.
+`ChatScreenLayoutTest` (2 tests, `android/app/src/androidTest/.../ui/chat/`,
+added for P0A-5, run for real on the Tab A9+ across two passes, 2026-08-26)
+closes a different structural gap: whether a Compose layout actually wraps
+instead of overflowing/collapsing at a given width is a real
+measurement-pass question no JVM/Robolectric-free unit test can answer
+honestly. Each test renders `ChatScreen` once inside a `Box` whose width
+and font-scale (via a `LocalDensity` override) are driven by mutable state,
+then re-measures the same rendered chips across an 8-point width x
+font-scale matrix (360/411/700/900dp x 1x/2x) — one test with long
+clarifying-option labels, one with eight short citation chips (a
+count-driven overflow risk instead of a length-driven one). See the P0A-5
+bullet above for why the first draft's assertion (right edge in bounds)
+didn't actually catch the pre-fix bug, what the real failure mode turned
+out to be, and exactly what this pass does and doesn't close out of the
+plan's full exit gate.
 
 Requires a connected device or running emulator. Run with:
 ```
 .\gradlew.bat connectedDebugAndroidTest
 ```
 Not covered yet: the Compose screens beyond the session-expiry redirect and
-the one `ChatScreenLayoutTest` layout case above — everything else in the
-JVM suite is ViewModel-level, and P0A-5's wider device/font-scale/tablet/
-landscape/split-screen matrix (see the P0A-5 bullet above) hasn't been run.
+the two `ChatScreenLayoutTest` layout cases above — everything else in the
+JVM suite is ViewModel-level. See the P0A-5 bullet above for the specific
+remaining gaps (keyboard-open, a human accessibility-service session, a
+real phone, and literal device rotation/multi-window as opposed to the
+reasoned width-equivalence tested here).
 
 ## Things I did that you should know about
 
