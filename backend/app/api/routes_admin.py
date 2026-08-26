@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_serializer
 
+from app.api.common import iso_utc
 from app.auth.audit import log_audit_event
 from app.auth.deps import CurrentUser, require_admin
 from app.auth.security import generate_invitation_token
@@ -42,6 +43,10 @@ class DocumentOut(BaseModel):
     review_status: str
     reviewed_at: str | None
     needs_reprocessing: bool
+
+    @field_serializer("ingested_at", "reviewed_at")
+    def _ser_ts(self, v: str | None) -> str | None:
+        return iso_utc(v)
 
 
 def _row_to_document(conn, row) -> DocumentOut:
@@ -238,6 +243,10 @@ class ReviewQueueDocumentOut(BaseModel):
     ingested_at: str | None
     links: list[PendingLinkOut]
 
+    @field_serializer("ingested_at")
+    def _ser_ts(self, v: str | None) -> str | None:
+        return iso_utc(v)
+
 
 @router.get("/review-queue", response_model=list[ReviewQueueDocumentOut])
 def review_queue(admin: CurrentUser = Depends(require_admin)):
@@ -393,6 +402,10 @@ class InvitationOut(BaseModel):
     revoked_at: str | None
     token: str | None = None  # only populated once, in the create response
 
+    @field_serializer("created_at", "expires_at", "used_at", "revoked_at")
+    def _ser_ts(self, v: str | None) -> str | None:
+        return iso_utc(v)
+
 
 def _check_invite_domain_allowed(email: str) -> None:
     allowed = [d.strip().lower() for d in get_settings().allowed_registration_domains.split(",") if d.strip()]
@@ -466,6 +479,10 @@ class UserOut(BaseModel):
     is_disabled: bool
     created_at: str
     last_login_at: str | None
+
+    @field_serializer("created_at", "last_login_at")
+    def _ser_ts(self, v: str | None) -> str | None:
+        return iso_utc(v)
 
 
 @router.get("/users", response_model=list[UserOut])
@@ -550,7 +567,7 @@ def list_ingestion_runs(admin: CurrentUser = Depends(require_admin), limit: int 
                 "SELECT event, COUNT(*) c FROM ingestion_events WHERE run_id = ? GROUP BY event", (r["id"],)
             ).fetchall()
             out.append({
-                "id": r["id"], "started_at": r["started_at"], "finished_at": r["finished_at"],
+                "id": r["id"], "started_at": iso_utc(r["started_at"]), "finished_at": iso_utc(r["finished_at"]),
                 "status": r["status"], "trigger": r["trigger"], "counts": {c["event"]: c["c"] for c in counts},
             })
     return out
@@ -590,7 +607,7 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
 
     return {
         "last_success_run_id": last_success["id"] if last_success else None,
-        "last_success_at": last_success["finished_at"] if last_success else None,
+        "last_success_at": iso_utc(last_success["finished_at"]) if last_success else None,
         "last_success_trigger": last_success["trigger"] if last_success else None,
         # Independent follow-up review 2026-08-24 P0-6: "completed_with_errors
         # treated as unconditional success" -- staleness correctly still
@@ -601,7 +618,7 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
         "last_success_status": last_success["status"] if last_success else None,
         "hours_since_last_success": hours_since_last_success,
         "last_attempt_run_id": last_attempt["id"] if last_attempt else None,
-        "last_attempt_started_at": last_attempt["started_at"] if last_attempt else None,
+        "last_attempt_started_at": iso_utc(last_attempt["started_at"]) if last_attempt else None,
         "last_attempt_status": last_attempt["status"] if last_attempt else None,
         "active_document_count": active_document_count,
         "sync_interval_minutes": settings.ingestion_sync_interval_minutes,
@@ -626,8 +643,8 @@ def get_ingestion_report(run_id: int, admin: CurrentUser = Depends(require_admin
         ).fetchall()
     return {
         "run_id": run_id,
-        "started_at": run["started_at"],
-        "finished_at": run["finished_at"],
+        "started_at": iso_utc(run["started_at"]),
+        "finished_at": iso_utc(run["finished_at"]),
         "status": run["status"],
         "files": [dict(e) for e in events],
     }
@@ -649,7 +666,7 @@ def list_duplicates(admin: CurrentUser = Depends(require_admin)):
             "JOIN documents d ON d.id = dm.duplicate_document_id "
             "ORDER BY dm.detected_at DESC"
         ).fetchall()
-    return [dict(r) for r in rows]
+    return [{**dict(r), "detected_at": iso_utc(r["detected_at"])} for r in rows]
 
 
 # ---------------------------------------------------------------------------

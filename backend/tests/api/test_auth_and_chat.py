@@ -146,6 +146,30 @@ def test_conversation_without_machine_asks_clarifying_question(test_env):
     assert body["is_no_answer"] is False
 
 
+def test_conversation_and_message_timestamps_carry_an_explicit_utc_offset(test_env):
+    """Phase 1 (narrowed scope): "Return UTC ISO-8601 timestamps with
+    offsets." SQLite's datetime('now') (what conversations.started_at/
+    updated_at and messages.created_at are actually stored as) returns
+    'YYYY-MM-DD HH:MM:SS' with no timezone marker at all -- not valid
+    ISO-8601. This proves the real HTTP response, not just app.api.common.
+    iso_utc() in isolation (see tests/unit/test_iso_utc.py for that)."""
+    _register("tech-ts@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    assert conv["started_at"].endswith("+00:00")
+    assert conv["updated_at"].endswith("+00:00")
+    assert "T" in conv["started_at"]  # not the bare 'YYYY-MM-DD HH:MM:SS' form
+
+    msg = client.post(
+        f"/api/conversations/{conv['id']}/messages", json={"content": "Why won't it heat up?"}
+    ).json()
+    assert msg["created_at"].endswith("+00:00")
+    assert "T" in msg["created_at"]
+
+    listed = client.get("/api/conversations").json()[0]
+    assert listed["started_at"].endswith("+00:00")
+    assert listed["updated_at"].endswith("+00:00")
+
+
 def test_question_on_machine_with_no_manuals_is_honest_no_answer(test_env):
     with get_conn() as conn:
         conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")

@@ -6,9 +6,10 @@ import re
 import sqlite3
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 from rapidfuzz import fuzz
 
+from app.api.common import iso_utc
 from app.auth.deps import CurrentUser, get_current_user
 from app.db import get_conn
 from app.providers.base import GeneratedAnswer, HistoryTurn, ProviderError
@@ -33,6 +34,10 @@ class ConversationOut(BaseModel):
     title: str | None
     started_at: str
     updated_at: str
+
+    @field_serializer("started_at", "updated_at")
+    def _ser_ts(self, v: str) -> str:
+        return iso_utc(v)
 
 
 class CreateConversationRequest(BaseModel):
@@ -76,6 +81,10 @@ class MessageOut(BaseModel):
     # the MOST RECENT rating, not "whether any feedback exists".
     feedback_rating: str | None = None
     is_saved: bool = False
+
+    @field_serializer("created_at")
+    def _ser_ts(self, v: str) -> str:
+        return iso_utc(v)
 
 
 def _machine_label(conn, machine_id: int | None) -> str | None:

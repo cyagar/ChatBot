@@ -67,6 +67,22 @@ class Settings(BaseSettings):
     # manuals (independent review concern #19). Set this before any pilot.
     allowed_registration_domains: str = ""
 
+    # GET /api/config (Phase 1, narrowed scope). All four are read, not
+    # enforced -- a maintenance banner and a minimum-version nudge are UI
+    # concerns for whichever client reads this; nothing server-side blocks a
+    # request based on these values today.
+    maintenance_mode: bool = False
+    maintenance_message: str = ""
+    # Compared against nothing automatically -- there is no client-submitted
+    # app-version header/field this checks against yet. Kept in sync by hand
+    # with android/app/build.gradle.kts's versionName for now.
+    minimum_supported_version: str = "0.1.0-demo"
+    # A real support inbox/URL for this deployment. The default below is a
+    # placeholder, not a live inbox -- set this explicitly before treating
+    # /api/config's support_contact as something a technician can actually
+    # use.
+    support_contact: str = "support@hmwagner.com"
+
     def validate_for_startup(self) -> None:
         """Refuse to boot with an insecure or inconsistent configuration once we're
         outside local development. A blank/default/short SECRET_KEY means session

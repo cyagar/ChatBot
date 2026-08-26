@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 
+from app.api.common import iso_utc
 from app.auth.deps import CurrentUser, get_current_user
 from app.db import get_conn
 
@@ -18,6 +19,10 @@ class MachineOut(BaseModel):
     document_count: int
     is_favorite: bool = False
     last_used_at: str | None = None
+
+    @field_serializer("last_used_at")
+    def _ser_ts(self, v: str | None) -> str | None:
+        return iso_utc(v)
 
 
 def _row_to_machine(row) -> MachineOut:

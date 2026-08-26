@@ -38,6 +38,36 @@ class UserOut(BaseModel):
     email: str
     role: str
     display_name: str | None
+    # Phase 1 (narrowed scope, 2026-08-26): "role/capabilities". Mechanical,
+    # not a new permission system -- every technician-facing capability is
+    # available to any authenticated user (there's no per-technician
+    # variation), and the administrator-only ones are exactly the routes
+    # app.auth.deps.require_admin actually gates (routes_admin.py). This
+    # lists what the server already enforces; it does not itself enforce
+    # anything.
+    capabilities: list[str] = []
+
+
+_TECHNICIAN_CAPABILITIES = [
+    "ask_questions",
+    "search_machines",
+    "view_history",
+    "save_answers",
+]
+_ADMINISTRATOR_ONLY_CAPABILITIES = [
+    "manage_documents",
+    "manage_users",
+    "manage_invitations",
+    "review_corpus",
+    "run_ingestion",
+    "view_admin_reports",
+]
+
+
+def _capabilities_for_role(role: str) -> list[str]:
+    if role == "administrator":
+        return _TECHNICIAN_CAPABILITIES + _ADMINISTRATOR_ONLY_CAPABILITIES
+    return list(_TECHNICIAN_CAPABILITIES)
 
 
 def _set_session_cookie(response: Response, user_id: int, role: str, token_version: int):
@@ -135,7 +165,8 @@ def register(payload: RegisterRequest, request: Request, response: Response):
     # 0 matches the `users.token_version` column DEFAULT used by this INSERT
     # (not read back) -- if that default ever changes, this literal must move too.
     _set_session_cookie(response, user_id, invite["role"], token_version=0)
-    return UserOut(id=user_id, email=payload.email, role=invite["role"], display_name=payload.display_name)
+    return UserOut(id=user_id, email=payload.email, role=invite["role"], display_name=payload.display_name,
+                   capabilities=_capabilities_for_role(invite["role"]))
 
 
 @router.post("/login", response_model=UserOut)
@@ -154,7 +185,8 @@ def login(payload: LoginRequest, request: Request, response: Response):
         conn.execute("UPDATE users SET last_login_at = datetime('now') WHERE id = ?", (row["id"],))
 
     _set_session_cookie(response, row["id"], row["role"], row["token_version"])
-    return UserOut(id=row["id"], email=row["email"], role=row["role"], display_name=row["display_name"])
+    return UserOut(id=row["id"], email=row["email"], role=row["role"], display_name=row["display_name"],
+                   capabilities=_capabilities_for_role(row["role"]))
 
 
 @router.post("/logout")
@@ -165,4 +197,5 @@ def logout(response: Response):
 
 @router.get("/me", response_model=UserOut)
 def me(user: CurrentUser = Depends(get_current_user)):
-    return UserOut(id=user.id, email=user.email, role=user.role, display_name=user.display_name)
+    return UserOut(id=user.id, email=user.email, role=user.role, display_name=user.display_name,
+                   capabilities=_capabilities_for_role(user.role))

@@ -2,21 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.api.errors import (
+    CORRELATION_ID_HEADER,
+    error_body,
+    http_exception_handler,
+    rate_limit_exception_handler,
+    unhandled_exception_body,
+    validation_exception_handler,
+)
 from app.api.routes_admin import router as admin_router
 from app.api.routes_chat import router as chat_router
+from app.api.routes_config import router as config_router
 from app.api.routes_machines import router as machines_router
 from app.api.routes_manuals import router as manuals_router
 from app.auth.routes import router as auth_router
@@ -55,7 +66,9 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Technician Manual Assistant", version="0.1.0", lifespan=lifespan)
 
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RateLimitExceeded, rate_limit_exception_handler)
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_middleware(SlowAPIMiddleware)
 
 _STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -83,7 +96,7 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
                 if source_host and source_host != request.headers.get("host"):
                     return JSONResponse(
                         status_code=403,
-                        content={"detail": "Cross-origin request rejected."},
+                        content=error_body(request, 403, "Cross-origin request rejected."),
                     )
         return await call_next(request)
 
@@ -102,16 +115,33 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    """Phase 1: every error body needs a correlation id. Set before any
+    other middleware runs (this is the last @app.middleware("http") call,
+    which Starlette makes the outermost layer) so even a request rejected
+    by OriginCheckMiddleware above -- which never reaches a route handler --
+    still gets one, and the same id that appears in the error body is also
+    echoed as a response header for support/log correlation on a *success*
+    response too, not just errors."""
+    request.state.correlation_id = str(uuid.uuid4())
+    response = await call_next(request)
+    response.headers[CORRELATION_ID_HEADER] = request.state.correlation_id
+    return response
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     # Never leak internals (stack traces, file paths, DB errors) to the client.
     settings = get_settings()
-    if settings.app_env == "development":
+    response = unhandled_exception_body(request, settings.app_env == "development", exc)
+    if response is None:
         raise exc
-    return JSONResponse(status_code=500, content={"detail": "An unexpected error occurred."})
+    return response
 
 
 app.include_router(auth_router)
+app.include_router(config_router)
 app.include_router(machines_router)
 app.include_router(chat_router)
 app.include_router(manuals_router)
