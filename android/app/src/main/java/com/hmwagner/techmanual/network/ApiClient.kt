@@ -34,15 +34,35 @@ object ApiClient {
 
     // Flips true the moment any authenticated call comes back 401 (session
     // expired, revoked, or the user was disabled mid-session -- get_current_user
-    // in the backend rejects all of these the same way). AppNav observes this
-    // and routes back to the login screen -- otherwise every screen just shows
-    // a raw "code 401" error forever with no way back in (session TTL is short
-    // enough that this WILL happen if the app sits idle during the demo).
+    // in the backend rejects all of these the same way), OR a deliberate
+    // logout() below. AppNav observes this and routes back to the login
+    // screen, clearing every account-scoped screen along the way -- otherwise
+    // a signed-in screen either shows a raw "code 401" error forever with no
+    // way back in, or (logout) just keeps showing the previous account's data
+    // with no server session behind it (P0A-1).
     private val _sessionExpired = MutableStateFlow(false)
     val sessionExpired: StateFlow<Boolean> = _sessionExpired
 
     fun onSessionExpiredHandled() {
         _sessionExpired.value = false
+    }
+
+    /**
+     * P0A-1: a visible, explicit sign-out, reachable from every signed-in
+     * screen. Always ends the local session even if the server can't be
+     * reached -- a technician must never be stuck unable to sign out (or
+     * into a different account) just because the network is down -- but
+     * still tries the real server-side logout first so the session is
+     * actually revoked when possible, not just forgotten locally.
+     */
+    suspend fun logout() {
+        try {
+            service.logout()
+        } catch (_: Exception) {
+            // Best-effort; the local session is cleared unconditionally below.
+        }
+        cookieJar.clear()
+        _sessionExpired.value = true
     }
 
     fun init(context: Context) {

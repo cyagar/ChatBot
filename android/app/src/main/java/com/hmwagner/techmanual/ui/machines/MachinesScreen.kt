@@ -34,6 +34,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hmwagner.techmanual.network.MachineOut
+import com.hmwagner.techmanual.ui.common.LogoutAction
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,6 +55,7 @@ fun MachinesScreen(
                             Icon(Icons.Filled.History, contentDescription = "Conversation history")
                         }
                     }
+                    LogoutAction()
                 },
             )
         },

@@ -56,6 +56,7 @@ import com.hmwagner.techmanual.BuildConfig
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.CitationOut
 import com.hmwagner.techmanual.network.MessageOut
+import com.hmwagner.techmanual.ui.common.LogoutAction
 import com.hmwagner.techmanual.ui.theme.warningColor
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -107,6 +108,7 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to choose a machine")
                         }
                     }
+                    LogoutAction()
                 },
             )
         },

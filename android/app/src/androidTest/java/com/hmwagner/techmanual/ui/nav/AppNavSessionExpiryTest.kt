@@ -5,6 +5,8 @@ import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
@@ -78,15 +80,26 @@ class AppNavSessionExpiryTest {
 
     @After
     fun tearDown() {
-        server.shutdown()
+        // logoutClearsTheLocalSessionEvenWhenTheServerIsUnreachable() below
+        // shuts the server down itself to simulate an unreachable server --
+        // guard against a double-shutdown throwing here in that case.
+        try {
+            server.shutdown()
+        } catch (_: Exception) {
+        }
     }
 
     @Test
     fun a401OnTheFirstAuthenticatedRequestRedirectsToLogin() {
-        // MachinesViewModel.init{} fires GET api/machines/recent the moment
-        // MachinesScreen enters composition -- this is the only request
-        // AppNav's Home destination issues on first render, so this one
-        // enqueued 401 is what the authExpiryInterceptor sees.
+        // AppNav's own launch-time /me check (P0A-1) runs first and must
+        // succeed here so Home actually mounts -- this test is about the
+        // 401 that MachinesViewModel.init{}'s GET api/machines/recent gets
+        // once MachinesScreen enters composition, not about /me itself.
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"id": 1, "email": "tech.demo@hmwagner.com", "role": "technician"}"""),
+        )
         server.enqueue(MockResponse().setResponseCode(401))
 
         composeTestRule.setContent {
@@ -107,6 +120,11 @@ class AppNavSessionExpiryTest {
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
+                .setBody("""{"id": 1, "email": "tech.demo@hmwagner.com", "role": "technician"}"""),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
                 .setBody("[]"),
         )
 
@@ -124,13 +142,118 @@ class AppNavSessionExpiryTest {
         }
         composeTestRule.onNodeWithText("Ask about a machine").assertExists()
         assertEquals(
-            "expected exactly the fake login plus one recentMachines() call",
-            2,
+            "expected exactly the fake login, AppNav's launch-time /me check, plus one recentMachines() call",
+            3,
             server.requestCount,
         )
 
         val loginNodes = composeTestRule.onAllNodesWithText("Technician Manual Assistant").fetchSemanticsNodes()
         assertTrue("a successful request must not trigger the session-expiry redirect", loginNodes.isEmpty())
         assertTrue(ApiClient.hasSession())
+    }
+
+    // P0A-1 exit gate: "No state, label, message, evidence, saved status, or
+    // selection from one account is visible after another account signs in."
+    // Drives a real conversation open via UI clicks (not just setting
+    // HomeSelectionViewModel fields directly), then forces a session expiry
+    // and asserts that logging back in -- even as the SAME account, which is
+    // the harder case since a stale label collision wouldn't be visible as an
+    // obviously wrong account -- lands back on the machine list, not straight
+    // into the old conversation. Before this fix, AppNav's sessionExpired
+    // handler left HomeSelectionViewModel untouched (it's Activity-scoped,
+    // not tied to the HOME back-stack entry the way the NavHost-cleared
+    // ViewModels are), so a fresh login could reopen the old conversation.
+    @Test
+    fun sessionExpiryClearsTheSelectedConversationSoALaterLoginStartsClean() {
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"id": 1, "email": "tech.demo@hmwagner.com", "role": "technician"}"""),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""[{"id": 7, "manufacturer": "Acme", "model_name": "X100", "family": null, "document_count": 1, "is_favorite": false}]"""),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"id": 42, "machine_id": 7, "machine_label": "Acme X100", "title": null, "started_at": "", "updated_at": ""}"""),
+        )
+        // No body, matching MachinesViewModelTest's proven-working
+        // touchMachine mock -- Response<Unit>'s body converter behavior with
+        // an explicit empty-object body was never verified here.
+        server.enqueue(MockResponse().setResponseCode(200)) // touchMachine
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("[]"),
+        ) // ChatViewModel's initial getMessages
+
+        composeTestRule.setContent {
+            AppNav(windowSizeClass = compactWindowSizeClass)
+        }
+
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodesWithText("Acme X100").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.onNodeWithText("Acme X100").performClick()
+
+        // Chat's top bar renders the machine label next to the "Chat" title
+        // (see ChatScreen's TopAppBar) once the conversation is actually open.
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodesWithText("Chat").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Exercises the exact same AppNav-level handling a real 401 would
+        // (see ApiClient.sessionExpired's doc comment). logout() makes a
+        // real POST /api/auth/logout call first -- MockWebServer's queue
+        // blocks waiting for a response if none is enqueued, so this needs
+        // its own response even though the test doesn't care what it is.
+        server.enqueue(MockResponse().setResponseCode(200))
+        runBlocking { ApiClient.logout() }
+
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodesWithText("Technician Manual Assistant").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Re-login through the real LoginScreen UI, not a direct service
+        // call -- onLoggedIn -> navController.navigate(Routes.HOME) is what
+        // actually exercises whether HomeContent starts clean.
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Set-Cookie", "tma_session=faketoken2; Path=/; HttpOnly")
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"id": 1, "email": "tech.demo@hmwagner.com", "role": "technician"}"""),
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("[]"),
+        ) // recentMachines() on the freshly re-entered Home
+
+        composeTestRule.onNodeWithText("Email").performTextInput("tech.demo@hmwagner.com")
+        composeTestRule.onNodeWithText("Password").performTextInput("DemoPass123!")
+        composeTestRule.onNodeWithText("Sign in").performClick()
+
+        // If HomeSelectionViewModel's selection had NOT been cleared,
+        // SinglePaneHome would start straight on the Chat route again (see
+        // its `startDestination`) and this title would never render.
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodesWithText("Ask about a machine").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.onNodeWithText("Ask about a machine").assertExists()
+    }
+
+    // P0A-1 exit gate + test list item 10: a technician must always be able
+    // to sign out of THIS device, even if the server can't be reached to
+    // revoke the session server-side.
+    @Test
+    fun logoutClearsTheLocalSessionEvenWhenTheServerIsUnreachable() {
+        server.shutdown()
+
+        runBlocking { ApiClient.logout() }
+
+        assertFalse("logout must clear the local session even when the server call fails", ApiClient.hasSession())
     }
 }

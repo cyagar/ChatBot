@@ -166,14 +166,19 @@ The existing administrator account also works and reaches the same screens
   remotely (found the hard way, 2026-08-25).
 - ~~`LoginViewModel`, `MachinesViewModel`, and `ChatViewModel` are covered by
   unit tests now; `AppNav`'s session-expiry redirect and the screens
-  themselves (Compose UI) are not~~ **`AppNav`'s session-expiry redirect now
-  has instrumented coverage, verified live on the Tab A9+ (2026-08-25).** See
+  themselves (Compose UI) are not~~ **`AppNav`'s session-expiry redirect had
+  instrumented coverage, verified live on the Tab A9+ (2026-08-25).** See
   "Instrumented (androidTest) coverage" below. Still genuinely open: the rest
   of the Compose screens (Login/Machines/History/Chat) have no UI-level
   assertions of their own, only the ViewModel unit tests underneath them —
   this closed the one item that was actually untestable at the JVM-unit-test
   layer (a real OkHttp interceptor pipeline needs a real Android Keystore),
-  not the full "every screen has Compose UI tests" gap.
+  not the full "every screen has Compose UI tests" gap. **Caveat added during
+  P0A-1 (2026-08-26):** the two tests behind that claim were since modified
+  (to account for the new launch-time `/me` call, see the P0A-1 bullet below)
+  and two more were added alongside them — none of the four have been run
+  on-device since. The "verified live" claim above covers only the
+  now-superseded pre-P0A-1 version of this test file, not its current form.
 - ~~The Keystore-backed cookie encryption has not been verified on a physical
   device~~ **Verified live on the Tab A9+ (2026-08-24).** Installed this
   build directly over an existing pre-Keystore install that had an active
@@ -501,6 +506,52 @@ The existing administrator account also works and reaches the same screens
   attempt. Without this, a session expiring mid-demo (or sitting idle over a
   break) would leave every screen showing a raw "code 401" with no way back
   in short of force-reinstalling.
+- **P0A-1: account boundary, logout, and launch-time session validation.**
+  Three related gaps, all fixed together since they share one mechanism:
+  - There was no visible way to sign out. `ui/common/LogoutAction.kt` adds
+    one `IconButton` used in every signed-in screen's `TopAppBar`
+    (Machines/History/Chat) that calls the new `ApiClient.logout()` — a
+    best-effort server-side `POST /api/auth/logout` followed by an
+    *unconditional* local session clear, so a technician can always sign out
+    of this device even if the server is unreachable.
+  - `AppNav`'s 401 redirect (`sessionExpired`) cleared the NavHost back stack
+    but never touched `HomeSelectionViewModel` — the selected
+    conversation id/label, which is Activity-scoped, not tied to the `HOME`
+    back-stack entry the way the Machines/History/Chat ViewModels are. A
+    later login could silently reopen the *previous account's* conversation.
+    Fixed by clearing `selection.selectedId`/`selectedLabel` in the same
+    `LaunchedEffect(sessionExpired)` block that does the redirect.
+    `logout()` reuses this exact same flag/handling deliberately — a
+    deliberate sign-out and a 401 need identical "drop every account-scoped
+    screen" treatment, not two implementations that can drift apart.
+  - A stored session cookie used to be treated as proof of a still-valid
+    signed-in user (`ApiClient.hasSession()` only checks that something is
+    saved). `AppNav` now gates its very first frame on a real `GET
+    /api/auth/me` call (bounded to 5s, well under the client's real 15s
+    connect / 90s read timeouts, so a dead-zone launch fails open instead of
+    leaving a "Checking your session…" spinner on screen for up to 90s)
+    before deciding whether to start on Home or Login, so a revoked/expired
+    cookie from a previous run lands on Login immediately instead of
+    flashing Home and then bouncing back. **Owner-confirmed policy
+    (2026-08-26):** a network exception or timeout during that check (as
+    opposed to an explicit 401) fails open onto the cached session rather
+    than forcing Login while merely offline — connectivity is required for
+    every real action regardless (plan §2.3 — "Internet is required for AI
+    answers"), so this only affects whether Home renders while briefly
+    offline, not what's trusted for anything that matters.
+  - Covered by `AppNavSessionExpiryTest` (see "Instrumented (androidTest)
+    coverage" below): a session expiry (simulated via a direct `logout()`
+    call, which shares AppNav's handling with a real 401) after actually
+    opening a conversation through UI clicks, followed by a real re-login
+    through `LoginScreen`, lands back on the machine list rather than
+    straight into the old conversation; and a logout with the server shut
+    down still clears the local session. Not yet run on-device this session
+    (no `adb`/emulator available in this environment) — needs the same live
+    verification pass the rest of this file's `androidTest` coverage got.
+  - Deliberately NOT changed: the admin account still works in this app.
+    Section 5/P0A-1 of the plan requires blocking admin accounts "unless the
+    owner explicitly approves admins using it" — the owner did, so this is a
+    recorded decision, not an oversight.
 - **The clarifying-machine flow is now reachable**: "Not sure which machine?"
   on the machine picker starts a conversation with no machine selected, so
   asking a question exercises the server's real clarify-instead-of-guess path
@@ -660,14 +711,18 @@ Retrofit+`MockWebServer` client via `overrideServiceForTest` instead and never
 wires that interceptor up at all, so this redirect had never actually been
 exercised by any test, only verified by hand on the tablet.
 
-`AppNavSessionExpiryTest` (2 tests, `android/app/src/androidTest/...`) closes
+`AppNavSessionExpiryTest` (4 tests, `android/app/src/androidTest/...`) closes
 that gap by running for real on-device: it logs in against a real
 `MockWebServer` instance (so `PersistentCookieJar` stores a real
 Keystore-encrypted session cookie, same as production), composes `AppNav`
 directly, then asserts that a 401 on the first authenticated request
 (`MachinesViewModel.init{}`'s `recentMachines()` call) redirects to the login
-screen and clears the session, while a 200 does not. This needed two small
-production-code additions, both scoped narrowly to test support:
+screen and clears the session, while a 200 does not. Two more tests (added
+for P0A-1, see above) open a real conversation through UI clicks, force a
+session expiry, and assert a real re-login through `LoginScreen` lands back
+on the machine list rather than the old conversation; and that `logout()`
+still clears the local session with the server shut down. This needed two
+small production-code additions, both scoped narrowly to test support:
 
 - `ApiClient.initForTest(context, baseUrl)` — `init(context)` is a one-shot
   guarded by `::service.isInitialized`, and by the time a test runs,

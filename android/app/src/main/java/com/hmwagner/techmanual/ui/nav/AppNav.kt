@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -41,6 +42,7 @@ import com.hmwagner.techmanual.ui.chat.ChatScreen
 import com.hmwagner.techmanual.ui.history.HistoryScreen
 import com.hmwagner.techmanual.ui.login.LoginScreen
 import com.hmwagner.techmanual.ui.machines.MachinesScreen
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Holds the two-pane/single-pane selected conversation. A plain ViewModel,
@@ -75,11 +77,21 @@ private object Routes {
     fun chat(conversationId: Int, label: String?) = "chat/$conversationId?label=${label ?: ""}"
 }
 
+/**
+ * P0A-1: a stored session cookie used to be treated as proof of a valid
+ * signed-in user -- `hasSession()` only checks that *something* is saved,
+ * not that the server still honors it (expired, revoked, or the account was
+ * disabled since the cookie was written). `Checking` gates the very first
+ * frame on a real `/me` call so a stale/invalid cookie lands on Login before
+ * any account-scoped screen ever renders, instead of flashing Home and then
+ * bouncing back via the 401 interceptor.
+ */
+private enum class LaunchSessionState { Checking, SignedIn, SignedOut }
+
 @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
 @Composable
 fun AppNav(windowSizeClass: WindowSizeClass) {
     val navController = rememberNavController()
-    val startDestination = remember { if (ApiClient.hasSession()) Routes.HOME else Routes.LOGIN }
     val sessionExpired by ApiClient.sessionExpired.collectAsState()
     // Obtained here, above NavHost, so it resolves against the ambient
     // LocalViewModelStoreOwner at THIS point in composition -- the hosting
@@ -87,8 +99,66 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
     // than a NavBackStackEntry's own ViewModelStore.
     val selection: HomeSelectionViewModel = viewModel()
 
-    LaunchedEffect(sessionExpired) {
-        if (sessionExpired) {
+    var launchState by remember { mutableStateOf(LaunchSessionState.Checking) }
+    LaunchedEffect(Unit) {
+        launchState = if (!ApiClient.hasSession()) {
+            LaunchSessionState.SignedOut
+        } else {
+            // Bounded well below the client's real 15s connect / 90s read
+            // timeouts (ApiClient.kt) -- those are sized for a slow real
+            // answer, not for how long a technician should stare at an
+            // unlabeled spinner on cold launch. A timeout here fails open
+            // the same way an outright connection exception does, below;
+            // the real /me call is left to finish in the background and its
+            // result is simply discarded.
+            withTimeoutOrNull(5_000) {
+                try {
+                    val resp = ApiClient.service.me()
+                    if (resp.isSuccessful) {
+                        LaunchSessionState.SignedIn
+                    } else {
+                        // authExpiryInterceptor already cleared the cookie and
+                        // set sessionExpired for a 401 here; consuming it now
+                        // avoids a redundant navigate() once Home/Login mount.
+                        ApiClient.clearSession()
+                        ApiClient.onSessionExpiredHandled()
+                        LaunchSessionState.SignedOut
+                    }
+                } catch (_: Exception) {
+                    // Couldn't reach the server to validate -- fail open on a
+                    // cached session rather than locking a technician out of
+                    // the whole app while merely offline. Every real action
+                    // still requires connectivity (plan: "Internet is
+                    // required for AI answers"), so this only affects
+                    // whether Home renders while offline, not whether stale
+                    // data is trusted for anything that matters.
+                    LaunchSessionState.SignedIn
+                }
+            } ?: LaunchSessionState.SignedIn
+        }
+    }
+
+    // A deliberate logout() shares this exact flag/handling with a 401
+    // session expiry (see ApiClient.sessionExpired's doc comment) -- both
+    // must drop every account-scoped screen the same way. HomeSelectionViewModel
+    // is Activity-scoped (not tied to the HOME back-stack entry the way the
+    // Machines/History/Chat ViewModels are), so popUpTo(0) below does NOT
+    // clear it on its own -- without this, a later login as a different
+    // account could reopen the prior account's selected conversation
+    // id/label (P0A-1).
+    //
+    // Guarded on launchState != Checking: the launch-time /me call above
+    // runs through the same authExpiryInterceptor as every other request, so
+    // a 401 there also flips this flag -- without the guard, this effect
+    // could call navController.navigate() before NavHost (below) has even
+    // been composed, which throws (no NavGraph set yet). The /me branch
+    // above already handles that case directly (clearSession +
+    // onSessionExpiredHandled), so this effect has nothing left to do while
+    // still Checking.
+    LaunchedEffect(sessionExpired, launchState) {
+        if (sessionExpired && launchState != LaunchSessionState.Checking) {
+            selection.selectedId = null
+            selection.selectedLabel = null
             navController.navigate(Routes.LOGIN) {
                 popUpTo(0) { inclusive = true }
             }
@@ -96,16 +166,32 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
         }
     }
 
-    NavHost(navController = navController, startDestination = startDestination) {
-        composable(Routes.LOGIN) {
-            LoginScreen(onLoggedIn = {
-                navController.navigate(Routes.HOME) {
-                    popUpTo(Routes.LOGIN) { inclusive = true }
+    when (launchState) {
+        LaunchSessionState.Checking -> LaunchChecking()
+        else -> {
+            val startDestination = if (launchState == LaunchSessionState.SignedIn) Routes.HOME else Routes.LOGIN
+            NavHost(navController = navController, startDestination = startDestination) {
+                composable(Routes.LOGIN) {
+                    LoginScreen(onLoggedIn = {
+                        navController.navigate(Routes.HOME) {
+                            popUpTo(Routes.LOGIN) { inclusive = true }
+                        }
+                    })
                 }
-            })
+                composable(Routes.HOME) {
+                    HomeContent(selection = selection, isExpanded = windowSizeClass.widthSizeClass == WindowWidthSizeClass.Expanded)
+                }
+            }
         }
-        composable(Routes.HOME) {
-            HomeContent(selection = selection, isExpanded = windowSizeClass.widthSizeClass == WindowWidthSizeClass.Expanded)
+    }
+}
+
+@Composable
+private fun LaunchChecking() {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            CircularProgressIndicator()
+            Text("Checking your session…", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

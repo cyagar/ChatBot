@@ -31,6 +31,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hmwagner.techmanual.network.ConversationOut
+import com.hmwagner.techmanual.ui.common.LogoutAction
 
 /**
  * Past conversations across all machines, most recently updated first (the
@@ -65,6 +66,7 @@ fun HistoryScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to machines")
                     }
                 },
+                actions = { LogoutAction() },
             )
         },
     ) { padding ->
