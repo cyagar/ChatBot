@@ -1,0 +1,53 @@
+name: Android CI
+
+# Change set 2 (UpdatedNextSteps.txt section 14): "Add CI for backend and
+# Android deterministic checks." Runs assembleDebug + testDebugUnitTest --
+# both work with zero configuration (see android/README.md's "Configuring
+# the backend endpoint": debug falls back to the emulator alias, no
+# local.properties/env var needed). Deliberately does NOT run
+# assembleRelease (fails closed without a real https:// BASE_URL, and no
+# real backend is deployed yet -- see docs/OWNER_DECISION_GATE.md) or
+# connectedDebugAndroidTest (needs a real device/emulator; a GitHub-hosted
+# Android emulator is a real option but a larger addition than this pass
+# covers -- left for a follow-up, not silently skipped without saying so).
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "android/**"
+      - ".github/workflows/android-ci.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-ci.yml"
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only the Gradle daemon needs JDK 25 (gradle/gradle-daemon-jvm.properties
+      # auto-provisions it via the foojay resolver, confirmed working locally
+      # even with an old launcher JVM -- see android/README.md's Prerequisites
+      # section) -- the launcher JVM setup-java provides here doesn't need to
+      # match it.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Install Android SDK Platform 37
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37" "build-tools;37.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile and run JVM unit tests
+        run: ./gradlew testDebugUnitTest --console=plain
+
+      - name: Build the debug APK
+        run: ./gradlew assembleDebug --console=plain

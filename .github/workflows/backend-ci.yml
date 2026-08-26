@@ -1,0 +1,64 @@
+name: Backend CI
+
+# Change set 2 (UpdatedNextSteps.txt section 14): "Add CI for backend and
+# Android deterministic checks." Runs the full backend/tests/ suite --
+# app.config.Settings.validate_for_startup() isn't invoked (tests/conftest.py's
+# test_env fixture sets env vars directly, never calling that), and no
+# secrets/external services are required: AI_PROVIDER is forced to
+# local_extractive and Google Drive is left unconfigured for every test, per
+# tests/conftest.py's own test_env fixture.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches Dockerfile's python:3.12-slim -- the documented production
+          # target, not the 3.14 used for local Windows dev (see Dockerfile's
+          # own comment on this). CI validates what will actually run.
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      # embedding_model_revision in app/config.py is a pinned commit SHA, not
+      # a branch -- caching this key is safe from silently picking up a
+      # different model later, and turns every run after the first into a
+      # cache hit instead of a fresh Hugging Face download.
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-embedding-model-${{ hashFiles('backend/app/config.py') }}
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1
+        # tesseract-ocr (also apt-installed in the Dockerfile) is deliberately
+        # not installed here: no test in backend/tests/ exercises real OCR
+        # (grepped for it before adding this workflow), only libgl1 is needed
+        # for the same reason the Dockerfile needs it (an image-handling
+        # dependency's import path, not anything OCR-specific).
+
+      - name: Install Python dependencies
+        run: |
+          pip install --no-cache-dir torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Run backend test suite
+        run: pytest -q
