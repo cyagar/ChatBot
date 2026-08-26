@@ -723,6 +723,57 @@ The existing administrator account also works and reaches the same screens
     no way to confirm a Coil error-state fallback actually renders
     correctly with only JVM unit tests, so it wasn't
     worth adding unverified UI churn to this otherwise fully-tested commit.
+- **P0A-5 (partial): the three layout sites the plan names by name no
+  longer overflow.** `MessageBubble`'s clarifying-options row, citation
+  -chip row, and Helpful/Incorrect/Save row were all plain `Row`s, which
+  don't wrap. Switched to `FlowRow` (both `horizontalArrangement` and
+  `verticalArrangement` set explicitly -- omitting the vertical one leaves
+  wrapped lines jammed together with no gap). Also dropped the
+  `Modifier.padding(start = 12.dp, end = 8.dp)` tuned for the
+  "Marked helpful"/"Marked incorrect" label's position in a horizontal
+  `Row`; inside a `FlowRow` that text can land at the start of a wrapped
+  line, where the same padding would read as a stray indent.
+  - **The real pre-fix failure mode, found by dumping the actual on-device
+    semantics tree (2026-08-26), was not what it looks like from reading
+    the code.** A plain `Row` given a bounded max-width constraint (from
+    the `Card`'s `widthIn(max = 560.dp)` and the screen's own width) does
+    NOT let its total children width exceed that bound by rendering extra
+    chips off-screen to the right. Instead, once the first long chip
+    consumes nearly all the available width, every *subsequent* chip in
+    the same `Row` gets measured with essentially zero space left and
+    **collapses to a literal zero-width placement** (`Rect.fromLTRB(504.0,
+    209.0, 504.0, ...)` -- left equals right) rather than rendering at
+    all: still present in the semantics tree, completely invisible and
+    untappable in practice. A first draft of the new instrumented test
+    below asserted only that each chip's right edge stayed within the
+    container -- which trivially passes for a zero-width chip -- and
+    didn't actually catch the pre-fix bug on the first attempt; caught by
+    following this repo's own verify-tests-actually-fail discipline, not
+    by inspection.
+  - Covered by a new instrumented test,
+    `ChatScreenLayoutTest.clarifyingOptionChipsWrapInsteadOfCollapsingAt360dpWidth`
+    (`android/app/src/androidTest/.../ui/chat/`): renders `ChatScreen`
+    inside a `Box(Modifier.width(360.dp))` -- the narrowest width the
+    plan's device matrix names -- with four deliberately long clarifying
+    -option labels, and asserts every chip has a genuinely positive width
+    as well as staying within the container's bounds. **Run for real on
+    the Tab A9+ (2026-08-26)**, confirmed to fail against the pre-fix
+    `Row` (once the assertion was corrected to catch the actual collapse
+    failure mode, not just an out-of-bounds one) and pass with `FlowRow`.
+    Only the clarifying-options site got its own test; the citation-chip
+    and Helpful/Incorrect/Save sites share the exact same `Row`-collapse
+    mechanism and the exact same `FlowRow` fix, so a second and third copy
+    of the same test would prove the same thing again, not add real
+    coverage.
+  - **What this does NOT close out**, per the plan's own P0A-5 exit gate:
+    the wider device/config matrix (411dp, Medium/Expanded tablet,
+    landscape, split-screen, 200% font scale, display scaling, keyboard
+    open, long localized-length strings beyond the one case tested above),
+    and a human accessibility-service listening session for focus order --
+    none of these were run. This tablet's own physical screen is 800dp
+    wide (1200x1920px @ 240dpi), so even on-device, only the
+    width-constrained instrumented test above exercises a genuinely narrow
+    layout; the rest of the matrix still needs to be run by hand.
 - **The clarifying-machine flow is now reachable**: "Not sure which machine?"
   on the machine picker starts a conversation with no machine selected, so
   asking a question exercises the server's real clarify-instead-of-guess path
@@ -949,6 +1000,17 @@ paid for itself immediately: the re-login test failed on the first real run,
 surfacing a genuine race in `AppNav.kt`'s session-expiry handling that no
 JVM test could ever have caught (see the P0A-1 bullet above for the full
 mechanism and fix). All 5 pass after that fix.
+
+`ChatScreenLayoutTest` (1 test, `android/app/src/androidTest/.../ui/chat/`,
+added for P0A-5, also run for real on the Tab A9+ 2026-08-26) closes a
+different structural gap: whether a Compose layout actually wraps instead
+of overflowing/collapsing at a given width is a real measurement-pass
+question no JVM/Robolectric-free unit test can answer honestly. It renders
+`ChatScreen` inside a `Box(Modifier.width(360.dp))` with several long
+clarifying-option labels and inspects the real semantics tree's laid-out
+bounds. See the P0A-5 bullet above for why the first draft's assertion
+(right edge in bounds) didn't actually catch the pre-fix bug, and what the
+real failure mode turned out to be.
 
 Requires a connected device or running emulator. Run with:
 ```

@@ -3,6 +3,7 @@ package com.hmwagner.techmanual.ui.chat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -360,7 +361,14 @@ private fun MessageBubble(
                 }
 
                 if (msg.clarifying_options.isNotEmpty()) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // FlowRow (P0A-5), not Row -- a plain Row doesn't wrap,
+                    // so enough clarifying options (or long enough labels)
+                    // at a narrow phone width or large font scale render
+                    // past the card's edge with no way to reach the
+                    // off-screen choices. Both arrangements set explicitly:
+                    // omitting verticalArrangement leaves wrapped rows
+                    // jammed together with no gap between them.
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         msg.clarifying_options.forEach { option ->
                             AssistChip(onClick = { onClarifyingSelect(option.id) }, label = { Text(option.label) })
                         }
@@ -369,7 +377,10 @@ private fun MessageBubble(
 
                 if (msg.citations.isNotEmpty()) {
                     Text("Sources", style = MaterialTheme.typography.labelMedium)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // FlowRow (P0A-5) -- same overflow risk as the
+                    // clarifying-options row above, worse here since a
+                    // long answer can carry many citations.
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         msg.citations.forEachIndexed { i, citation ->
                             AssistChip(
                                 onClick = { onCitationClick(citation) },
@@ -409,7 +420,20 @@ private fun MessageBubble(
                     // is exactly the case plan section 13.5's gloves concern is
                     // about: a mis-tap here doesn't just miss, it records the
                     // wrong feedback.
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    // FlowRow (P0A-5), not Row -- at a narrow phone width or
+                    // large font scale, three buttons (or the "Marked
+                    // helpful"/"Marked incorrect" label plus Save) can
+                    // overflow past the card's edge, making Save
+                    // unreachable. verticalArrangement's 8.dp is the same
+                    // value as the horizontal gap above for consistency, but
+                    // is itself unmeasured -- the uiautomator dump this
+                    // 8.dp value comes from only ever measured the
+                    // horizontal gap between adjacent buttons on one line.
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        itemVerticalAlignment = Alignment.CenterVertically,
+                    ) {
                         if (feedbackGiven == null) {
                             TextButton(onClick = { onFeedback("helpful") }) { Text("Helpful") }
                             TextButton(onClick = { onFeedback("incorrect") }) { Text("Incorrect") }
@@ -418,7 +442,6 @@ private fun MessageBubble(
                                 if (feedbackGiven == "helpful") "Marked helpful" else "Marked incorrect",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(start = 12.dp, end = 8.dp),
                             )
                         }
                         TextButton(onClick = onSave, enabled = !saved) { Text(if (saved) "Saved" else "Save") }
