@@ -147,6 +147,7 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                                     echo.content,
                                     sending = state.sending,
                                     uncertain = state.pendingEchoUncertain,
+                                    stillProcessing = state.pendingEchoStillProcessing,
                                     onRetry = vm::retryPendingSend,
                                 )
                             }
@@ -176,7 +177,13 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
 }
 
 @Composable
-private fun PendingUserBubble(text: String, sending: Boolean, uncertain: Boolean, onRetry: () -> Unit) {
+private fun PendingUserBubble(
+    text: String,
+    sending: Boolean,
+    uncertain: Boolean,
+    stillProcessing: Boolean,
+    onRetry: () -> Unit,
+) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Card(
             modifier = Modifier.widthIn(max = 480.dp),
@@ -189,15 +196,34 @@ private fun PendingUserBubble(text: String, sending: Boolean, uncertain: Boolean
                         CircularProgressIndicator(Modifier.padding(end = 6.dp).size(14.dp), strokeWidth = 2.dp)
                         Text("Searching approved manuals…", style = MaterialTheme.typography.labelSmall)
                     }
+                } else if (stillProcessing) {
+                    // P0A-2: the server DEFINITELY has this exact question
+                    // (a reload found its own persisted user turn with no
+                    // reply after it yet) and is still working on it, or
+                    // died before finishing -- deliberately NOT the same
+                    // "Connection lost" warning styling as the genuinely
+                    // uncertain case below, since nothing here is actually
+                    // lost or unknown. Retry re-checks safely: it reuses
+                    // this question's idempotency key, so it can never
+                    // create a duplicate turn even if the answer finishes
+                    // between now and the tap landing.
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                        CircularProgressIndicator(Modifier.padding(end = 6.dp).size(14.dp), strokeWidth = 2.dp)
+                        Text(
+                            "Still generating an answer for this…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                    TextButton(onClick = onRetry, modifier = Modifier.padding(top = 2.dp)) { Text("Check again") }
                 } else if (uncertain) {
-                    // Connection dropped mid-send (or the server says this
-                    // exact question is already being processed) and we
-                    // genuinely don't know the outcome -- say so instead of
-                    // just silently dropping the spinner, which used to look
-                    // identical to a normal already-sent message. Retry
-                    // reuses this same question's idempotency key, so it's
-                    // always safe to tap: it can never create a duplicate
-                    // turn even if the original attempt actually landed.
+                    // Connection dropped mid-send and we genuinely don't
+                    // know the outcome -- say so instead of just silently
+                    // dropping the spinner, which used to look identical to
+                    // a normal already-sent message. Retry reuses this same
+                    // question's idempotency key, so it's always safe to
+                    // tap: it can never create a duplicate turn even if the
+                    // original attempt actually landed.
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
                         Icon(
                             Icons.Filled.Warning,

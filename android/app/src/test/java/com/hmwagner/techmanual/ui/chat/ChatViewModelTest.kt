@@ -312,4 +312,132 @@ class ChatViewModelTest {
         assertEquals(9, vm.state.value.messages[0].id)
         assertNull("loadMessages() found the reply, so the pending echo should be resolved, not left dangling", vm.state.value.pendingEcho)
     }
+
+    @Test
+    fun `a 409 whose reload finds only the persisted user turn keeps the question visibly pending`() {
+        // P0A-2 regression: the favorable case above (reload already has the
+        // assistant's reply) was the only one covered. This is the harder,
+        // and more common, case a server crash or a still-generating answer
+        // actually produces: the duplicate-key POST returns 409, but the
+        // reload's own last message is still just the user's own turn --
+        // loadMessages() used to unconditionally clear pendingEcho on ANY
+        // successful GET regardless, making the retry/processing affordance
+        // vanish while no answer exists at all.
+        var askCount = 0
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path?.endsWith("/messages") == true && request.method == "POST" -> {
+                    askCount++
+                    MockResponse().setResponseCode(409)
+                }
+                request.path?.endsWith("/messages") == true && request.method == "GET" -> jsonResponse(
+                    """[{"id": 10, "role": "user", "content": "Why won't it start?", "created_at": "2026-08-24T00:00:00Z"}]"""
+                )
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        vm.onComposerChange("Why won't it start?")
+        vm.send()
+        awaitState { !it.sending && !it.loadingHistory }
+
+        val state = vm.state.value
+        assertEquals(1, askCount)
+        assertTrue(
+            "the question must stay visibly pending -- no assistant reply exists yet",
+            state.pendingEcho != null,
+        )
+        assertEquals("Why won't it start?", state.pendingEcho?.content)
+        assertTrue(
+            "the reload found the server's OWN persisted copy of this exact question -- that's " +
+                "definitely-accepted-and-still-working, not the generic 'connection lost, unknown' state",
+            state.pendingEchoStillProcessing,
+        )
+        assertFalse(
+            "must not ALSO read as the generic uncertain/connection-lost state",
+            state.pendingEchoUncertain,
+        )
+        assertTrue(
+            "the persisted duplicate of the same question must not ALSO render as a separate message bubble",
+            state.messages.none { it.role == "user" },
+        )
+        assertTrue("the pending status needs an explanation, not a blank banner", state.error?.isNotBlank() == true)
+    }
+
+    @Test
+    fun `refresh cannot clear an in-flight pending echo when nothing has been persisted yet`() {
+        // P0A-2: a pull-to-refresh (ChatScreen's PullToRefreshBox calls the
+        // same refresh() -> loadMessages() this test drives directly) must
+        // never make an uncertain pending question look resolved just
+        // because the reload happened to succeed -- an empty reload here
+        // means the original POST may never have even reached the server.
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+        vm.onComposerChange("Is this safe to run?")
+        vm.send()
+        awaitState { !it.sending }
+        assertTrue(vm.state.value.pendingEchoUncertain)
+
+        server.enqueue(jsonResponse("[]"))
+        vm.refresh()
+        awaitState { !it.loadingHistory }
+
+        assertTrue(
+            "a bare refresh must not clear a still-uncertain pending echo",
+            vm.state.value.pendingEcho != null,
+        )
+        assertTrue(vm.state.value.pendingEchoUncertain)
+        assertFalse(
+            "nothing was found persisted server-side -- this is the genuinely-uncertain case, not accepted-and-processing",
+            vm.state.value.pendingEchoStillProcessing,
+        )
+    }
+
+    @Test
+    fun `a refresh landing while the original send is still in flight cannot misreport or clear its pendingEcho`() {
+        // P0A-2: ChatScreen's PullToRefreshBox has no guard against pulling
+        // to refresh while a send is genuinely still in flight (a real
+        // answer takes 20-30s per ApiClient.kt's own comment, plenty of time
+        // for an impatient pull). That reload's own GET can easily return
+        // before the original POST does -- landing here must not touch
+        // pendingEcho/its status at all; only the in-flight performSend()
+        // coroutine owns this question's outcome.
+        val reachedSend = CountDownLatch(1)
+        val releaseSend = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path?.endsWith("/messages") == true && request.method == "POST" -> {
+                    reachedSend.countDown()
+                    releaseSend.await(2, TimeUnit.SECONDS)
+                    jsonResponse("""{"id": 11, "role": "assistant", "content": "OK", "created_at": "2026-08-24T00:00:00Z"}""")
+                }
+                request.path?.endsWith("/messages") == true && request.method == "GET" -> jsonResponse("[]")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        vm.onComposerChange("Why won't it start?")
+        vm.send()
+        assertTrue("send never reached the server", reachedSend.await(2, TimeUnit.SECONDS))
+        assertTrue(vm.state.value.sending)
+
+        vm.refresh()
+        awaitState { !it.loadingHistory }
+
+        val midState = vm.state.value
+        assertTrue("the concurrent send's pendingEcho must survive an unrelated reload landing mid-flight", midState.pendingEcho != null)
+        assertFalse(
+            "must not show a false 'unknown if received' status over a send that's still genuinely in flight",
+            midState.pendingEchoUncertain,
+        )
+        assertFalse(
+            "must not show a false 'still processing' status over a send that's still genuinely in flight",
+            midState.pendingEchoStillProcessing,
+        )
+        assertNull("must not show a false alarm banner over a send that's still genuinely in flight", midState.error)
+
+        releaseSend.countDown()
+        awaitState { !it.sending }
+        assertNull("the original send must still resolve normally once it actually completes", vm.state.value.pendingEcho)
+        assertEquals(2, vm.state.value.messages.size)
+    }
 }

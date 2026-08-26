@@ -552,6 +552,52 @@ The existing administrator account also works and reaches the same screens
     Section 5/P0A-1 of the plan requires blocking admin accounts "unless the
     owner explicitly approves admins using it" — the owner did, so this is a
     recorded decision, not an oversight.
+- **P0A-2: an unresolved 409 no longer silently drops the "still processing"
+  status.** `ChatViewModel.loadMessages()` used to unconditionally clear
+  `pendingEcho`/`pendingEchoUncertain` on *any* successful `GET`, including
+  when the reload's own last message was still just the user's own turn (the
+  duplicate-`Idempotency-Key` `409` case, see the `performSend` comment above
+  — the original attempt is still generating, or the server crashed
+  mid-attempt) or when nothing had been persisted yet at all. A question
+  could look silently resolved — the pending bubble and its "Retry" affordance
+  just disappeared — while no assistant answer actually existed. It now reads
+  the reload's own last message: resolved only if it's the assistant's reply.
+  Two distinct unresolved states are tracked, not one collapsed "uncertain"
+  flag — a 409 reload whose last message IS this user's turn means the
+  server *definitely* accepted the question and is still working on it
+  (`pendingEchoStillProcessing`, a new, calmer "Still generating an answer
+  for this…" bubble with a "Check again" button — the old "Connection lost"
+  warning styling would have been simply wrong here, the opposite of what
+  actually happened), while an empty/unrelated reload is a genuine "no idea
+  if this was even received" (`pendingEchoUncertain`, the existing warning
+  styling). In both cases `pendingEcho` stays visible (dropping a trailing
+  persisted duplicate of the same user turn from `messages` so it isn't
+  rendered twice) and `error` explains a path forward. A concurrent
+  `refresh()`/pull-to-refresh landing while the *original* send is still
+  genuinely in flight (a real answer can take 20-30s, plenty of time for an
+  impatient pull — `ChatScreen`'s `PullToRefreshBox` has no guard against
+  this) is a separate hazard this also closes: `loadMessages()` now leaves
+  `pendingEcho`/its status/`error` completely untouched whenever `sending` is
+  still true, so it can't race the in-flight `performSend()` coroutine that
+  alone owns that question's outcome, and can't paint a false "still
+  waiting" alarm over a send that hasn't even had a chance to fail yet. This
+  is still the interim fix the plan calls for (§4, P0A-2) — the real fix
+  needs Phase 2's durable answer-attempt resource with server-authoritative
+  status instead of inferring state from adjacent message rows. Covered by
+  three new `ChatViewModelTest` cases (13 total now, see below) — the first
+  two were confirmed to actually fail against the pre-fix `loadMessages()`
+  before being kept, matching this repo's existing regression-test norm; all
+  three pass in `testDebugUnitTest` (JVM, no device needed for this one).
+  **Known pre-existing gap, not addressed here** (found while designing this
+  fix, outside P0A-2's interim scope): `send()` only guards on `sending`, not
+  on whether a `pendingEcho` is already uncertain/still-processing — a
+  technician who sends a second question while an earlier one is still
+  unresolved overwrites `pendingEcho` (and its idempotency key) with the new
+  one, making the first question's outcome unrecoverable. This is squarely
+  the kind of "silently disappears" case the plan's P0A-2 exit gate warns
+  against; it needs its own fix (likely: disable sending a new question
+  while one is genuinely uncertain/still-processing, not just while
+  `sending`).
 - **The clarifying-machine flow is now reachable**: "Not sure which machine?"
   on the machine picker starts a conversation with no machine selected, so
   asking a question exercises the server's real clarify-instead-of-guess path
@@ -670,16 +716,25 @@ a real Android `Context` a JVM unit test doesn't have):
   physical device: confirm a session survives an app restart, and confirm
   installing this build over a pre-encryption install forces a clean
   re-login instead of crashing on the old plaintext data.
-- `ChatViewModelTest` (10 tests): correct user-then-assistant message
+- `ChatViewModelTest` (13 tests): correct user-then-assistant message
   ordering, the uncertain-pending-echo state, the clarifying-machine reload
   race (verified to actually fail against the pre-fix code before being
   kept), the feedback/save success+failure paths, `retryPendingSend()`
-  reusing the original `Idempotency-Key` header rather than a fresh one, and
-  a `409` triggering an automatic refresh that resolves the pending echo.
-  `ChatViewModel.refresh()` (what `ChatScreen`'s pull-to-refresh calls) has
-  no test of its own, but it's a thin wrapper around the same
-  `loadMessages()` every one of these tests already exercises via `init{}`,
-  so it has indirect coverage rather than a dedicated one.
+  reusing the original `Idempotency-Key` header rather than a fresh one, a
+  `409` triggering an automatic refresh that resolves the pending echo, and
+  (P0A-2, all three confirmed to actually fail against the pre-fix
+  `loadMessages()`) three more: a `409` whose reload finds only the
+  persisted user turn keeps the question visibly pending and marks it
+  `pendingEchoStillProcessing` rather than the generic uncertain state; a
+  bare `refresh()` call (what `ChatScreen`'s pull-to-refresh calls — now with
+  a direct test of its own, not just indirect coverage via every other
+  test's `init{}`) can't clear an in-flight pending echo when nothing has
+  been persisted server-side yet; and a `refresh()` landing while the
+  *original* `send()` is still genuinely in flight can't misreport or clear
+  that send's `pendingEcho` (a real concurrency scenario, driven with the
+  same blocking-`Dispatcher`/`CountDownLatch` pattern as the
+  clarifying-machine reload race test above, not just a sequential
+  approximation of one).
 - `LoginViewModelTest` (4 tests): blank-credential validation short-circuits
   before any network call, successful login, wrong-password message, lost
   connection.
