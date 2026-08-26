@@ -41,8 +41,13 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
+      # Package IDs confirmed against this project's own local SDK install
+      # (platforms/android-37.0/package.xml, build-tools/36.0.0/package.xml)
+      # -- "platforms;android-37" (no ".0") doesn't exist, and 37.0.0
+      # build-tools isn't installed/needed locally; AGP builds compileSdk 37
+      # against build-tools 36.0.0 without complaint.
       - name: Install Android SDK Platform 37
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37" "build-tools;37.0.0"
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0"
 
       - uses: gradle/actions/setup-gradle@v4
 
