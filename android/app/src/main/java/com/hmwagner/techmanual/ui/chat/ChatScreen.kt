@@ -376,8 +376,8 @@ private fun MessageBubble(
                                 label = {
                                     // Override only this Text's own semantics
                                     // (not the chip's -- see android/README.md's
-                                    // accessibility note) so TalkBack announces
-                                    // a full sentence instead of reading the
+                                    // accessibility note) so a screen reader
+                                    // announces a full sentence instead of reading the
                                     // compact "[1] p.5" glyphs literally, while
                                     // the chip's own click/Button-role semantics
                                     // (wired by AssistChip itself via `onClick`)

@@ -21,6 +21,7 @@ import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSiz
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -152,9 +153,30 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
     // must drop every account-scoped screen the same way. HomeSelectionViewModel
     // is Activity-scoped (not tied to the HOME back-stack entry the way the
     // Machines/History/Chat ViewModels are), so popUpTo(0) below does NOT
-    // clear it on its own -- without this, a later login as a different
-    // account could reopen the prior account's selected conversation
-    // id/label (P0A-1).
+    // clear it on its own -- without HomeContent's own DisposableEffect (see
+    // below) actually doing that, a later login as a different account could
+    // reopen the prior account's selected conversation id/label (P0A-1).
+    // This effect deliberately does NOT clear selection itself: found live
+    // on the Tab A9+ (2026-08-26), via a genuinely reproducible instrumented
+    // -test failure invisible to any JVM test, that clearing
+    // selection.selectedId here -- reactively, from code that runs
+    // independently of whether Home has actually left composition yet --
+    // changes the `key(selection.selectedId ?: -1)` wrapping SinglePaneHome
+    // while Home might still be transiently composed, recomposing a
+    // brand-new MachinesScreen/MachinesViewModel (and firing its own
+    // recentMachines() call) in the gap before this navigate() call's own
+    // backstack change actually removes Home from the tree. That stray,
+    // then-cancelled request desynced a test's MockWebServer response queue
+    // -- but the same race is real against a live server too, just
+    // harmless-looking there (an extra request that loses its race with a
+    // real backend). Reordering navigate() before the clear did NOT fix
+    // this (confirmed by rerunning the same instrumented test) -- Compose
+    // batches snapshot-state writes made without an intervening suspension
+    // into the same recomposition pass regardless of source order, so
+    // whichever runs first in the recomposer's own (unspecified) scope
+    // -processing order still wins. The only reliable fix is to make the
+    // clear happen as an actual consequence of Home leaving composition,
+    // not a reactive side effect racing against it.
     //
     // Guarded on launchState != Checking: the launch-time /me call above
     // runs through the same authExpiryInterceptor as every other request, so
@@ -166,8 +188,9 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
     // still Checking.
     LaunchedEffect(sessionExpired, launchState) {
         if (sessionExpired && launchState != LaunchSessionState.Checking) {
-            selection.selectedId = null
-            selection.selectedLabel = null
+            // Does NOT clear selection.selectedId/selectedLabel directly --
+            // see HomeContent's own DisposableEffect below for why, and for
+            // where that clearing now actually happens.
             navController.navigate(Routes.LOGIN) {
                 popUpTo(0) { inclusive = true }
             }
@@ -216,6 +239,23 @@ private fun LaunchChecking() {
 @Composable
 private fun HomeContent(selection: HomeSelectionViewModel, isExpanded: Boolean) {
     val onSelect: (Int, String?) -> Unit = { id, label -> selection.selectedId = id; selection.selectedLabel = label }
+
+    // Clears the selection as a genuine CONSEQUENCE of Home leaving
+    // composition (logout/session-expiry navigates to Login with
+    // popUpTo(0), which removes Home entirely) -- not as a reactive side
+    // effect racing against that removal (see the long comment on AppNav's
+    // sessionExpired LaunchedEffect for why that races and fails on a real
+    // device, P0A-1 found 2026-08-26). onDispose only runs once Home is
+    // actually gone, so there's no window left for `key(selection.selectedId
+    // ?: -1)` below to see a changed value and recompose a fresh
+    // SinglePaneHome/MachinesViewModel while Home is still technically
+    // alive.
+    DisposableEffect(Unit) {
+        onDispose {
+            selection.selectedId = null
+            selection.selectedLabel = null
+        }
+    }
 
     if (isExpanded) {
         TwoPaneHome(selectedId = selection.selectedId, selectedLabel = selection.selectedLabel, onSelect = onSelect)

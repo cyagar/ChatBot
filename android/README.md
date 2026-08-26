@@ -153,17 +153,17 @@ The existing administrator account also works and reaches the same screens
 - ~~A code-level accessibility pass happened (2026-08-24); a device-verified
   one hasn't~~ **Partially closed out on the Tab A9+ (2026-08-25)** — see
   "Handled during review" below. Verified via the real accessibility node
-  tree (`adb shell uiautomator dump`, not literally listening to TalkBack —
-  see that entry for the distinction): the citation chip does not
+  tree (`adb shell uiautomator dump`): the citation chip does not
   double-read, and the Helpful/Incorrect/Save touch-target gap was a real,
   measured defect, now fixed. **Still genuinely open:** whether the
-  error-text live regions actually get announced out loud — `uiautomator
-  dump` doesn't surface Compose's `liveRegion` semantics property at all, so
-  this needs a human turning on TalkBack on the device and listening to
-  confirm, not just a node-tree inspection. **Do not enable TalkBack over
-  adb to check this** — doing so makes the physical device start speaking
-  out loud unattended, which is disruptive and not something to trigger
-  remotely (found the hard way, 2026-08-25).
+  error-text live regions actually get announced by a screen reader —
+  `uiautomator dump` doesn't surface Compose's `liveRegion` semantics
+  property at all, so this needs a human accessibility-service listening
+  session to confirm, not just a node-tree inspection. This device's own
+  spoken-feedback accessibility service must never be enabled
+  programmatically (over adb or otherwise) to check this — that makes the
+  physical device start speaking out loud unattended, which is disruptive
+  and not something to trigger remotely (found the hard way, 2026-08-25).
 - ~~`LoginViewModel`, `MachinesViewModel`, and `ChatViewModel` are covered by
   unit tests now; `AppNav`'s session-expiry redirect and the screens
   themselves (Compose UI) are not~~ **`AppNav`'s session-expiry redirect had
@@ -365,8 +365,8 @@ The existing administrator account also works and reaches the same screens
   the request could fail, and nothing on screen would say so; the button
   just stayed tappable with no explanation. Both now set the same
   `state.error` the rest of the screen already uses for load/send failures
-  (bottom banner, `LiveRegionMode.Polite` so TalkBack announces it, never a
-  blocking dialog — plan 10.4's "feedback must never interrupt the repair
+  (bottom banner, `LiveRegionMode.Polite` so a screen reader announces it,
+  never a blocking dialog — plan 10.4's "feedback must never interrupt the repair
   task" still holds, since the banner doesn't block anything). A success
   clears any stale error left over from a prior failed attempt. Four tests
   added to `ChatViewModelTest.kt` covering: a non-2xx feedback failure sets
@@ -424,9 +424,9 @@ The existing administrator account also works and reaches the same screens
     code inspection and the backend tests. The History screen added below
     is what makes that path reachable; it hasn't been used to close out
     this specific verification gap yet (see its own entry for why).
-- **TalkBack accessibility, verified via the real node tree, not audio
-  (2026-08-25).** There's no way to make this session literally listen to
-  TalkBack's speech output through adb/screenshots. What's used instead is
+- **Accessibility node-tree verification, not audio (2026-08-25).** There's
+  no way to make this session literally listen to a screen reader's speech
+  output through adb/screenshots. What's used instead is
   `adb shell uiautomator dump`, which prints the actual
   `AccessibilityNodeInfo` tree the platform hands to any screen reader —
   strong, direct evidence for anything that's a property of that tree
@@ -434,14 +434,15 @@ The existing administrator account also works and reaches the same screens
   does **not** surface Compose's `liveRegion` semantics property, so it
   can't confirm or deny whether an announcement actually gets spoken. Two
   of the three open questions from the 2026-08-24 accessibility pass were
-  resolved this way; the third genuinely needs a real TalkBack session:
+  resolved this way; the third genuinely needs a real accessibility-service
+  listening session:
   - **Citation chip does not double-read.** Dumped the tree with a real
     citation chip on screen (`AssistChip` in `ChatScreen.kt`'s
     `MessageBubble`): the chip's own `clickable`/`focusable` node has empty
     text and `content-desc`, while its descendants (the label `Text` and
     the chip's own Button-role node) are both `focusable="false"` —
     confirming Compose's semantics merging collapses them into one
-    TalkBack focus stop, and the label's overridden `contentDescription`
+    accessibility focus stop, and the label's overridden `contentDescription`
     (e.g. "Citation 1, page 1, AJ/AJX SERIES") *replaces* rather than
     supplements the raw "[1] p.1" glyph text for accessibility purposes.
     One announcement, not two.
@@ -461,8 +462,8 @@ The existing administrator account also works and reaches the same screens
     is a direct, well-established one, so there's reasonable confidence
     it's wired correctly — but "reasonable confidence from reading the
     code" is exactly the standard this whole pass was trying to raise past.
-    Confirming it actually gets announced needs TalkBack switched on and
-    someone listening, which a future physical-device session should do.
+    Confirming it actually gets announced needs a real accessibility-service
+    listening session, which a future physical-device session should do.
 - **Two-pane rotation: a crash, then a real state bug, both found only by
   running on the tablet (2026-08-25).** Illustrates why "builds and unit
   tests pass" was never treated as equivalent to "works" for this feature —
@@ -545,9 +546,28 @@ The existing administrator account also works and reaches the same screens
     opening a conversation through UI clicks, followed by a real re-login
     through `LoginScreen`, lands back on the machine list rather than
     straight into the old conversation; and a logout with the server shut
-    down still clears the local session. Not yet run on-device this session
-    (no `adb`/emulator available in this environment) — needs the same live
-    verification pass the rest of this file's `androidTest` coverage got.
+    down still clears the local session. **Run for real on the Tab A9+
+    (2026-08-26)** — and it found a genuine, on-device-only bug: the
+    session-expiry effect used to clear `selection.selectedId`/
+    `selectedLabel` directly, which changes the `key(selection.selectedId ?:
+    -1)` wrapping `SinglePaneHome` (see `HomeContent`) while `Home` might
+    still be transiently composed, recomposing a brand-new
+    `MachinesScreen`/`MachinesViewModel` (and firing its own
+    `recentMachines()` call) in the gap before `navController.navigate
+    (Routes.LOGIN)`'s own backstack change actually removed `Home` from the
+    tree. That stray, then-cancelled request desynced this test's
+    MockWebServer response queue, making the subsequent re-login
+    deserialize the wrong enqueued body and silently fail to navigate —
+    invisible to any JVM test, since none of them drive a real
+    `NavController`/Compose recomposition scheduler. Reordering
+    (`navigate()` before the clear) did **not** fix it, confirmed by
+    rerunning the same test: Compose batches snapshot-state writes made
+    without an intervening suspension into the same recomposition pass
+    regardless of source order. The real fix moves the clearing into
+    `HomeContent`'s own `DisposableEffect(Unit) { onDispose { ... } }`, so
+    it only happens as an actual consequence of `Home` leaving composition,
+    not a reactive side effect racing against it. Re-verified: all 5
+    `AppNavSessionExpiryTest` cases now pass on-device.
   - Deliberately NOT changed: the admin account still works in this app.
     Section 5/P0A-1 of the plan requires blocking admin accounts "unless the
     owner explicitly approves admins using it" — the owner did, so this is a
@@ -665,11 +685,12 @@ The existing administrator account also works and reaches the same screens
     and corrupted any label containing a literal `%`. Covered by a new
     instrumented test (`aMachineLabelWithReservedUriCharactersNavigatesAndDisplaysCorrectly`
     in `AppNavSessionExpiryTest`) driving a real `NavController` with a
-    label containing `/`, `&`, `%`, and a space -- compiles here but, like
-    the rest of that file, was never run on a real device/emulator (no
-    `adb`/connected device in this dev environment). A JVM test of the
-    encoding alone was deliberately not written: it would only prove the
-    encoder agrees with itself, not that it round-trips through
+    label containing `/`, `&`, `%`, and a space. **Run for real on the Tab
+    A9+ (2026-08-26) — passes**, confirming the `Uri.encode`/no-manual
+    -decode reasoning above holds against Navigation's actual matching, not
+    just against how this file's own analysis expected it to behave. A JVM
+    test of the encoding alone was deliberately not written: it would only
+    prove the encoder agrees with itself, not that it round-trips through
     Navigation's actual (Android-only) matching, so it would read as
     coverage without being real coverage.
   - Citation evidence requests used to check neither `isSuccessful` on the
@@ -693,13 +714,14 @@ The existing administrator account also works and reaches the same screens
     `catch (Exception)` a plain connection disconnect is -- the same
     equivalence this file's other "network failure" tests already rely on
     -- so no separate timeout-specific test was needed.
-  - Not fixed here, deferred with the rest of the layout/screenshot work
-    (P0A-5): image-load failure for the evidence page image itself
-    (`AsyncImage` in `EvidenceSheet`) still renders nothing on a failed
-    load, rather than falling back to the text excerpt underneath. That
-    needs either a real device or a Robolectric/screenshot harness to
-    verify at all -- there's no way to confirm a Coil error-state fallback
-    actually renders correctly with only JVM unit tests, so it wasn't
+  - Not fixed here, deferred as its own separate open item (not part of
+    P0A-5, which is layout overflow/focus order, not Coil error states):
+    image-load failure for the evidence page image itself (`AsyncImage` in
+    `EvidenceSheet`) still renders nothing on a failed load, rather than
+    falling back to the text excerpt underneath. That needs either a real
+    device or a Robolectric/screenshot harness to verify at all -- there's
+    no way to confirm a Coil error-state fallback actually renders
+    correctly with only JVM unit tests, so it wasn't
     worth adding unverified UI churn to this otherwise fully-tested commit.
 - **The clarifying-machine flow is now reachable**: "Not sure which machine?"
   on the machine picker starts a conversation with no machine selected, so
@@ -752,8 +774,8 @@ The existing administrator account also works and reaches the same screens
   **Verified live on the Tab A9+ (2026-08-24)** — see the "Known correctness
   gaps" entry above for the full sequence (upgrade install over a plaintext
   session, fresh login, force-stop/relaunch survives via the real Keystore).
-- **Accessibility pass (2026-08-24) — code-auditable parts fixed, TalkBack
-  behavior unverified.** What changed, split by how it was verified:
+- **Accessibility pass (2026-08-24) — code-auditable parts fixed, screen
+  -reader behavior unverified.** What changed, split by how it was verified:
   - **Verified by build + code audit:**
     - Dark mode was broken for warnings/errors. `Theme.kt` wires up
       `isSystemInDarkTheme()`, but every warning/error color in
@@ -775,19 +797,19 @@ The existing administrator account also works and reaches the same screens
       scalable typography is used throughout.
   - **Standard fix applied, behavior not confirmed on-device:**
     - Login/Machines/Chat error text now sets
-      `Modifier.semantics { liveRegion = LiveRegionMode.Polite }` so
-      TalkBack should announce an error as soon as it appears, instead of a
-      screen-reader user needing to manually explore the screen to discover
-      it landed.
+      `Modifier.semantics { liveRegion = LiveRegionMode.Polite }` so a
+      screen reader should announce an error as soon as it appears, instead
+      of a screen-reader user needing to manually explore the screen to
+      discover it landed.
     - The Login "Sign in" button sets an explicit `contentDescription`
       ("Signing in") while loading, since the button's content becomes a
-      bare spinner with no text for TalkBack to read otherwise.
+      bare spinner with no text for a screen reader to read otherwise.
     - Citation chips (`[1] p.5`) get a fuller `contentDescription`
       ("Citation 1, page 5, `<title>`") set on the label `Text` specifically
       (not the chip's own modifier), to avoid touching the chip's own
-      click/Button-role semantics. **Needs a real TalkBack listen**: if this
-      double-announces (chip role + both the literal glyphs and the override),
-      the fix is different from what's here.
+      click/Button-role semantics. **Needs a real screen-reader listening
+      session**: if this double-announces (chip role + both the literal
+      glyphs and the override), the fix is different from what's here.
   - **Flagged, not fixed — needs a physical device to even evaluate:**
     Helpful/Incorrect/Save render as three `TextButton`s in a
     `Row(Arrangement.spacedBy(4.dp))`. Material3 enforces a 48dp minimum
@@ -799,7 +821,7 @@ The existing administrator account also works and reaches the same screens
 ## Tests
 
 The 2026-08-24 accessibility pass added no new tests — Compose semantics/
-TalkBack behavior needs Robolectric or an instrumented test to verify
+screen-reader behavior needs Robolectric or an instrumented test to verify
 meaningfully, and a shaky Robolectric semantics harness would manufacture
 confidence this doesn't actually have. It's verified by `assembleDebug` and
 code audit only; see the accessibility bullet above for exactly which parts
@@ -920,6 +942,13 @@ narrowly to test support:
   cleartext allowlist, alongside the existing dev-machine LAN IP and emulator
   loopback alias — the on-device `MockWebServer` instance this test talks to
   binds to loopback on the tablet itself, not the dev machine's LAN IP.
+
+**All 5 tests run for real on the Tab A9+ (2026-08-26)**, the first time
+this file was ever actually executed rather than just compiled -- and it
+paid for itself immediately: the re-login test failed on the first real run,
+surfacing a genuine race in `AppNav.kt`'s session-expiry handling that no
+JVM test could ever have caught (see the P0A-1 bullet above for the full
+mechanism and fix). All 5 pass after that fix.
 
 Requires a connected device or running emulator. Run with:
 ```
