@@ -20,14 +20,10 @@ treated as the plan's own allowed fallback ("If there is no IdP, approve a
 temporary mobile token flow"); no SSO migration deadline is set at this
 scale.
 
-**Apparent implication for Phase 1, not yet separately confirmed:** the
-plan's Phase 1 deliverable "Implement Authorization Code with PKCE through
-the system browser/custom tab... Android Keystore-backed token storage"
-looks like it no longer applies given this decision — but that is an
-inference drawn while writing this record, not something the owner was
-asked about directly. Phase 1's actual scope should confirm this explicitly
-before dropping the PKCE work, rather than treating it as already settled
-by decision #2 alone.
+**Confirmed for Phase 1 (2026-08-26, asked directly):** the plan's Phase 1
+deliverable "Implement Authorization Code with PKCE through the system
+browser/custom tab... Android Keystore-backed token storage" is dropped.
+Today's session-cookie auth stays as-is; no OAuth/PKCE work in Phase 1.
 
 ## 3. Cloud, region, and managed services
 
@@ -109,10 +105,38 @@ constituted the review. No documentation of who performed that upstream
 review, or when, exists in this repository; if audit evidence is ever
 needed, consider recording that separately.
 
+## 9. Phase 1 scope (2026-08-26, decided after the gate above)
+
+Phase 1 as originally written also calls for two more significant pieces
+of work beyond the versioned-contract items. Both were put to the owner
+directly, given they're the same class of scale-vs-plan judgment call as
+decisions #2 and #3:
+
+- **No separate Node.js/TypeScript public API service.** Phase 1 stays on
+  the existing FastAPI app — version and harden its routes instead of
+  bootstrapping a new service to sit in front of it.
+- **No Hilt / repository-layer / generated-API-client refactor of the
+  Android app.** The current hand-rolled `ApiClient` singleton and
+  ViewModel structure stays as-is.
+
+**What Phase 1 means at this scale, as a result:** the remaining
+deliverables from the plan's Phase 1 section — `/config` and `/me`
+endpoints, a standardized safe-error envelope (code, display message,
+correlation ID, retryability, field errors, HTTP status), cursor
+pagination for machines/history/messages/saved answers, UTC ISO-8601
+timestamps with offsets, and publishing an OpenAPI contract for the
+existing FastAPI routes — done against the current app, not a new one.
+
+## 10. Still open
+
+- **Backup/retention policy** (from decision #3) — not decided.
+- **Data-retention generally** — plan section 5's required output names
+  this explicitly; it was never one of the plan's eight numbered items and
+  has not been decided in any pass so far.
+
 ---
 
 **Required output per the plan** ("version-controlled architecture,
 identity, data-retention, device-management, and corpus-approval decision
-records with named owners") is this file. Data-retention was not one of the
-plan's eight numbered items and was not decided in this pass — if it needs
-its own record, that's a follow-up, not covered here.
+records with named owners") is this file — except data-retention, see
+section 10 above.
