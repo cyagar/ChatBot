@@ -36,7 +36,17 @@ class MachinesViewModel : ViewModel() {
             try {
                 val resp = ApiClient.service.recentMachines()
                 if (resp.isSuccessful) {
-                    _state.value = _state.value.copy(recent = resp.body().orEmpty())
+                    // Clears any error left over from an earlier action (e.g.
+                    // a failed favorite toggle) -- this ViewModel can outlive
+                    // several screen visits (MachinesScreen has no
+                    // LaunchedEffect-driven re-fetch the way History/
+                    // SavedAnswers do), so a stale banner could otherwise sit
+                    // on screen indefinitely after whatever caused it had
+                    // long since succeeded on retry. Found live on-device
+                    // (2026-09-16): favoriting a machine after an earlier,
+                    // unrelated failed request still showed "Can't reach the
+                    // server" even though the favorite call itself succeeded.
+                    _state.value = _state.value.copy(recent = resp.body().orEmpty(), error = null)
                 }
             } catch (_: Exception) {
                 // Recents are a convenience, not critical -- fail quietly and
@@ -105,8 +115,13 @@ class MachinesViewModel : ViewModel() {
 
     private companion object {
         // Long enough to skip the request entirely for someone still
-        // actively typing, short enough not to feel unresponsive.
-        const val SEARCH_DEBOUNCE_MS = 300L
+        // actively typing, short enough not to feel unresponsive. Kept short
+        // deliberately: the round trip itself already costs ~500ms against
+        // the real (Neon-backed) API, confirmed live on-device 2026-09-16 --
+        // stacking a long debounce on top of that made "search as you type"
+        // read as "nothing happens" for someone glancing down after typing
+        // just a couple characters.
+        const val SEARCH_DEBOUNCE_MS = 150L
         const val TAG = "MachinesViewModel"
     }
 
@@ -132,6 +147,29 @@ class MachinesViewModel : ViewModel() {
                 // refresh() or a newer keystroke) it never got to clear
                 // `loading` itself. Only clear it here if a newer keystroke
                 // hasn't already claimed `loading` for its own query.
+                if (_state.value.query == q) {
+                    _state.value = _state.value.copy(loading = false)
+                }
+            }
+        }
+    }
+
+    /**
+     * Re-runs the search for the current query after a failure -- surfaced
+     * as a "Retry" button next to the error banner. A search failure (e.g.
+     * the dead-pooled-connection SocketException confirmed live on-device
+     * 2026-09-16) otherwise leaves the technician stuck with no way back to
+     * results short of editing the query again.
+     */
+    fun retrySearch() {
+        val q = _state.value.query
+        if (q.isBlank()) return
+        searchJob?.cancel()
+        _state.value = _state.value.copy(loading = true, error = null)
+        searchJob = viewModelScope.launch {
+            try {
+                search(q)
+            } finally {
                 if (_state.value.query == q) {
                     _state.value = _state.value.copy(loading = false)
                 }
@@ -188,6 +226,43 @@ class MachinesViewModel : ViewModel() {
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(creatingConversation = false, error = "Can't reach the server. Check your connection.")
+            }
+        }
+    }
+
+    /**
+     * Toggles favorite state for [machine] in both the recent and search
+     * lists it might currently appear in -- optimistic (flips immediately,
+     * before the network call resolves) since this is a low-stakes,
+     * frequently-tapped action where waiting on a round trip would feel
+     * laggy; reverted in both lists on failure so the UI never drifts from
+     * server truth.
+     */
+    fun toggleFavorite(machine: MachineOut) {
+        val newValue = !machine.is_favorite
+        fun apply(list: List<MachineOut>, value: Boolean) =
+            list.map { if (it.id == machine.id) it.copy(is_favorite = value) else it }
+        _state.value = _state.value.copy(
+            recent = apply(_state.value.recent, newValue),
+            results = apply(_state.value.results, newValue),
+            error = null,
+        )
+        viewModelScope.launch {
+            try {
+                val resp = ApiClient.service.setFavorite(machine.id, newValue)
+                if (!resp.isSuccessful) {
+                    _state.value = _state.value.copy(
+                        recent = apply(_state.value.recent, machine.is_favorite),
+                        results = apply(_state.value.results, machine.is_favorite),
+                        error = "Couldn't update favorite (code ${resp.code()}).",
+                    )
+                }
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(
+                    recent = apply(_state.value.recent, machine.is_favorite),
+                    results = apply(_state.value.results, machine.is_favorite),
+                    error = "Can't reach the server. Check your connection.",
+                )
             }
         }
     }

@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -14,6 +15,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -42,6 +45,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
@@ -49,10 +57,12 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
+import coil3.compose.AsyncImagePainter
 import com.hmwagner.techmanual.BuildConfig
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.CitationOut
@@ -256,6 +266,12 @@ private val NUMBERED_LINE = Regex("""^(\d+)\.\s(.*)""")
  * literally: raw "- " dashes and literal "**" asterisks around "Steps:",
  * which is what looked bad. This renders that exact fixed shape instead of
  * pulling in a full Markdown library for three line patterns.
+ *
+ * A whole-line "_..._" (owner decision 2026-09-16: low-confidence answers
+ * get a caveat line prepended, see parse_and_validate's confidence handling
+ * in base.py) is a fourth pattern in that same fixed shape -- rendered
+ * italic, confirmed live on-device that a plain Text() would otherwise show
+ * the literal underscores.
  */
 @Composable
 private fun FormattedAnswer(content: String) {
@@ -269,6 +285,11 @@ private fun FormattedAnswer(content: String) {
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(top = 4.dp),
+                )
+                line.startsWith("_") && line.endsWith("_") && line.length > 2 -> Text(
+                    line.removePrefix("_").removeSuffix("_"),
+                    fontStyle = FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 line.startsWith("- ") -> Row {
                     Text("•", modifier = Modifier.padding(end = 8.dp))
@@ -483,9 +504,18 @@ private fun Composer(state: ChatUiState, vm: ChatViewModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: () -> Unit) {
-    val sheetState = rememberModalBottomSheetState()
+    // skipPartiallyExpanded: found live on-device (2026-09-16) that the
+    // default half-expanded initial state made a full manual page render at
+    // a fraction of the screen -- a technician trying to actually read the
+    // referenced page had to first drag the sheet open further. Opening
+    // straight to (near) full height is what "should take most of the
+    // screen" below actually delivers.
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(
+            Modifier.fillMaxWidth().fillMaxHeight(0.92f).padding(16.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             if (state.evidenceLoading) {
                 CircularProgressIndicator()
             } else if (state.evidenceError != null) {
@@ -514,14 +544,51 @@ private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: ()
                     // (and occasionally a worse read than the real page,
                     // e.g. after imperfect OCR). Only fall back to the text
                     // card below when there's no image to show instead.
+                    //
+                    // key(url): a stale Error/Loading state from a PREVIOUS
+                    // citation's image must not paint over this one's first
+                    // frame if they happen to share initial recomposition
+                    // timing -- remember alone would carry the old state
+                    // across a url change until onState's own next callback
+                    // fires.
                     val url = "${BuildConfig.BASE_URL}api/manuals/${state.evidenceDocumentId}/pages/${evidence.page_number}/image"
-                    AsyncImage(
-                        model = url,
-                        imageLoader = ApiClient.imageLoader,
-                        contentDescription = "Manual page ${evidence.page_number}",
-                        contentScale = ContentScale.FillWidth,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    key(url) {
+                        var painterState by remember { mutableStateOf<AsyncImagePainter.State>(AsyncImagePainter.State.Empty) }
+                        // Bumped to force AsyncImage's model to be treated as
+                        // "new" on Retry -- Coil would otherwise just replay
+                        // its cached failure for the identical URL instead of
+                        // actually re-requesting.
+                        var retryToken by remember { mutableIntStateOf(0) }
+                        Box(
+                            Modifier.fillMaxWidth().fillMaxHeight(0.75f),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            AsyncImage(
+                                model = "$url#retry=$retryToken",
+                                imageLoader = ApiClient.imageLoader,
+                                contentDescription = "Manual page ${evidence.page_number}",
+                                contentScale = ContentScale.Fit,
+                                onState = { painterState = it },
+                                modifier = Modifier.fillMaxWidth().fillMaxHeight(),
+                            )
+                            when (painterState) {
+                                is AsyncImagePainter.State.Loading -> CircularProgressIndicator()
+                                is AsyncImagePainter.State.Error -> Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                                    Text(
+                                        "Couldn't load this page image.",
+                                        color = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                                    )
+                                    TextButton(onClick = { retryToken++ }) { Text("Retry") }
+                                }
+                                else -> {}
+                            }
+                        }
+                    }
                 } else {
                     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                         Text(evidence.content, modifier = Modifier.padding(12.dp))

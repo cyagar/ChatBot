@@ -44,6 +44,7 @@ import com.hmwagner.techmanual.ui.chat.ChatScreen
 import com.hmwagner.techmanual.ui.history.HistoryScreen
 import com.hmwagner.techmanual.ui.login.LoginScreen
 import com.hmwagner.techmanual.ui.machines.MachinesScreen
+import com.hmwagner.techmanual.ui.saved.SavedAnswersScreen
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -75,6 +76,7 @@ private object Routes {
     const val HOME = "home"
     const val MACHINES = "machines"
     const val HISTORY = "history"
+    const val SAVED_ANSWERS = "saved_answers"
     const val CHAT = "chat/{conversationId}?label={label}"
     // P0A-4: a raw machine label interpolated directly into the route could
     // break navigation entirely (a "/" splits it into extra path segments)
@@ -308,6 +310,7 @@ private fun SinglePaneHome(
                     innerNav.navigate(Routes.chat(conversationId, label))
                 },
                 onHistoryClick = { innerNav.navigate(Routes.HISTORY) },
+                onSavedAnswersClick = { innerNav.navigate(Routes.SAVED_ANSWERS) },
             )
         }
         composable(Routes.HISTORY) {
@@ -328,6 +331,18 @@ private fun SinglePaneHome(
                     // for the same "undo one step, not re-walk History"
                     // intent in case a future change makes this controller
                     // longer-lived.
+                    onSelect(conversationId, label)
+                    innerNav.navigate(Routes.chat(conversationId, label)) {
+                        popUpTo(Routes.MACHINES)
+                    }
+                },
+                onBack = { innerNav.popBackStack() },
+            )
+        }
+        composable(Routes.SAVED_ANSWERS) {
+            SavedAnswersScreen(
+                // Same rebuild-on-selection reasoning as HistoryScreen above.
+                onConversationSelected = { conversationId, label ->
                     onSelect(conversationId, label)
                     innerNav.navigate(Routes.chat(conversationId, label)) {
                         popUpTo(Routes.MACHINES)
@@ -365,24 +380,36 @@ private fun SinglePaneHome(
  * not a nav route -- there's no "back" to go to when both panes are already
  * on screen (see ChatScreen's nullable onBack).
  */
+private enum class LeftPane { Machines, History, SavedAnswers }
+
 @Composable
 private fun TwoPaneHome(selectedId: Int?, selectedLabel: String?, onSelect: (Int, String?) -> Unit) {
     // Plain hoisted toggle, not a nav route, matching `selectedId` above --
     // there's no "back" affordance needed in a fixed pane, just a switch
     // between what it shows.
-    var showHistory by remember { mutableStateOf(false) }
+    var leftPane by remember { mutableStateOf(LeftPane.Machines) }
     Row(Modifier.fillMaxSize()) {
         Box(Modifier.width(360.dp).fillMaxHeight()) {
-            if (showHistory) {
-                HistoryScreen(
+            when (leftPane) {
+                LeftPane.History -> HistoryScreen(
                     onConversationSelected = { conversationId, label ->
                         onSelect(conversationId, label)
-                        showHistory = false
+                        leftPane = LeftPane.Machines
                     },
-                    onBack = { showHistory = false },
+                    onBack = { leftPane = LeftPane.Machines },
                 )
-            } else {
-                MachinesScreen(onMachineSelected = onSelect, onHistoryClick = { showHistory = true })
+                LeftPane.SavedAnswers -> SavedAnswersScreen(
+                    onConversationSelected = { conversationId, label ->
+                        onSelect(conversationId, label)
+                        leftPane = LeftPane.Machines
+                    },
+                    onBack = { leftPane = LeftPane.Machines },
+                )
+                LeftPane.Machines -> MachinesScreen(
+                    onMachineSelected = onSelect,
+                    onHistoryClick = { leftPane = LeftPane.History },
+                    onSavedAnswersClick = { leftPane = LeftPane.SavedAnswers },
+                )
             }
         }
         HorizontalDivider(modifier = Modifier.fillMaxHeight().width(1.dp))

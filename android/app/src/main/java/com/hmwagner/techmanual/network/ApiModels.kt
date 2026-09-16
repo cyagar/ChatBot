@@ -101,3 +101,11 @@ data class EvidenceOut(
 
 @Serializable
 data class ApiErrorBody(val detail: String? = null)
+
+@Serializable
+data class SavedAnswerOut(
+    val conversation_id: Int,
+    val machine_label: String? = null,
+    val question: String? = null,
+    val answer: MessageOut,
+)

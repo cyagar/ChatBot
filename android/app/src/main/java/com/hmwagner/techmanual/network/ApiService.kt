@@ -28,6 +28,12 @@ interface ApiService {
     @POST("api/machines/{machineId}/touch")
     suspend fun touchMachine(@Path("machineId") machineId: Int): Response<Unit>
 
+    @POST("api/machines/{machineId}/favorite")
+    suspend fun setFavorite(
+        @Path("machineId") machineId: Int,
+        @Query("favorite") favorite: Boolean,
+    ): Response<Unit>
+
     @POST("api/conversations")
     suspend fun createConversation(@Body body: CreateConversationRequest): Response<ConversationOut>
 
@@ -64,6 +70,9 @@ interface ApiService {
 
     @POST("api/messages/{messageId}/save")
     suspend fun saveAnswer(@Path("messageId") messageId: Int): Response<Unit>
+
+    @GET("api/saved-answers")
+    suspend fun listSavedAnswers(@Query("limit") limit: Int = 50): Response<List<SavedAnswerOut>>
 
     @GET("api/manuals/{documentId}/chunks/{chunkId}/evidence")
     suspend fun getEvidence(
