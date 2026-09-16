@@ -103,11 +103,13 @@ object ApiClient {
             response
         }
 
-        // Retries a request exactly once, GET only, when the connection itself
-        // failed (e.g. "unexpected end of stream" from a dead pooled connection
+        // Retries a request exactly once when the connection itself failed
+        // (e.g. "unexpected end of stream" from a dead pooled connection
         // reused after the peer's keep-alive timeout elapsed -- confirmed
         // 2026-08-25 that a short server-side --timeout-keep-alive reliably
-        // triggers this). GET is always safe to retry. POST is deliberately
+        // triggers this, and reconfirmed live 2026-09-16 hitting it three
+        // times in ~10 minutes of normal tap-to-tap pacing during device
+        // testing). GET is always safe to retry. Most POSTs are deliberately
         // NOT retried here, even though OkHttp's own retryOnConnectionFailure
         // would cover it too -- submitFeedback has no idempotency protection
         // (the feedback table is deliberately append-only; see
@@ -117,9 +119,19 @@ object ApiClient {
         // Idempotency-Key plus the manual "Retry" button in ChatViewModel that
         // reuses it (see "Handled during review" in the README) -- that one
         // deliberately stays a user-initiated action, not an automatic one.
+        //
+        // POST /api/conversations is the one deliberate exception: picking a
+        // machine hit this exact failure repeatedly during testing, and
+        // unlike feedback it's genuinely safe to retry -- create_conversation
+        // (routes_chat.py) is a single plain INSERT with no other side
+        // effects, so the worst case of a retried request that the server
+        // actually received is one harmless extra empty conversation, not a
+        // duplicated write to an append-only table.
         val getRetryInterceptor = okhttp3.Interceptor { chain ->
             val request = chain.request()
-            if (request.method != "GET") {
+            val retryable = request.method == "GET" ||
+                (request.method == "POST" && request.url.encodedPath == "/api/conversations")
+            if (!retryable) {
                 chain.proceed(request)
             } else {
                 try {
