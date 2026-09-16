@@ -114,7 +114,7 @@ private fun SavedAnswerRow(saved: SavedAnswerOut, onClick: () -> Unit) {
             Column {
                 Text(saved.machine_label ?: "No machine selected", style = MaterialTheme.typography.labelMedium)
                 Text(
-                    saved.answer.content,
+                    previewText(saved.answer.content),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodySmall,
@@ -124,3 +124,22 @@ private fun SavedAnswerRow(saved: SavedAnswerOut, onClick: () -> Unit) {
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
     )
 }
+
+/**
+ * Collapses an answer's raw markdown-ish content (the same `_italic caveat_`
+ * / `**bold**` / `- bullet` syntax ChatScreen's FormattedAnswer parses into
+ * styled text) into a single plain-text line for this row's compact
+ * two-line preview. Found live 2026-09-16: this row used to show the answer
+ * unparsed, so a low-confidence caveat rendered as a literal
+ * "_Low confidence: ..._" line with visible underscores instead of either
+ * italic text or plain text -- FormattedAnswer's full multi-composable
+ * rendering doesn't fit a compact list preview, so this strips the syntax
+ * instead of reproducing that styling here.
+ */
+private fun previewText(raw: String): String =
+    raw.lineSequence()
+        .map { it.trim().removePrefix("- ").removePrefix("• ") }
+        .filter { it.isNotEmpty() }
+        .joinToString(" ")
+        .replace(Regex("\\*\\*(.+?)\\*\\*"), "$1")
+        .replace(Regex("(?<!\\w)_(.+?)_(?!\\w)"), "$1")
