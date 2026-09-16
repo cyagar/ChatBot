@@ -110,6 +110,20 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
+    # P1-18 (independent follow-up review): no CSP/Permissions-Policy was set
+    # at all. The only served UI (admin.html -- the technician PWA was
+    # removed, Android-only per owner decision 2026-09-16) only ever loads
+    # same-origin external <script src="/static/..."> with no inline
+    # script/style anywhere in the template, so this can be strict --
+    # 'self' only, no 'unsafe-inline'.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'"
+    )
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    )
     if get_settings().app_env != "development":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -151,40 +165,9 @@ app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=WEB_DIR / "templates")
 
 
-@app.get("/manifest.webmanifest")
-def manifest():
-    return JSONResponse(
-        {
-            "name": "Technician Manual Assistant",
-            "short_name": "TechManual",
-            "start_url": "/",
-            "display": "standalone",
-            "background_color": "#0b1220",
-            "theme_color": "#0b1220",
-            "orientation": "any",
-            "icons": [
-                {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
-                {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
-            ],
-        }
-    )
-
-
-@app.get("/service-worker.js")
-def service_worker():
-    from fastapi.responses import FileResponse
-
-    return FileResponse(WEB_DIR / "static" / "js" / "service-worker.js", media_type="application/javascript")
-
-
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
-
-
-@app.get("/")
-def index(request: Request):
-    return templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/admin")

@@ -94,22 +94,12 @@ cd backend
 python scripts/bootstrap_admin.py --email you@example.com
 ```
 
-(Refuses to run once any user already exists.) Log in at
-`http://localhost:8000` and open the admin dashboard at
+(Refuses to run once any user already exists.) Log in at the admin dashboard,
 `http://localhost:8000/admin` → **Invitations** to invite technicians (and,
 if needed, additional administrators) — each invite is a single-use,
-expiring, email-bound link you send them yourself.
-
-**If you change a frontend file (`app.js`, `app.css`, templates) and a tab
-that already had the app open doesn't show the update:** the service worker
-caches the app shell cache-first, so it can keep serving the old version even
-after a normal refresh. Bump the `SHELL_CACHE` version in
-`app/web/static/js/service-worker.js` (see `docs/ARCHITECTURE.md`), then in
-the browser: DevTools → Application → Service Workers → **Unregister**, then
-reload the page. (A plain reload after only bumping the version can still
-need a second reload, since the new worker typically doesn't take over until
-after the reload that triggered its install completes — unregistering is the
-reliable one-step fix during development.)
+expiring, email-bound link you send them yourself. Technicians use the
+Android app, not a browser — the technician PWA was removed (owner decision,
+2026-09-16); only the admin web UI is served from the backend now.
 
 ## Testing
 

@@ -22,15 +22,54 @@ async function boot() {
   try {
     state.user = await api("/api/auth/me");
     if (state.user.role !== "administrator") {
-      root.innerHTML = `<div class="empty-state" style="padding:40px;">Administrator access required. <a href="/">Back to chat</a></div>`;
+      root.innerHTML = `<div class="empty-state" style="padding:40px;">Administrator access required for this account.</div>`;
       return;
     }
   } catch (_) {
-    window.location.href = "/";
+    // No valid session cookie. There used to be a technician PWA at "/" whose
+    // login form doubled as the only way a browser could authenticate at all
+    // -- removing that PWA (the technician client is Android-only now) left
+    // this admin UI with no way in. Found live 2026-09-16: /admin always
+    // rendered, but a signed-out visitor redirected to "/", which no longer
+    // exists. Renders its own login form instead of assuming one exists
+    // elsewhere.
+    renderLogin();
     return;
   }
   await loadTab();
   render();
+}
+
+function renderLogin() {
+  root.innerHTML = `
+    <div style="max-width:360px; margin:80px auto; padding:0 16px;">
+      <h1 style="margin-bottom:4px;">Admin sign in</h1>
+      <p style="color:var(--text-dim); margin-top:0;">Administrator accounts only.</p>
+      <form id="login-form" class="edit-form">
+        <label>Email <input name="email" type="email" required autofocus /></label>
+        <label>Password <input name="password" type="password" required /></label>
+        <div id="login-error" style="color:var(--danger); display:none;"></div>
+        <div><button type="submit" class="primary">Sign in</button></div>
+      </form>
+    </div>
+  `;
+  const form = document.getElementById("login-form");
+  const errorEl = document.getElementById("login-error");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorEl.style.display = "none";
+    const fd = new FormData(form);
+    try {
+      await api("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email: fd.get("email"), password: fd.get("password") }),
+      });
+      await boot();
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.style.display = "block";
+    }
+  });
 }
 
 const TABS = [
@@ -70,7 +109,7 @@ function render() {
       <nav class="admin-nav">
         <div style="padding:10px 10px 20px; font-weight:700;">Admin</div>
         ${TABS.map((t) => `<button data-tab="${t.id}" class="${state.tab === t.id ? "active" : ""}">${t.label}</button>`).join("")}
-        <div style="margin-top:auto; padding-top:20px;"><a href="/">← Back to chat</a></div>
+        <div style="margin-top:auto; padding-top:20px;"><button id="logout-btn" class="ghost">Sign out</button></div>
       </nav>
       <main class="admin-main">${renderTab()}</main>
     </div>
@@ -81,6 +120,12 @@ function render() {
       await loadTab();
       render();
     });
+  });
+  const logoutBtn = document.getElementById("logout-btn");
+  if (logoutBtn) logoutBtn.addEventListener("click", async () => {
+    try { await api("/api/auth/logout", { method: "POST" }); } catch (_) {}
+    state.user = null;
+    await boot();
   });
   wireTabEvents();
 }
