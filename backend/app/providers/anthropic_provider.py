@@ -134,6 +134,21 @@ class AnthropicProvider(AIProvider):
                 model=MODEL,
                 max_tokens=1200,
                 system=SYSTEM_PROMPT,
+                # Found live 2026-09-16: without this, the API enables
+                # extended thinking on its own for claude-sonnet-5 -- no
+                # `thinking` param was ever requested here. For a genuinely
+                # answerable question ("How do I replace the burrs on this
+                # grinder?") thinking consumed 1006 of the 1200-token budget,
+                # so stop_reason came back "max_tokens" with either a
+                # truncated (invalid) JSON text block or, worse, zero text
+                # block at all -- both attempts (the original call and the
+                # repair retry) failed parse_and_validate identically and
+                # produced the generic UNVERIFIED_ANSWER for a question the
+                # excerpts fully supported. This task is grounded extraction
+                # against excerpts already handed to the model, not open
+                # reasoning, so thinking isn't needed here; disabling it
+                # guarantees the whole budget goes to the actual JSON answer.
+                thinking={"type": "disabled"},
                 messages=messages,
             )
         except anthropic.APITimeoutError as e:
