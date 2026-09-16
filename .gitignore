@@ -1,5 +1,6 @@
 .env
 backend/.env
+backend/.env.test
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -30,3 +31,5 @@ _pipcheck/
 .venv/
 node_modules/
 *.egg-info/
+.neon
+.mcp.json

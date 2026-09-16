@@ -43,6 +43,18 @@ Concrete service selections:
   keeps the existing auth system, so Supabase's bundled auth/storage would
   be unused surface area. Flagged here in case it should be confirmed
   explicitly rather than accepted by default.
+
+  **Correction (2026-08-26):** the Neon project (`ChatBot`,
+  `broad-paper-68307488`) was created directly in the Neon console in
+  `aws-us-east-2` (Ohio), not `us-east4` as this section originally said.
+  This project is a fact on the ground, not something this record should
+  contradict — `us-east-2` is also where Neon's beta backend primitives
+  (Object Storage, Functions, AI Gateway) are gated, none of which this app
+  currently uses, so the region choice carries no present cost. Cloud Run
+  should still target `us-east4`/Virginia per the region reasoning below;
+  cross-cloud latency between Cloud Run (GCP, Virginia) and Neon (AWS, Ohio)
+  is small at this scale and was accepted rather than re-provisioning Neon
+  to chase an exact region match.
 - **Object storage:** Google Cloud Storage (free-tier allowance).
 - **Secret manager:** Google Secret Manager.
 - **Telemetry:** Google Cloud Logging/Monitoring.
@@ -172,6 +184,48 @@ should be closed first.
 accessibility service may be enabled programmatically (adb or otherwise) on
 these devices. The waiver removes the obligation to test; it does not
 authorize turning the service on.
+
+## 13. Issues.txt follow-up decisions (2026-09-16)
+
+Answered directly, in response to the independent builder-review backlog
+(`Issues.txt`, reviewed commit `2105488`):
+
+- **Concurrent questions in one conversation: not supported.** A second
+  question must not be enterable while one is being answered — the
+  technician must wait for it to finish or stop it first. Enforced
+  server-side (`conversations.is_processing`,
+  `app/api/routes_chat.py`'s `_claim_conversation_processing`/
+  `_release_conversation_processing`), covering `ask_question`,
+  `retry_answer`, and the pending-clarification resume path in
+  `set_conversation_machine` — not just a disabled client button.
+- **Technician PWA: removed entirely.** Android is the only technician
+  client in production. `index.html`, `app.js`, `service-worker.js`, the
+  manifest, and their routes in `app/main.py` are deleted; the admin web UI
+  (`admin.html`/`admin.js`, sharing `app.css`) stays.
+- **AI provider: Anthropic**, confirming section 3's Neon/GCP direction —
+  already wired and configured (`app/providers/anthropic_provider.py`,
+  `backend/.env`'s `AI_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`).
+- **Answer confidence: self-disclosed in the response text, not gated by a
+  strict threshold.** The provider's JSON contract gained an optional
+  `confidence` field (`"high"`/`"low"`); a low-confidence answer gets a
+  visible caveat prepended to the displayed text. The verbatim-evidence
+  check every claim/step/warning must pass is unchanged either way —
+  confidence never relaxes what the model is allowed to assert, only
+  whether a caveat is shown.
+- **Saved answers (and the existing favorite-machine feature): keep and
+  extend, not remove.** The backend capability continues development —
+  Android UI for it is in scope going forward, superseding any reading of
+  "no need to add favorites" as a request to hide the feature.
+- **Document/revision approval, conflict resolution, deletion review,
+  emergency withdrawal: owned entirely by ceyhun@hmwagner.com.** Not a
+  role the app needs to model differently from today's single-admin
+  account.
+- **Google Drive reconfirmed as the sole data source** (reaffirms section
+  4). Whether the real corpus uses nested folders/shortcuts/Google-native
+  files (`Issues.txt` P1-20) was not asked separately and remains open.
+- **The historical demo-credential exposure in git history (P0-5): a
+  non-issue.** Everything runs local-only; no rotation/deletion action was
+  requested.
 
 ---
 

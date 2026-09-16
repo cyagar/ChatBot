@@ -1,0 +1,1200 @@
+CHATBOT PROJECT - BUILDER ISSUES, RISKS, AND NEXT STEPS
+
+Repository: https://github.com/cyagar/ChatBot
+Reviewed commit: 2105488be9a55ec519b4e37ec5cfaefa593ce4af
+Reviewed tag: v0.1.0-audited-baseline
+Review date: 2026-09-14
+
+PURPOSE
+=======
+
+This file converts the project review into a builder-ready backlog. It separates
+confirmed bugs from architectural gaps, operational risks, and product decisions.
+Each issue includes an expected outcome so it can be turned into a tracked ticket.
+
+No source code was changed as part of this review.
+
+
+CURRENT PROJECT STATE
+=====================
+
+Summary
+-------
+
+The project is a substantial, well-tested internal prototype. It has:
+
+- A FastAPI backend with authentication, chat, retrieval, citations, ingestion,
+  administration, saved answers, feedback, and configuration endpoints.
+- SQLite as the database and local filesystem storage.
+- A technician PWA and admin web interface served by the backend.
+- A native Android application written in Kotlin/Jetpack Compose.
+- Google Drive ingestion, PDF/image extraction, chunking, embeddings, retrieval,
+  extractive and hosted-model provider implementations.
+- A meaningful automated backend test suite and Android JVM tests.
+
+It is not yet production-pilot ready. The implementation still depends on local,
+single-process components while the stated production direction is Cloud Run,
+Neon/Postgres with pgvector, Google Cloud Storage, Secret Manager, monitoring,
+Google Drive as the source of truth, and company-managed Android devices.
+
+Verification baseline
+---------------------
+
+- 305 runnable backend tests passed: 298 non-slow tests and 7 slow tests.
+- One live Google Drive integration test was skipped because live credentials and
+  a sandbox corpus were not available.
+- Python compilation and JavaScript syntax checks passed.
+- Public Backend CI was green at review time:
+  https://github.com/cyagar/ChatBot/actions/runs/33008806018
+- Public Android CI was green at HEAD at review time:
+  https://github.com/cyagar/ChatBot/actions/runs/33010909938
+- Android CI runs JVM unit tests and assembleDebug. It does not run connected
+  Android tests, a production release build, signing, installation, or upgrades.
+- The repository contains approximately 41 Android JVM @Test methods and 7
+  instrumented @Test methods.
+- A local Android build was not completed because the Gradle distribution could
+  not be downloaded in the review environment. Public CI is the current build
+  evidence.
+- No real Drive corpus, real hosted AI provider, browser E2E suite, emulator test,
+  physical-device test, load test, or deployed-cloud test was executed in this
+  review.
+
+Release recommendation
+----------------------
+
+Do not call the current build a production-capable pilot. Use it for controlled
+development or demonstrations only. Resolve the P0 issues, make the decision gates
+at the end of this file, then pass a staging release gate before putting real users
+or business-critical manuals on it.
+
+
+PRIORITY DEFINITIONS
+====================
+
+P0 - Release blocker
+     Must be resolved or explicitly risk-accepted before a production pilot.
+
+P1 - Required for dependable rollout
+     Should be completed before broad technician use or material data volume.
+
+P2 - Maintainability/product follow-up
+     Important debt, quality, or product work that can follow a tightly controlled
+     pilot if it is recorded, owned, and scheduled.
+
+
+P0 - RELEASE BLOCKERS
+=====================
+
+P0-001 - Implement the selected production architecture
+Type: Architecture and deployment gap
+
+Problem:
+The selected production services are documented, but the running application still
+uses SQLite, local disk, startup migrations, process-local locks, process-local rate
+limits, FastAPI BackgroundTasks, and an in-process timer. The storage_backend setting
+does not select a real alternative implementation.
+
+Impact:
+Cloud Run's ephemeral filesystem, scale-to-zero behavior, restarts, and multiple
+instances can lose files, duplicate jobs, split rate-limit state, race migrations,
+and produce inconsistent ingestion or answer processing. SQLite is also a
+single-writer bottleneck.
+
+Required work:
+- Implement Postgres/Neon persistence and pgvector retrieval.
+- Add reviewed, concurrency-safe production migrations and a data migration plan.
+- Implement Google Cloud Storage for extracted files, pages, and other durable
+  artifacts; do not rely on container-local paths.
+- Load secrets through Secret Manager/Workload Identity or another approved
+  mechanism, not bundled JSON keys or committed environment files.
+- Provide Cloud Run service configuration, separate staging and production
+  environments, IAM, network configuration, and deployment/rollback automation.
+- Replace process-local rate limiting if limits must apply across replicas.
+- Decide whether chat completion needs a durable queue. Use Cloud Tasks, Pub/Sub,
+  Cloud Run Jobs, or another durable worker model based on retry/ordering needs.
+- Use an external scheduler for ingestion. Do not rely on an in-process timer in a
+  scale-to-zero web service.
+- Separate API-serving configuration from ingestion-worker configuration so the API
+  can serve already-indexed content without requiring a Drive key at startup.
+
+Acceptance criteria:
+- Two or more API replicas can run concurrently without SQLite/local-disk state.
+- Restarting or scaling the service does not lose an accepted chat or ingestion job.
+- Migrations are applied once, safely, as part of deployment.
+- Staging deploy, rollback, and restore procedures have been demonstrated.
+- Production infrastructure and runtime settings are reproducible from reviewed
+  configuration.
+
+Primary areas:
+backend/app/db.py, backend/app/config.py, backend/app/main.py,
+backend/app/ingestion/scheduler.py, backend/app/rate_limit.py, backend/Dockerfile,
+docker-compose.yml, backend/migrations/
+
+
+P0-002 - Make answer processing durable and recoverable
+Type: Confirmed lifecycle defect / architecture gap
+
+Problem:
+The user message is committed before retrieval/provider work begins. A crash after
+that commit can leave a conversation permanently unanswered, while replaying the
+same idempotency key can return 409 indefinitely. Retry processing can similarly
+remain in retrying state forever if the process dies. There is no durable outbox,
+job lease, heartbeat, expiry, recovery worker, or status endpoint.
+
+Impact:
+Accepted questions can disappear from the user's perspective, become permanently
+stuck, or require manual database repair. A client cannot reliably distinguish
+queued, running, failed, abandoned, and completed work.
+
+Required work:
+- Introduce a durable answer-attempt/job record with queued, running, completed,
+  retryable_failed, permanent_failed, and expired/abandoned states.
+- Atomically persist the user turn and enqueue/outbox record.
+- Add claim leases, lease expiry, heartbeats where appropriate, bounded retry with
+  backoff, and a recovery worker for abandoned jobs.
+- Return an operation/turn ID and expose a status endpoint or a defined polling/SSE
+  contract.
+- Record a durable failure response or terminal status when retries are exhausted.
+- Make operator-visible repair/requeue actions auditable.
+
+Acceptance criteria:
+- Fault injection after every persistence boundary cannot lose an accepted request.
+- A killed worker's job becomes claimable after a defined timeout.
+- Replaying a request returns the same completed result or current operation state.
+- Users receive a stable terminal result instead of an infinite spinner or 409 loop.
+
+Primary areas:
+backend/app/api/routes_chat.py, backend/migrations/0002_answer_persistence.sql,
+backend/migrations/0009_retry.sql, backend/migrations/0010_idempotency.sql
+
+
+P0-003 - Add explicit question-to-answer correlation
+Type: Confirmed concurrency bug
+
+Problem:
+Assistant messages do not have an explicit reply_to_user_message_id or answer-attempt
+relationship. Existing lookup logic can return the first later assistant message.
+If two questions in one conversation complete out of order, idempotent replay can
+return the wrong answer. Retry selection and "frequently unanswered" calculations
+can also associate messages by proximity rather than identity.
+
+Impact:
+A technician can receive or replay an answer belonging to a different question.
+Analytics, feedback, retry, and unanswered-question reports can be wrong.
+
+Required work:
+- Add an explicit reply/attempt relationship from every assistant result to the
+  exact user message and client turn.
+- Bind idempotency to user, conversation, operation, and a canonical request hash.
+- Reject reuse of an idempotency key with a different payload.
+- Decide whether multiple concurrent questions in one conversation are supported.
+  If supported, make ordering and UI reconciliation safe. If not, enforce the rule
+  server-side rather than relying only on a disabled client button.
+- Update retry, replay, feedback, saved-answer, and reporting queries to use the
+  explicit relationship.
+
+Acceptance criteria:
+- Two questions that finish in reverse order still map to the correct answers.
+- Retry and replay target exactly one original user message/attempt.
+- The database prevents conflicting completed relationships.
+- Analytics never infer reply ownership from row order alone.
+
+
+P0-004 - Fix Android send, refresh, and pending-message reconciliation
+Type: Confirmed client-state bugs
+
+Problem:
+- loadMessages() treats the conversation as answered when the last persisted message
+  is any assistant message. An older answer can clear a pending echo for a newer
+  question.
+- Refresh during a POST can load the already-persisted user turn. POST success then
+  appends a synthetic user turn plus the assistant answer, creating a duplicate
+  user bubble.
+- Multiple refresh coroutines can complete out of order and overwrite newer state.
+- Pending turns, drafts, and idempotency state live only in the ViewModel and are
+  lost on process death.
+
+Impact:
+Technicians can see duplicated questions, missing pending state, incorrect completion
+state, or stale message history. They may resend a question and create additional
+work.
+
+Required work:
+- Give every client turn a durable client_turn_id/idempotency key and return it in
+  message/answer APIs.
+- Reconcile messages by stable IDs and explicit reply/operation state, not message
+  role or list position.
+- Cancel or generation-tag refresh jobs so old responses cannot replace newer data.
+- Persist drafts and pending operations in Room, DataStore, or another suitable
+  durable client store and recover them after process recreation.
+- Avoid appending synthetic copies once server-owned messages are available.
+
+Acceptance criteria:
+- Refreshing at each phase of an in-flight send never duplicates or removes a turn.
+- An older assistant message cannot complete a newer pending question.
+- Process death and relaunch restore the draft/pending operation and converge to the
+  server result.
+- Rapid refresh and send tests are deterministic.
+
+Primary areas:
+android/app/src/main/java/com/hmwagner/techmanual/ui/chat/ChatViewModel.kt,
+android/app/src/main/java/com/hmwagner/techmanual/network/ApiModels.kt,
+android/app/src/main/java/com/hmwagner/techmanual/network/ApiService.kt
+
+
+P0-005 - Correct authentication, account identity, and session revocation
+Type: Confirmed bugs and security gaps
+
+Problem:
+- Registration allows up to 72 characters, but bcrypt accepts at most 72 UTF-8
+  bytes. A password such as 40 emoji passes schema validation and can cause a 500.
+- Invitation checks normalize email casing, but stored email/login lookup is
+  case-sensitive. The same human identity can behave inconsistently by casing.
+- Logout only removes the cookie locally. A copied JWT remains valid until its
+  eight-hour expiry; the Android comment says the server revokes it, which is false.
+- A demo credential was removed from current source, but remains in public Git
+  history unless history was rewritten. Its associated account must be treated as
+  exposed.
+
+Impact:
+Registration can crash, invited users can fail to log in, account uniqueness can be
+ambiguous, disabled/lost-device sessions may remain usable, and an old demo account
+may be compromised.
+
+Required work:
+- Validate the encoded password byte length and return a clear 422 validation error.
+- Define canonical email normalization/case folding at every boundary; migrate
+  existing data and enforce a normalized unique database constraint.
+- Implement revocable per-device sessions or a token-version/revocation design.
+- Require authentication on logout and revoke the current session server-side.
+- Support administrator/device offboarding and immediate session invalidation.
+- Confirm that the historical demo account/password was rotated or deleted.
+- Enable secret scanning and define credential-rotation handling.
+- Replace mutable list model defaults such as capabilities=[] with an explicit
+  default factory for clarity and safety.
+
+Acceptance criteria:
+- Unicode boundary tests return validation errors, never 500s.
+- Email casing cannot create a second identity or prevent an invited login.
+- Logout, user disablement, and device loss invalidate relevant tokens promptly.
+- Secret scanning runs in CI and the historical credential has a documented outcome.
+
+Primary areas:
+backend/app/auth/routes.py, backend/app/auth/security.py, backend/app/auth/deps.py,
+backend/app/auth/bootstrap.py, Android session/network code
+
+
+P0-006 - Make ingestion state truthful, recoverable, and source-of-truth aware
+Type: Confirmed correctness gaps
+
+Problem:
+- An ingestion run is marked completed_with_errors only when an exception escapes.
+  Normal per-file outcomes such as failed, unsupported, skipped, or
+  needs_reprocessing can still result in a completed run.
+- Files deleted from Drive remain active and retrievable indefinitely.
+- A killed process can leave an ingestion run marked running forever.
+- Existing embeddings are selected mainly by absence; changing the embedding model
+  or revision does not reliably re-embed old chunks.
+- Extraction/chunk-version mismatches can be flagged without an automatic controlled
+  reprocessing path.
+- New document revisions do not enforce or automatically establish one current
+  approved revision.
+
+Impact:
+Operators can see a false-green corpus, technicians can retrieve withdrawn manuals,
+old vectors can be compared with a new model, and conflicting/outdated revisions can
+remain active.
+
+Required work:
+- Define severity for every per-item result and roll it into an accurate run status.
+- Add leases/expiry/recovery for abandoned running ingestion records.
+- Reconcile source deletion cautiously using a two-pass tombstone/quarantine process.
+  Never mass-delete when the Drive listing itself failed or was incomplete.
+- Alert on deletion candidates and make approval/recovery auditable.
+- Store embedding model, model revision, dimensions, normalization, and pipeline
+  fingerprint; replace embeddings that do not match the active fingerprint.
+- Provide a controlled automatic reprocessing path for stale extraction/chunking.
+- Enforce one current approved revision per source/business revision chain.
+- Clean obsolete manifest/cache records without breaking audit history.
+
+Acceptance criteria:
+- A run with any material file failure is visibly degraded/failed by policy.
+- A simulated Drive deletion is quarantined and ultimately removed from retrieval
+  only after a safe, observable reconciliation.
+- Model or pipeline changes cause deterministic reprocessing/re-embedding.
+- Process death does not leave an immortal running record.
+- Retrieval cannot return two conflicting records both marked current for one
+  revision chain.
+
+Primary areas:
+backend/app/ingestion/pipeline.py, backend/app/ingestion/sources.py,
+backend/app/ingestion/scheduler.py, backend/app/ingestion/extracted.py,
+backend/app/retrieval/embeddings.py, backend/migrations/0008_pipeline_versioning.sql
+
+
+P0-007 - Prove RAG quality and safety on the real corpus
+Type: Validation and product-safety gap
+
+Problem:
+The committed ground-truth set has only 10 cases. No current retrieval evaluation
+report is tracked. The default threshold was tuned against a small corpus survey,
+and short/bare identifiers are known false-positive risks. Claim validation checks
+numbers/identifiers and warning text but does not establish qualitative entailment.
+The production hosted AI provider is not selected and tested end to end.
+
+A separate functional mismatch also exists: when vector search fails, lexical
+candidates receive vector_score=0, while the default extractive provider normally
+requires the vector threshold except for a narrow code-token rescue. Ordinary
+lexical fallback can therefore become a no-answer path despite being described as
+a usable degraded fallback.
+
+Impact:
+Passing unit tests does not establish that technicians receive correct, current,
+well-cited answers. Unsupported qualitative claims may pass validation, and a vector
+outage may cause an unexpected spike in no-answer responses.
+
+Required work:
+- Select the production model/provider and document fallback behavior.
+- Build a larger verified evaluation set from the real 71-document corpus, stratified
+  by machine, document type, OCR quality, revision, answerability, safety topic, and
+  ambiguous identifiers.
+- Add adversarial, conflict, prompt-injection, and no-answer cases.
+- Define and track retrieval recall, citation precision, answer correctness,
+  unsupported-claim rate, no-answer quality, latency, and cost.
+- Strengthen support checking for qualitative claims or constrain generation to
+  evidence spans that can be verified.
+- Define an explicit lexical-degraded scoring/gating mode, or treat vector failure as
+  a service failure. Do not silently promise a fallback that cannot answer.
+- Run live contract tests for the selected provider, including timeouts, rate limits,
+  malformed output, repair, fallback, and cost controls.
+
+Acceptance criteria:
+- A versioned evaluation report is generated in CI/staging with agreed thresholds.
+- The real corpus passes an owner-reviewed go/no-go sample.
+- Provider failure and vector failure have tested, user-visible behavior.
+- No deployment proceeds when accuracy/safety metrics regress beyond the agreed
+  budget.
+
+Primary areas:
+data/eval/ground_truth.json, backend/scripts/eval_retrieval.py,
+backend/app/retrieval/search.py, backend/app/providers/, backend/tests/retrieval/
+
+
+P0-008 - Build a real Android production release path
+Type: Release engineering gap
+
+Problem:
+The Android app is still version 0.1.0-demo/versionCode 1, uses an interim minSdk 26,
+has a placeholder production base URL, has no demonstrated signing/distribution
+pipeline, does not assemble/test a production release in CI, and has minification
+disabled. There is no tested install, managed distribution, upgrade, or rollback
+path, and no crash telemetry.
+
+Impact:
+A debug APK passing JVM tests is not evidence that the managed-device production app
+can be built, installed, upgraded, supported, or rolled back.
+
+Required work:
+- Define build flavors and environment-specific, HTTPS-only base URLs.
+- Configure secure signing, artifact retention, provenance, managed distribution,
+  staged rollout, and rollback.
+- Run release compilation, shrinking rules if enabled, static analysis, and relevant
+  tests in CI.
+- Inventory the actual managed device fleet and choose minSdk/device/API test matrix.
+- Add privacy-approved crash/error telemetry and release identifiers.
+- Test fresh install, authentication, update with existing cookie/data, forced
+  minimum-version behavior, logout/offboarding, and rollback.
+
+Acceptance criteria:
+- CI produces a signed or signable release artifact from an immutable revision.
+- The app installs and upgrades on the supported device matrix.
+- Staging and production configuration cannot be mixed accidentally.
+- Operations can identify the deployed version and roll back safely.
+
+Primary areas:
+android/app/build.gradle.kts, android/gradle.properties, android/README.md,
+Android CI workflow, AndroidManifest.xml
+
+
+P0-009 - Add real readiness, observability, backup, and incident controls
+Type: Operational readiness gap
+
+Problem:
+The health check is shallow. Corpus status can be reported as ok when Drive is merely
+configured but no successful sync exists, and database/status exceptions can also
+produce a misleading result. There are no demonstrated service-level objectives,
+central metrics/traces/error reporting, alerting, backup/restore drill, or disaster
+recovery targets.
+
+Impact:
+The service can be unhealthy or serve stale content while looking green. Operators
+may learn about outages from technicians and may not be able to restore within an
+acceptable window.
+
+Required work:
+- Separate liveness from readiness.
+- Make readiness check database connectivity/schema and corpus usability. Treat
+  missing/failed status as degraded or unknown, not ok.
+- Do not make a transient Drive outage take down chat if a valid indexed corpus is
+  available; expose ingestion freshness separately.
+- Add structured logs with request/operation/correlation IDs, metrics, traces, and
+  privacy-reviewed error reporting.
+- Alert on provider errors/latency, answer-job backlog, abandoned jobs, ingestion
+  failures/staleness, no-answer spikes, database/storage errors, and auth anomalies.
+- Define latency, availability, recovery, and concurrent-user targets.
+- Confirm backup/PITR capabilities, retention, RPO/RTO, and perform a restore drill.
+- Define incident response, escalation, and a non-placeholder support contact.
+
+Acceptance criteria:
+- Dashboards and actionable alerts work in staging.
+- Synthetic checks detect an unusable corpus and stuck processing.
+- A documented backup restore has been timed and validated.
+- Each request and background job can be traced across API, worker, database, model,
+  and storage logs without recording prohibited content.
+
+Primary areas:
+backend/app/api/routes_config.py, backend/app/main.py, deployment configuration,
+docs/PRODUCTION_READINESS.md
+
+
+P1 - REQUIRED FOR DEPENDABLE ROLLOUT
+====================================
+
+P1-010 - Enforce strict pagination and cursor validation
+Type: Confirmed API bugs
+
+Problem:
+Cursor decoding checks base64/JSON but not the expected array shape, element count,
+or value types. Valid base64 containing the wrong JSON shape can raise an unhandled
+exception and return 500. Limit parameters do not consistently define lower/upper
+bounds, so negative or very large values can produce incorrect or expensive queries.
+
+Required work:
+- Define a typed, endpoint-specific, versioned cursor schema.
+- Reject malformed shapes/types with a consistent 400/422 error.
+- Set explicit ge/le bounds for every limit and page-size parameter.
+- Consider signing cursors if clients must not modify their content.
+- Document stable ordering and continuation behavior.
+
+Acceptance criteria:
+- Arbitrary JSON, negative limits, zero limits, and excessive limits never return 500
+  or create unbounded work.
+- Contract tests cover malformed, stale, and boundary cursors for every list endpoint.
+
+Primary area: backend/app/api/pagination.py and all paginated routes
+
+
+P1-011 - Enforce API/domain invariants before database operations
+Type: Confirmed error-handling and data-integrity bugs
+
+Problem:
+- Touching recent machines or favorites does not validate that a machine exists;
+  foreign-key failures can become 500s.
+- Conversation creation/selection checks that a machine row exists but not that it is
+  eligible and linked to current approved content. Hidden/ineligible selections can
+  dead-end.
+- Feedback and save operations can target owned user messages, clarification turns,
+  failed answers, or no-answer rows instead of only eligible completed assistant
+  answers.
+- Admin document metadata machine_ids are not fully prevalidated, allowing FK errors.
+- Several strings can be blank, untrimmed, unbounded, or duplicated by case.
+
+Required work:
+- Put domain validation in a shared service boundary and return stable 4xx errors.
+- Define machine eligibility consistently for search, selection, clarification, and
+  conversation APIs.
+- Limit feedback/save to completed assistant answers with the required ownership and
+  answer state.
+- Validate all referenced IDs before commit and make multi-row changes transactional.
+- Normalize, trim, bound, and enum-validate metadata/status/reason fields.
+- Add database constraints where application validation is insufficient.
+
+Acceptance criteria:
+- Invalid references and invalid states return documented 4xx errors, never raw 500s.
+- API and UI cannot select a machine that cannot support retrieval under policy.
+- Feedback/save rows always refer to an eligible assistant answer.
+
+
+P1-012 - Fix review-queue and approval invariants
+Type: Confirmed admin/data-governance bugs
+
+Problem:
+An approved document with zero machine links can disappear from the review queue due
+to the SQL NULL condition while remaining unretrievable. Approval can occur without
+an approved link. Multiple current revisions can coexist.
+
+Required work:
+- Include zero-link documents in the incomplete/review state.
+- Block final approval until required machine links and metadata are valid, or give
+  the document a clearly visible incomplete state.
+- Enforce one current approved revision per revision chain/source/business document.
+- Record who approved, changed revision status, linked machines, or withdrew content.
+
+Acceptance criteria:
+- No document can be both apparently approved and operationally invisible.
+- Zero-link documents remain visible to reviewers.
+- Revision state transitions are transactional, constrained, and audited.
+
+Primary areas: backend/app/api/routes_admin.py, backend/app/ingestion/metadata.py,
+backend migrations and admin UI
+
+
+P1-013 - Implement pagination in the Android client
+Type: Confirmed functional omission
+
+Problem:
+The server returns X-Next-Cursor, but Android ignores it. Users see only the first 20
+conversations, 25 machines, and 500 messages. Larger histories silently disappear.
+
+Required work:
+- Read and model pagination headers/cursors in the network layer.
+- Implement load-more or bounded incremental loading for history, machines, messages,
+  saved answers, and any other lists.
+- Preserve stable ordering, deduplicate by ID, and handle refresh versus append.
+- Show loading and retry states for additional pages.
+
+Acceptance criteria:
+- Test data beyond every first-page boundary is reachable and not duplicated.
+- Refresh during pagination does not reorder, omit, or overwrite newer records.
+
+Primary areas: android network, HistoryViewModel.kt, MachinesViewModel.kt,
+ChatViewModel.kt
+
+
+P1-014 - Fix Android citation/evidence request races and viewer errors
+Type: Confirmed UI concurrency bugs
+
+Problem:
+Selecting citation A and then B starts uncancelled requests; a late A response can
+overwrite B's evidence. Dismissing evidence does not reliably cancel/clear loading,
+so a late response can repopulate or reopen state. Page images do not expose a clear
+load failure/retry state. The evidence view lacks robust zoom/pan/full-view behavior.
+
+Required work:
+- Keep and cancel the previous evidence Job.
+- Apply a response only when its request token and citation/document ID still match
+  the current selection.
+- Cancel and clear loading/data on dismiss; ignore all late responses.
+- Add explicit image loading, error, retry, zoom, and pan behavior.
+- Preserve source title, page, excerpt, and document identity during viewer changes.
+
+Acceptance criteria:
+- Rapid A/B/A selection always displays the final selected citation.
+- Dismissed evidence cannot reappear from a late response.
+- Failed images provide a useful retry/manual-open path.
+
+Primary areas: ChatViewModel.kt and ChatScreen.kt
+
+
+P1-015 - Make Android consume server configuration and capabilities
+Type: Functional integration gap
+
+Problem:
+Android does not call /api/config and omits server capabilities from its models.
+Maintenance mode, minimum supported version, corpus state, feature availability, and
+support information are therefore informational only. After machine clarification,
+the returned conversation label is stored, but the chat top bar uses the immutable
+navigation machineLabel and can continue to display "No machine selected."
+
+Initial recent/history failures can also render as an unexplained empty state.
+
+Required work:
+- Fetch/cache config at startup and refresh it by policy.
+- Enforce minimum-version and maintenance behavior, and show degraded corpus/support
+  information clearly.
+- Model and enforce capabilities rather than assuming endpoints/features exist.
+- Render the authoritative conversation/machine label from updated state.
+- Distinguish empty, loading, authentication, offline, and server-error states.
+
+Acceptance criteria:
+- Server-driven maintenance/minimum-version tests visibly block or degrade the app as
+  specified.
+- A clarified machine updates the top bar immediately and after reload.
+- Failed initial loads offer a meaningful error and retry action.
+
+
+P1-016 - Control Android ViewModel lifetime and durable client state
+Type: Resource and recovery risk
+
+Problem:
+Chat ViewModels are Activity-scoped with a unique chat-ID key and are not cleared
+until Activity destruction. Visiting many conversations can retain growing message
+and evidence state. Draft and pending state also disappears on process recreation.
+
+Required work:
+- Scope conversation state to navigation entries or implement an explicit bounded
+  store/eviction policy.
+- Persist only the client state required for reliable recovery.
+- Clear evidence images and large lists when leaving a conversation.
+- Add process-recreation and many-conversation memory tests/profiling.
+
+Acceptance criteria:
+- Repeatedly opening many conversations does not cause unbounded memory growth.
+- Process recreation restores required state without retaining stale screens.
+
+
+P1-017 - Upgrade vulnerable dependencies and make installs reproducible
+Type: Dependency/security debt
+
+Problem:
+At review time pip-audit reported advisories in four pinned packages:
+
+- python-multipart 0.0.20; upgrade to at least 0.0.31.
+  https://github.com/advisories/GHSA-6jv3-5f52-599m
+- PyJWT 2.10.1; upgrade to at least 2.13.0.
+  https://github.com/advisories/GHSA-xgmm-8j9v-c9wx
+  https://github.com/advisories/GHSA-w7vc-732c-9m39
+- Jinja2 3.1.5; upgrade to at least 3.1.6.
+  https://github.com/advisories/GHSA-cpwx-vrp4-4pq7
+- pytest 8.3.4; upgrade to at least 9.0.3.
+  https://github.com/advisories/GHSA-6w46-j5rx-g56g
+
+Some advisory paths may have limited applicability to this app's current use, but
+the pins should still be upgraded and regression-tested unless a documented exception
+is approved.
+
+The default README install also downloaded CUDA-enabled PyTorch and produced an
+approximately 7.4 GB environment in the review environment, versus roughly 1.7 GB
+for the CPU-specific CI route.
+
+Required work:
+- Upgrade the four packages and run the full suite.
+- Split runtime, development, test, OCR/embedding, and optional provider dependencies.
+- Use a documented CPU-only PyTorch installation/lock where GPU support is not used.
+- Add deterministic constraints/lockfiles and hashes where practical.
+- Automate Python and Android dependency update/audit checks.
+- Generate an SBOM if required by deployment policy.
+- Consider pinning third-party GitHub Actions by commit SHA.
+
+Acceptance criteria:
+- CI audit has no unaccepted known vulnerabilities.
+- A clean documented install is reproducible and does not pull unused CUDA packages.
+- Runtime images contain only production requirements.
+
+Primary area: backend/requirements.txt and CI workflows
+
+
+P1-018 - Add browser/API security hardening
+Type: Security hardening gap
+
+Problem:
+The app sets several useful headers but does not define a Content-Security-Policy or
+Permissions-Policy. Manual response filenames need safe framework-level disposition
+handling. Generic image responses can be labeled JPEG even when bytes use another
+format. Security/static checks are not configured as reliable CI gates.
+
+Required work:
+- Add and test an appropriate CSP and Permissions-Policy.
+- Sanitize/encode Content-Disposition filenames with framework helpers.
+- Detect/store the correct image MIME type and reject unsupported formats.
+- Add configured static/security analysis with documented suppressions. The current
+  Bandit MD5 finding for a Drive MD5 integrity checksum is not a password-hash issue
+  and should be suppressed narrowly with an explanation.
+- Review CSRF posture for cookie-authenticated mutating endpoints and keep SameSite,
+  origin, and token decisions explicit.
+
+Acceptance criteria:
+- Browser security headers pass a defined check without breaking the admin UI.
+- Hostile filenames cannot inject response headers.
+- MIME declarations match returned bytes.
+- Security scan findings are actionable and exceptions are narrow/documented.
+
+
+P1-019 - Bound manual/page memory, storage, and cache behavior
+Type: Scalability/reliability risk
+
+Problem:
+The page-image renderer uses an LRU cache bounded by 256 entries, not bytes, and can
+retain large raw PNG blobs. Local manual storage and application-memory caches are
+not suitable for Cloud Run replicas. Content-addressed paths use only the first 16
+SHA hex characters.
+
+Required work:
+- Store rendered pages/object artifacts in GCS with full content hashes, immutable
+  keys, correct metadata, and lifecycle rules.
+- Use a bounded byte-size cache/CDN strategy rather than caching hundreds of raw
+  images in process memory.
+- Define authorization-aware cache headers and invalidation for withdrawn manuals.
+- Measure worst-case PDF/page memory and render time; impose input/page limits.
+
+Acceptance criteria:
+- Large/manual-heavy workloads stay within the Cloud Run memory budget.
+- Withdrawn or unauthorized pages cannot be served from stale caches.
+- Identical content deduplicates without relying on a truncated identifier.
+
+Primary areas: backend/app/api/routes_manuals.py, ingestion extracted storage
+
+
+P1-020 - Finish Google Drive source behavior and policy
+Type: Source-integration gap
+
+Problem:
+Drive ingestion handles a flat set of immediate children. Subfolders, shortcuts, and
+Google Workspace-native documents are unsupported. Source deletion/renaming policy,
+listing completeness, and cached-manual retention are not fully specified. Missing
+or zero Drive size metadata may also undermine cache-validity decisions and should be
+verified with real provider cases.
+
+Required work:
+- Decide and document whether nested folders, shortcuts, Docs, Sheets, and Slides are
+  in scope.
+- Implement supported cases or reject them visibly in review/ingestion status.
+- Use Drive file ID plus version/checksum metadata as source identity; test rename,
+  move, replacement, zero/missing size, permission loss, rate limit, and partial list.
+- Define safe manual removal, cache purge, audit retention, and restoration behavior.
+- Test with an approved staging Drive and representative real files.
+
+Acceptance criteria:
+- Every allowed source type has an integration test and observable outcome.
+- Unsupported items are visible and do not make a run look fully successful.
+- Permission/listing failures cannot trigger mass withdrawal.
+
+
+P1-021 - Detect conflicting manuals and revisions correctly
+Type: Retrieval/data-governance defect
+
+Problem:
+Conflict warnings mainly trigger when a cited passage is already marked superseded,
+while normal technician retrieval excludes superseded content. Two differing manuals
+both marked current can therefore coexist without an effective warning.
+
+Required work:
+- Enforce current-revision uniqueness where business keys permit it.
+- Detect conflict among multiple current candidates using document/revision metadata,
+  not only the superseded flag on selected citations.
+- Define operator workflow for ambiguous business keys and unresolved conflicts.
+- Prevent approval or retrieval until safety-significant conflicts are resolved.
+
+Acceptance criteria:
+- Seeded conflicting current revisions produce an admin alert and the agreed safe
+  technician behavior.
+- A superseded manual cannot silently become the preferred answer source.
+
+
+P1-022 - Normalize database constraints, timestamps, and migration controls
+Type: Data-integrity/operations debt
+
+Problem:
+Several important rules live only in application code. Timestamp handling mixes
+SQLite-naive values and timezone-aware ISO values. Startup migration execution is not
+a safe multi-replica production strategy.
+
+Required work:
+- Centralize UTC timestamp creation, storage, and parsing.
+- Add database checks/enums/foreign keys/unique indexes for roles, statuses, message
+  roles, answer states, normalized email, reply relationships, active revisions, and
+  other enforceable invariants.
+- Adopt a production migration tool/process with locking, roll-forward/rollback
+  guidance, and pre-deployment backup.
+- Build and rehearse a SQLite-to-Postgres migration with reconciliation counts for
+  users, conversations, messages, citations, documents, chunks, links, and jobs.
+
+Acceptance criteria:
+- Invalid states cannot be inserted through concurrent requests or direct job paths.
+- All timestamps have unambiguous UTC semantics.
+- A representative database migration preserves ownership and citation integrity.
+
+
+P1-023 - Decide the technician PWA's future and close its open bugs
+Type: Product decision and client-quality gap
+
+Problem:
+The current owner direction says an Android fallback is not needed, but the backend
+still serves the technician PWA, manifest, service worker, and offline manual cache.
+The README describes that behavior. Maintaining an unused technician client expands
+the security, privacy, test, and support surface.
+
+If retained, known gaps include:
+- sendQuestion does not send an Idempotency-Key.
+- Debounced machine search does not cancel or reject stale responses.
+- Service-worker manual caches can survive logout/auth failure/browser restart;
+  worker memory alone is not a reliable purge signal.
+- Cache-first shell deployments depend on manually bumping SHELL_CACHE and can serve
+  stale code.
+- There is no real browser E2E suite.
+
+Required work:
+- Decide Android-only versus supported PWA.
+- If Android-only, remove/disable technician routes/assets in production while
+  retaining the required admin UI, and update documentation.
+- If retained, implement idempotency, request cancellation/versioning, reliable
+  session/offboarding cache purge, safer service-worker versioning, and browser E2E.
+
+Acceptance criteria:
+- Production exposes only intentionally supported clients.
+- Any retained offline cache is purged on logout, disablement, expiry, and withdrawal
+  according to a verified retention policy.
+
+Primary areas: backend/app/web/static/js/app.js,
+backend/app/web/static/js/service-worker.js, backend/app/web/templates/index.html
+
+
+P1-024 - Define and enforce idempotency at every client boundary
+Type: API reliability gap
+
+Problem:
+Idempotency-Key is optional, malformed keys can be treated as absent, the PWA sends
+none, and keys are not robustly bound to a canonical request fingerprint. Client
+retries can therefore duplicate work, while accidental key reuse can replay an
+unrelated request or fail ambiguously.
+
+Required work:
+- Require a validated client turn/idempotency key for request-creating operations.
+- Bind it to account, conversation, operation, and canonical payload hash.
+- Return the same resource/operation for a valid replay and 409 for same-key,
+  different-payload reuse.
+- Persist the key before remote provider work and retain it for the agreed replay
+  window.
+- Implement identical semantics in Android and any retained PWA.
+
+Acceptance criteria:
+- Network timeout/retry tests create exactly one logical user turn and answer job.
+- Invalid keys return 4xx; they are never silently ignored.
+
+
+P1-025 - Scale and constrain admin/data-management UX
+Type: Operational UX gap
+
+Problem:
+Admin document, machine, user, and duplicate lists are largely unpaginated and can
+become slow or unusable as the corpus and staff grow. Metadata/status inputs need
+more constraints. Account administration lacks some lifecycle protections and role
+management.
+
+Required work:
+- Paginate/filter large admin lists and preserve stable review ordering.
+- Validate/whitelist statuses, reasons, roles, and metadata; trim and bound text.
+- Add last-admin protection and an intentional admin role-change/offboarding flow.
+- Surface incomplete document links, failed ingestion items, deletion candidates,
+  stale revisions, and abandoned jobs as actionable queues.
+- Record actor, timestamp, before/after values, and reason for sensitive changes.
+
+Acceptance criteria:
+- Admin workflows remain usable with production-scale seeded data.
+- It is impossible to disable/remove the last effective administrator accidentally.
+- Every corpus state that blocks retrieval is visible and actionable.
+
+
+P1-026 - Add missing end-to-end, fault, and release tests
+Type: Test coverage gap
+
+Required regression tests:
+- Concurrent questions completing out of order and correct idempotent replay.
+- Crash after user-message commit and retry lease expiry/recovery.
+- Same idempotency key with changed payload.
+- Unicode password byte limits and case-normalized email identity.
+- Malformed cursor JSON shapes and negative/zero/excessive limits.
+- Invalid machine IDs and feedback/save against ineligible message roles/states.
+- Ingestion run containing normal failed/unsupported/reprocess outcomes.
+- Embedding model/revision change causing re-embedding.
+- Drive deletion quarantine, incomplete listing, rename, move, and permission loss.
+- Approved document with zero machine links and revision uniqueness.
+- Vector outage and ordinary lexical-only fallback behavior.
+- Android refresh after persisted user turn but before POST completion.
+- Android pending echo when an older assistant message is last.
+- Rapid citation selection, dismiss-before-response, and image-load failure.
+- Android pagination, config, capabilities, and minimum-version behavior.
+
+Required system tests:
+- Live Drive test against a controlled staging folder.
+- Opt-in live contract tests for the selected AI provider.
+- Browser E2E for the admin UI and for the PWA only if retained.
+- Android emulator/connected tests in CI plus a representative physical-device pass.
+- Release build, sign, install, upgrade, session preservation/revocation, and rollback.
+- Load/concurrency tests for chat, retrieval, page images, login, and ingestion.
+- Fault injection for database, storage, vector, Drive, and provider failures.
+- Backup and restore rehearsal.
+
+Acceptance criteria:
+- These tests are mapped to release gates, not merely available as optional commands.
+- Staging failures block promotion under a documented policy.
+
+
+P1-027 - Establish performance and capacity budgets
+Type: Scalability gap
+
+Problem:
+There is no demonstrated load/capacity result for concurrent technicians, provider
+latency, database writes, vector queries, page rendering, or ingestion. The Docker
+image may be large because embedding/OCR/model dependencies are bundled.
+
+Required work:
+- Define expected concurrent users, peak sends, corpus growth, document/page sizes,
+  answer latency percentiles, ingestion window, and cost budget.
+- Benchmark cold start, image size, memory, vector retrieval, provider latency, and
+  page rendering with production-like data.
+- Tune Cloud Run concurrency/instances/timeouts and database pool/connection limits.
+- Split worker/runtime images if it materially improves cold start or attack surface.
+
+Acceptance criteria:
+- A reproducible capacity report demonstrates the agreed SLO with headroom.
+- Cost and scaling limits are configured to avoid both runaway spend and silent
+  throttling.
+
+
+P1-028 - Define privacy, retention, offboarding, and cached-data policy
+Type: Governance gap
+
+Problem:
+Conversation retention, feedback/saved-answer retention, disabled-user handling,
+cached manuals on devices/browsers, audit retention, and document-withdrawal behavior
+are not fully defined.
+
+Required work:
+- Classify stored data and define retention/deletion requirements.
+- Decide what happens to active sessions, local caches, conversations, feedback, and
+  saved answers when a worker leaves or a device is lost.
+- Define manual withdrawal propagation and maximum cache lifetime.
+- Add administrative export/deletion processes and audit trails as policy requires.
+- Ensure logs/telemetry do not capture passwords, tokens, or unnecessary manual/chat
+  content.
+
+Acceptance criteria:
+- Policy is approved and implemented across backend, Android, and any retained PWA.
+- A user/device offboarding drill demonstrates session and cache invalidation.
+
+
+P1-029 - Version and test the API contract
+Type: Compatibility gap
+
+Problem:
+Routes use an unversioned /api namespace. Android manually duplicates request/response
+models. An OpenAPI snapshot exists, but there is no demonstrated cross-client
+compatibility gate or formal backward-compatibility/deprecation policy.
+
+Required work:
+- Decide whether to adopt /api/v1 now or formalize compatibility within /api.
+- Treat OpenAPI as a checked contract and detect unintended changes in CI.
+- Add Android serialization/contract fixtures or generate a client if the team later
+  judges generation worthwhile. The current owner direction does not require a
+  generated client.
+- Define additive/breaking-change, version-support, and deprecation rules.
+
+Acceptance criteria:
+- Backend contract changes that break the supported Android version fail CI.
+- Minimum-client-version behavior and API compatibility are coordinated.
+
+
+P1-030 - Correct local setup and deployment documentation
+Type: Developer-experience bug
+
+Problem:
+docker-compose interpolates GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME from a root .env,
+while the README directs builders mainly to backend/.env and a path setting. Following
+the documented steps can leave compose interpolation blank or wrong. The compose
+stack also uses local disk and must not be mistaken for the production architecture.
+
+Required work:
+- Provide a root .env.example for compose or remove the second filename variable and
+  use an explicit secret mount/configuration.
+- Add a clean-room setup test for backend, compose, tests, ingestion, and Android.
+- Clearly label compose as local development only.
+- Document ADC/Workload Identity and Secret Manager for cloud environments.
+- Document CPU-only dependency installation.
+
+Acceptance criteria:
+- A new builder can follow the README on a clean machine without guessing paths or
+  downloading unnecessary GPU dependencies.
+- No production guide instructs use of a long-lived service-account JSON file.
+
+
+P2 - MAINTAINABILITY AND PRODUCT FOLLOW-UP
+==========================================
+
+P2-031 - Configure and enforce code-quality tooling
+Type: Maintainability debt
+
+Problem:
+A default Ruff scan reported 109 findings, mostly style issues and FastAPI patterns
+that need configuration rather than blind fixes. There is no agreed lint format or
+CI gate.
+
+Required work:
+- Choose Ruff rules compatible with FastAPI/Pydantic and apply targeted exclusions.
+- Add formatting, type checking where valuable, JavaScript linting, and Android
+  lint/detekt/ktlint as appropriate.
+- Establish a clean baseline and prevent new violations.
+- Keep security scanner suppressions specific and explained.
+
+Acceptance criteria:
+- Local and CI quality commands are documented, deterministic, and green.
+
+
+P2-032 - Replace stale planning documents with a single current backlog
+Type: Documentation/governance debt
+
+Problem:
+UpdatedNextSteps.txt is stale and contradicts current owner decisions. It references
+Node/OIDC and old CI/test/Android facts. README still presents PWA behavior despite
+the Android-only direction. PRODUCTION_READINESS.md is useful history but is too
+chronological to serve as the current execution plan. The repository has no open
+GitHub issues despite the remaining backlog.
+
+Required work:
+- Archive/label historical plans or replace them with a concise current roadmap.
+- Turn this file's items into tracked issues with owner, status, milestone, priority,
+  dependencies, acceptance criteria, and risk acceptance where applicable.
+- Add ADRs for production architecture, job processing, authentication/session model,
+  supported clients, provider, Drive scope, retention, and revision governance.
+- Keep README current and distinguish local demo from production.
+
+Acceptance criteria:
+- A builder can identify the authoritative plan and current release blockers without
+  reconciling contradictory documents.
+
+
+P2-033 - Complete product workflows for saved answers and favorites
+Type: Product-scope gap
+
+Problem:
+The backend has saved-answer/favorite-related support, but Android does not provide a
+complete discover/save/unsave/favorite workflow. The intended technician value and
+retention behavior are not clear.
+
+Required work:
+- Confirm whether saved answers/favorites belong in the pilot scope.
+- If yes, implement list, save, unsave, favorite/unfavorite, pagination, empty/error
+  states, and authorization tests.
+- If no, hide/remove unsupported UI/API capability from the production surface and
+  document it as deferred.
+
+Acceptance criteria:
+- Client capabilities exactly match the enabled, supported product scope.
+
+
+P2-034 - Validate accessibility and human factors on actual devices
+Type: Usability/safety follow-up
+
+Problem:
+Automated Compose checks are not a substitute for technician testing. TalkBack human
+listening was explicitly waived for the current stage, so accessibility-dependent
+use remains unverified. Small controls, gloves, glare, noise, long citations, loading
+states, and weak connectivity can materially affect field use.
+
+Required work:
+- Test representative workflows on the actual managed device models and network
+  conditions.
+- Run contrast, font scaling, touch-target, keyboard, rotation, screen-reader, and
+  long-content checks.
+- Observe technicians performing machine selection, asking, retrying, reading
+  citations, and recovering from offline/provider errors.
+- Document the TalkBack/accessibility risk if no pilot user depends on it; complete
+  human validation before supporting accessibility-reliant users.
+
+Acceptance criteria:
+- Pilot sign-off includes named devices, users/roles, scenarios, and documented
+  findings/remediations.
+
+
+P2-035 - Add a formal release and repository-governance process
+Type: Project governance debt
+
+Problem:
+The repository has a tag but no published GitHub Release artifact/process. There is
+no LICENSE file, which matters if sharing/contribution is intended. Dependency,
+security, and release ownership are not explicit.
+
+Required work:
+- Define versioning, changelog, release notes, artifact provenance, promotion, and
+  rollback procedure.
+- Publish releases only after release gates pass.
+- Add a LICENSE if the owner intends external use or contribution.
+- Add CODEOWNERS/branch protection/review requirements as appropriate.
+
+Acceptance criteria:
+- A release maps source revision, backend deployment, Android artifact, schema,
+  corpus/pipeline version, and rollback instructions.
+
+
+ORDERED DELIVERY PLAN
+=====================
+
+Milestone 0 - Decisions and architecture (before implementation branches diverge)
+1. Answer the decision gates below.
+2. Freeze the production architecture and supported-client scope in ADRs.
+3. Define pilot SLOs, corpus/revision policy, security/retention policy, and release
+   gate.
+
+Milestone 1 - Correctness foundation
+1. Add durable answer jobs, explicit reply correlation, strict idempotency, and crash
+   recovery.
+2. Fix Android send/refresh reconciliation and citation races against the new turn
+   contract.
+3. Fix auth byte-length, email normalization, revocation, API validation, pagination,
+   and review/revision invariants.
+4. Add regression tests before performing infrastructure migration.
+
+Milestone 2 - Production data and infrastructure
+1. Add Postgres/pgvector and safe migrations.
+2. Add GCS-backed artifacts and durable scheduling/jobs.
+3. Implement source deletion/reconciliation, embedding/pipeline fingerprinting, and
+   reprocessing.
+4. Deploy a staging environment with secrets, IAM, monitoring, alerts, and backups.
+
+Milestone 3 - Prove the product
+1. Select/test the production AI provider.
+2. Build and run the larger real-corpus evaluation suite.
+3. Run load, fault-injection, backup/restore, browser/admin, and Android device tests.
+4. Fix every release-gate regression or record explicit owner risk acceptance.
+
+Milestone 4 - Release pilot
+1. Produce and distribute the managed Android release.
+2. Run install/upgrade/offboarding/rollback drills.
+3. Complete a small, monitored technician pilot with support and incident ownership.
+4. Review accuracy, no-answer, latency, reliability, and feedback metrics before
+   expanding access.
+
+
+MINIMUM DEFINITION OF PILOT-READY
+=================================
+
+The pilot should not start until all of the following are true:
+
+- P0 issues are closed or formally risk-accepted by the accountable owner.
+- Production runs on the approved durable data/storage/job architecture.
+- Accepted chat requests survive crashes and retries without duplication or mismatch.
+- Android release builds, installs, upgrades, authenticates, and recovers correctly on
+  the supported managed-device matrix.
+- Real-corpus retrieval/answer metrics meet documented thresholds.
+- Withdrawn/superseded content and user/device offboarding have tested behavior.
+- Readiness, dashboards, alerts, support, rollback, backup, and restore are working.
+- Security/dependency scans are clean or have approved, time-bounded exceptions.
+- The authoritative documentation matches the deployed implementation.
+
+
+DECISION GATES / QUESTIONS FOR THE OWNER
+========================================
+
+These answers materially affect implementation and should be recorded before work is
+split into tickets:
+
+1. Is a production-capable pilot still the immediate milestone, and is Neon the
+   confirmed Postgres/pgvector provider?
+2. Is Android the only technician UI in production? If yes, should the technician PWA
+   be removed/disabled while keeping the admin web UI?
+3. Was the historical demo account/password rotated or deleted after the credential
+   was removed from current source?
+4. Which hosted AI provider/model is approved for production, and what data-handling
+   terms, region, latency, and cost limits apply?
+5. Is there an approved staging Drive folder and permission to build a larger verified
+   evaluation set from the real 71-document corpus?
+6. What exact company-managed devices, Android versions, distribution system, and
+   update cadence must be supported?
+7. What are the answer-latency, recovery-time, availability, and concurrent-user
+   targets for the pilot?
+8. Are concurrent questions in one conversation supported, or should the server
+   serialize/reject them?
+9. What are the retention and deletion rules for conversations, feedback, saved
+   answers, audit logs, and cached manuals after offboarding or withdrawal?
+10. What backup RPO/RTO is required, and is the selected Neon plan's PITR window
+    acceptable?
+11. Are nested Drive folders, shortcuts, and Google Workspace-native files in scope?
+12. Who owns document approval, revision resolution, deletion review, failed-ingestion
+    triage, and emergency content withdrawal?
+13. What accuracy/no-answer threshold is required before technicians may rely on an
+    answer, and which safety topics must always escalate to the manual or a human?
+14. Are saved answers/favorites part of the pilot, or should those capabilities be
+    deferred and hidden?
+
+
+END OF FILE
