@@ -159,7 +159,7 @@ class ChatViewModelTest {
     }
 
     @Test
-    fun `successful feedback and save calls are reflected in state`() {
+    fun `a successful save call is reflected in state`() {
         server.enqueue(jsonResponse(
             """{"id": 5, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
         ))
@@ -168,51 +168,9 @@ class ChatViewModelTest {
         awaitState { !it.sending }
 
         server.enqueue(MockResponse().setResponseCode(204))
-        vm.submitFeedback(5, "helpful")
-        awaitState { it.feedbackGiven.containsKey(5) }
-        assertEquals("helpful", vm.state.value.feedbackGiven[5])
-
-        server.enqueue(MockResponse().setResponseCode(204))
         vm.saveAnswer(5)
         awaitState { it.savedMessageIds.contains(5) }
         assertTrue(vm.state.value.savedMessageIds.contains(5))
-    }
-
-    @Test
-    fun `a failed feedback call is not recorded as given`() {
-        server.enqueue(jsonResponse(
-            """{"id": 6, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
-        ))
-        vm.onComposerChange("Why won't it start?")
-        vm.send()
-        awaitState { !it.sending }
-
-        server.enqueue(MockResponse().setResponseCode(500))
-        vm.submitFeedback(6, "helpful")
-
-        // No success signal to poll for on a failure -- give the (fast,
-        // localhost) round trip a moment, then assert nothing was recorded.
-        Thread.sleep(200)
-        assertTrue(vm.state.value.feedbackGiven.isEmpty())
-    }
-
-    @Test
-    fun `a failed feedback call surfaces an error instead of failing silently`() {
-        // Regression test (2026-08-25, found via live tablet testing): this
-        // used to swallow the exception/non-2xx entirely -- a technician
-        // would tap Helpful, nothing would happen, and there was no
-        // indication anything went wrong.
-        server.enqueue(jsonResponse(
-            """{"id": 7, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
-        ))
-        vm.onComposerChange("Why won't it start?")
-        vm.send()
-        awaitState { !it.sending }
-
-        server.enqueue(MockResponse().setResponseCode(500))
-        vm.submitFeedback(7, "helpful")
-        awaitState { it.error != null }
-        assertTrue(vm.state.value.error!!.contains("feedback", ignoreCase = true))
     }
 
     @Test

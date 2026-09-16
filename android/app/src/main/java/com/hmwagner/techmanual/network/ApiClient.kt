@@ -111,22 +111,21 @@ object ApiClient {
         // times in ~10 minutes of normal tap-to-tap pacing during device
         // testing). GET is always safe to retry. Most POSTs are deliberately
         // NOT retried here, even though OkHttp's own retryOnConnectionFailure
-        // would cover it too -- submitFeedback has no idempotency protection
-        // (the feedback table is deliberately append-only; see
-        // routes_chat.py's submit_feedback), so an automatic retry could write
-        // a second row for a request the server actually received. ask_question
+        // would cover it too -- an append-only write with no idempotency
+        // protection (nothing currently on this client, but a future one is
+        // easy to add without revisiting this) could otherwise write a
+        // second row for a request the server actually received. ask_question
         // already has its own resilience story instead: a per-turn
         // Idempotency-Key plus the manual "Retry" button in ChatViewModel that
         // reuses it (see "Handled during review" in the README) -- that one
         // deliberately stays a user-initiated action, not an automatic one.
         //
         // POST /api/conversations is the one deliberate exception: picking a
-        // machine hit this exact failure repeatedly during testing, and
-        // unlike feedback it's genuinely safe to retry -- create_conversation
-        // (routes_chat.py) is a single plain INSERT with no other side
-        // effects, so the worst case of a retried request that the server
-        // actually received is one harmless extra empty conversation, not a
-        // duplicated write to an append-only table.
+        // machine hit this exact failure repeatedly during testing, and it's
+        // genuinely safe to retry -- create_conversation (routes_chat.py) is
+        // a single plain INSERT with no other side effects, so the worst
+        // case of a retried request the server actually received is one
+        // harmless extra empty conversation, not a duplicated write.
         val getRetryInterceptor = okhttp3.Interceptor { chain ->
             val request = chain.request()
             val retryable = request.method == "GET" ||
@@ -153,8 +152,9 @@ object ApiClient {
             .writeTimeout(30, TimeUnit.SECONDS)
             .connectTimeout(15, TimeUnit.SECONDS)
             // OkHttp's own blanket auto-retry is left off -- it can't
-            // distinguish GET from POST, so it would retry submitFeedback too.
-            // getRetryInterceptor above covers GET specifically instead.
+            // distinguish which POSTs are safe to retry. getRetryInterceptor
+            // above covers exactly the safe cases (GET, plus the one POST
+            // exception) instead.
             .retryOnConnectionFailure(false)
             .build()
 

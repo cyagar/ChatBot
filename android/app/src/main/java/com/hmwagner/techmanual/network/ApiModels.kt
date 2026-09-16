@@ -77,12 +77,8 @@ data class MessageOut(
     val clarifying_options: List<ClarifyingOption> = emptyList(),
     val retry_count: Int = 0,
     val created_at: String,
-    val feedback_rating: String? = null,
     val is_saved: Boolean = false,
 )
-
-@Serializable
-data class FeedbackRequest(val rating: String, val comment: String? = null)
 
 @Serializable
 data class EvidenceOut(

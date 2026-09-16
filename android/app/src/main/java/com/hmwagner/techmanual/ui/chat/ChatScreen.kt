@@ -147,9 +147,7 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                         items(state.messages, key = { it.id }) { msg ->
                             MessageBubble(msg, onCitationClick = vm::openCitation, onRetry = { vm.retry(msg.id) },
                                 onClarifyingSelect = vm::selectClarifyingMachine,
-                                onFeedback = { rating -> vm.submitFeedback(msg.id, rating) },
                                 onSave = { vm.saveAnswer(msg.id) },
-                                feedbackGiven = state.feedbackGiven[msg.id],
                                 saved = state.savedMessageIds.contains(msg.id))
                         }
                         state.pendingEcho?.let { echo ->
@@ -311,9 +309,7 @@ private fun MessageBubble(
     onCitationClick: (CitationOut) -> Unit,
     onRetry: () -> Unit,
     onClarifyingSelect: (Int) -> Unit,
-    onFeedback: (String) -> Unit,
     onSave: () -> Unit,
-    feedbackGiven: String?,
     saved: Boolean,
 ) {
     val isUser = msg.role == "user"
@@ -431,42 +427,7 @@ private fun MessageBubble(
                 }
 
                 if (msg.role == "assistant" && !msg.is_clarifying_question) {
-                    // 8.dp, not the tighter 4.dp this used to be: measured live
-                    // on the Tab A9+ via `adb shell uiautomator dump` that 4dp
-                    // put only a 4dp gap between the actual clickable bounds of
-                    // adjacent buttons (each already meets the 48dp touch-target
-                    // *height* minimum on its own) -- half of the ~8dp Material
-                    // Design recommends between adjacent targets, and these two
-                    // are opposite-meaning actions (Helpful vs Incorrect), which
-                    // is exactly the case plan section 13.5's gloves concern is
-                    // about: a mis-tap here doesn't just miss, it records the
-                    // wrong feedback.
-                    // FlowRow (P0A-5), not Row -- at a narrow phone width or
-                    // large font scale, three buttons (or the "Marked
-                    // helpful"/"Marked incorrect" label plus Save) can
-                    // overflow past the card's edge, making Save
-                    // unreachable. verticalArrangement's 8.dp is the same
-                    // value as the horizontal gap above for consistency, but
-                    // is itself unmeasured -- the uiautomator dump this
-                    // 8.dp value comes from only ever measured the
-                    // horizontal gap between adjacent buttons on one line.
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        itemVerticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (feedbackGiven == null) {
-                            TextButton(onClick = { onFeedback("helpful") }) { Text("Helpful") }
-                            TextButton(onClick = { onFeedback("incorrect") }) { Text("Incorrect") }
-                        } else {
-                            Text(
-                                if (feedbackGiven == "helpful") "Marked helpful" else "Marked incorrect",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        TextButton(onClick = onSave, enabled = !saved) { Text(if (saved) "Saved" else "Save") }
-                    }
+                    TextButton(onClick = onSave, enabled = !saved) { Text(if (saved) "Saved" else "Save") }
                 }
             }
         }

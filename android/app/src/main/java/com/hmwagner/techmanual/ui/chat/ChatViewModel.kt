@@ -58,10 +58,6 @@ data class ChatUiState(
     // redrive the exact same request without the caller re-supplying it.
     val evidenceError: String? = null,
     val evidenceCitation: CitationOut? = null,
-    // messageId -> rating, only for calls that actually succeeded. Lets
-    // ChatScreen show "Marked helpful" instead of the buttons doing nothing
-    // visible on tap (README: "no UI indication of success").
-    val feedbackGiven: Map<Int, String> = emptyMap(),
     val savedMessageIds: Set<Int> = emptySet(),
 )
 
@@ -133,14 +129,14 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                 // question twice (once as a normal message bubble, once as
                 // the pending one).
                 val displayMessages = if (acceptedAndProcessing) loaded.dropLast(1) else loaded
-                // Rehydrate from the server's own record of this user's
-                // feedback/saves, not just the messages list itself -- a
-                // freshly (re)created ChatViewModel (rotation between
-                // panes, an app restart, or simply leaving and re-entering
-                // this conversation) previously started both maps empty
-                // every time, so the buttons reset to unmarked and a re-tap
-                // silently duplicated the feedback/saved_answers row
-                // server-side (found via live tablet testing 2026-08-25).
+                // Rehydrate saved state from the server's own record, not
+                // just the messages list itself -- a freshly (re)created
+                // ChatViewModel (rotation between panes, an app restart, or
+                // simply leaving and re-entering this conversation)
+                // previously started this map empty every time, so the
+                // button reset to unmarked and a re-tap silently duplicated
+                // the saved_answers row server-side (found via live tablet
+                // testing 2026-08-25).
                 _state.value = current.copy(
                     messages = displayMessages,
                     loadingHistory = false,
@@ -154,7 +150,6 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                     } else if (stillUnanswered) {
                         "Still waiting to hear back on that question. Pull to refresh or tap Retry to check again."
                     } else null,
-                    feedbackGiven = loaded.mapNotNull { m -> m.feedback_rating?.let { m.id to it } }.toMap(),
                     savedMessageIds = loaded.filter { it.is_saved }.map { it.id }.toSet(),
                 )
             } else {
@@ -324,29 +319,6 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(sending = false, error = "Can't reach the server. Check your connection.")
-            }
-        }
-    }
-
-    fun submitFeedback(messageId: Int, rating: String) {
-        viewModelScope.launch {
-            try {
-                val resp = ApiClient.service.submitFeedback(messageId, com.hmwagner.techmanual.network.FeedbackRequest(rating))
-                if (resp.isSuccessful) {
-                    _state.value = _state.value.copy(feedbackGiven = _state.value.feedbackGiven + (messageId to rating), error = null)
-                } else {
-                    // Non-blocking (plan 10.4: feedback must never interrupt
-                    // the repair task) -- same bottom banner as every other
-                    // error here, not a dialog. The buttons stay tappable
-                    // (feedbackGiven is untouched on failure) so a retry is
-                    // just tapping again, not navigating anywhere. Found live
-                    // (2026-08-25): this used to fail silently, so a flaky
-                    // connection meant a technician's feedback just vanished
-                    // with no indication anything went wrong.
-                    _state.value = _state.value.copy(error = "Couldn't record that feedback (code ${resp.code()}). Try again.")
-                }
-            } catch (_: Exception) {
-                _state.value = _state.value.copy(error = "Couldn't record that feedback -- check your connection and try again.")
             }
         }
     }
