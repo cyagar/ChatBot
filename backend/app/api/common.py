@@ -5,22 +5,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 
-def iso_utc(ts: str | None) -> str | None:
+def iso_utc(ts: datetime | str | None) -> str | None:
     """Normalizes a stored timestamp to ISO-8601 with an explicit UTC
     offset (Phase 1: "Return UTC ISO-8601 timestamps with offsets").
 
-    Most timestamps in this app come from SQLite's `datetime('now')`, which
-    returns `'YYYY-MM-DD HH:MM:SS'` with no timezone marker at all (SQLite
-    has no separate timestamp type) -- SQLite's clock is UTC, but a client
-    has no way to know that from the bare string. A few columns
-    (`invitations.expires_at`, computed via Python's
-    `datetime.now(timezone.utc).isoformat()`) are already full ISO strings
-    with an offset; those pass through unchanged rather than being
-    double-converted or having a real offset silently overwritten.
+    Postgres TIMESTAMPTZ columns (every timestamp column in the schema) come
+    back from psycopg as real, already-tz-aware `datetime` objects, not
+    strings -- those pass through the isoformat() call below unchanged. The
+    `str` branch exists for any caller that still hands this a raw string
+    (e.g. a value built in Python via `.isoformat()` before being persisted,
+    as `invitations.expires_at`'s computation used to do): if it has no
+    offset, UTC is assumed, matching this app's SQLite-era columns, which
+    had no timezone marker at all but were always UTC.
     """
     if ts is None:
         return None
-    dt = datetime.fromisoformat(ts)
+    dt = ts if isinstance(ts, datetime) else datetime.fromisoformat(ts)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()

@@ -1233,7 +1233,6 @@
       "app__auth__routes__UserOut": {
         "properties": {
           "capabilities": {
-            "default": [],
             "items": {
               "type": "string"
             },
@@ -1281,22 +1280,6 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/": {
-      "get": {
-        "operationId": "index__get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Index"
-      }
-    },
     "/admin": {
       "get": {
         "operationId": "admin_page_admin_get",
@@ -1735,6 +1718,8 @@
             "required": false,
             "schema": {
               "default": 100,
+              "maximum": 500,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -1840,6 +1825,8 @@
             "required": false,
             "schema": {
               "default": 10,
+              "maximum": 200,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -2002,6 +1989,8 @@
             "required": false,
             "schema": {
               "default": 50,
+              "maximum": 200,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -2281,7 +2270,7 @@
     },
     "/api/admin/review-queue": {
       "get": {
-        "description": "Every active document that either isn't approved itself, or has at\nleast one non-approved (pending/rejected) machine link -- the second half\nmatters even for an already-approved document, since a re-index can\npropose a *new* link on an existing approved document at any time.",
+        "description": "Every active document that either isn't approved itself, or has at\nleast one non-approved (pending/rejected) machine link -- the second half\nmatters even for an already-approved document, since a re-index can\npropose a *new* link on an existing approved document at any time.\n\nP1-12 (independent follow-up review): an approved document with ZERO\nmachine links used to disappear from this queue even though it's\nunretrievable (retrieval requires an approved link too) -- the LEFT JOIN\nleaves dm.review_status NULL for such a document, and plain\n`dm.review_status != 'approved'` evaluates to NULL (not TRUE) against a\nNULL, so `d.review_status != 'approved' OR dm.review_status != 'approved'`\nwas FALSE OR NULL = NULL, which WHERE treats as excluded. IS DISTINCT FROM\nis NULL-safe: NULL IS DISTINCT FROM 'approved' is TRUE, so a zero-link\napproved document is correctly included.",
         "operationId": "review_queue_api_admin_review_queue_get",
         "parameters": [
           {
@@ -2344,6 +2333,8 @@
             "required": false,
             "schema": {
               "default": 50,
+              "maximum": 200,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -2738,6 +2729,8 @@
             "required": false,
             "schema": {
               "default": 20,
+              "maximum": 100,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -2952,6 +2945,8 @@
             "required": false,
             "schema": {
               "default": 500,
+              "maximum": 2000,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -3192,6 +3187,8 @@
             "required": false,
             "schema": {
               "default": 25,
+              "maximum": 100,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -3272,6 +3269,8 @@
             "required": false,
             "schema": {
               "default": 10,
+              "maximum": 100,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -3653,6 +3652,7 @@
     },
     "/api/messages/{message_id}/feedback": {
       "post": {
+        "description": "P1-11 (independent follow-up review): used to accept feedback against\nany owned message row -- the user's own question, a clarifying prompt, a\nfailed/retrying answer, or a no-answer response -- none of which is a\nreal \"was this answer helpful\" target. Restricted to completed,\nsubstantive assistant answers.",
         "operationId": "submit_feedback_api_messages__message_id__feedback_post",
         "parameters": [
           {
@@ -3719,6 +3719,7 @@
     },
     "/api/messages/{message_id}/save": {
       "post": {
+        "description": "P1-11: same eligibility restriction as submit_feedback above -- only a\ncompleted, substantive assistant answer is a meaningful \"saved answer\";\na clarifying question, failed attempt, or no-answer row is not.",
         "operationId": "save_answer_api_messages__message_id__save_post",
         "parameters": [
           {
@@ -3784,6 +3785,8 @@
             "required": false,
             "schema": {
               "default": 50,
+              "maximum": 200,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -3867,38 +3870,6 @@
           }
         },
         "summary": "Healthz"
-      }
-    },
-    "/manifest.webmanifest": {
-      "get": {
-        "operationId": "manifest_manifest_webmanifest_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Manifest"
-      }
-    },
-    "/service-worker.js": {
-      "get": {
-        "operationId": "service_worker_service_worker_js_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Service Worker"
       }
     }
   }

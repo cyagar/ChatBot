@@ -160,7 +160,7 @@ def test_content_change_at_same_path_creates_new_pending_row_without_deactivatin
     ingest_all(source=source, embed=False)
 
     with get_conn() as conn:
-        conn.execute("UPDATE documents SET review_status = 'approved' WHERE source_ref = ?",
+        conn.execute("UPDATE documents SET review_status = 'approved' WHERE source_ref = %s",
                      (f"test_directory:{path.name}",))
 
     v2 = make_pdf(["Version two content, completely rewritten about the water filter replacement."], name="v2.pdf")
@@ -170,7 +170,7 @@ def test_content_change_at_same_path_creates_new_pending_row_without_deactivatin
     source_ref = f"test_directory:{path.name}"
     with get_conn() as conn:
         active = conn.execute(
-            "SELECT id, review_status FROM documents WHERE source_ref = ? AND deactivated_at IS NULL "
+            "SELECT id, review_status FROM documents WHERE source_ref = %s AND deactivated_at IS NULL "
             "ORDER BY ingested_at, id", (source_ref,)
         ).fetchall()
     assert len(active) == 2, \
@@ -230,7 +230,7 @@ def test_document_missing_from_a_later_listing_is_not_deactivated(test_env, make
 
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT id, deactivated_at FROM documents WHERE id = ?", (original_id,)
+            "SELECT id, deactivated_at FROM documents WHERE id = %s", (original_id,)
         ).fetchone()
     assert row["deactivated_at"] is None, (
         "a document absent from one listing must stay active -- there is no safe way yet to "
@@ -308,7 +308,7 @@ def test_listing_failure_still_produces_a_visible_failed_run(test_env, manuals_d
             "SELECT id, status FROM ingestion_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
         event = conn.execute(
-            "SELECT detail FROM ingestion_events WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+            "SELECT detail FROM ingestion_events WHERE run_id = %s ORDER BY id DESC LIMIT 1",
             (run["id"],),
         ).fetchone()
 
@@ -341,7 +341,7 @@ def test_source_level_skips_are_recorded_as_visible_ingestion_events(test_env, m
     with get_conn() as conn:
         event = conn.execute(
             "SELECT original_filename, event, detail, document_id FROM ingestion_events "
-            "WHERE run_id = ? AND event = 'skipped'", (report.run_id,),
+            "WHERE run_id = %s AND event = 'skipped'", (report.run_id,),
         ).fetchone()
     assert event["original_filename"] == "huge_manual.pdf"
     assert "350.0 MB" in event["detail"]

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, field_serializer
 
 from app.api.common import iso_utc
@@ -19,10 +21,12 @@ class MachineOut(BaseModel):
     machine_type: str | None
     document_count: int
     is_favorite: bool = False
-    last_used_at: str | None = None
+    # Postgres TIMESTAMPTZ comes back from psycopg as a real datetime, not a
+    # string -- iso_utc() (app/api/common.py) renders the wire string.
+    last_used_at: datetime | None = None
 
     @field_serializer("last_used_at")
-    def _ser_ts(self, v: str | None) -> str | None:
+    def _ser_ts(self, v: datetime | None) -> str | None:
         return iso_utc(v)
 
 
@@ -43,7 +47,7 @@ def _row_to_machine(row) -> MachineOut:
 def search_machines(
     response: Response,
     q: str = "",
-    limit: int = 25,
+    limit: int = Query(default=25, ge=1, le=100),
     cursor: str | None = None,
     user: CurrentUser = Depends(get_current_user),
 ):
@@ -62,7 +66,7 @@ def search_machines(
     # (manufacturer, model_name, id) -- id as the tiebreaker for stable
     # cursor pagination (Phase 1, narrowed scope), same reasoning as
     # routes_chat.py's list_conversations.
-    before_mf, before_model, before_id = decode_cursor(cursor) if cursor else (None, None, None)
+    before_mf, before_model, before_id = decode_cursor(cursor, 3) if cursor else (None, None, None)
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
                COUNT(DISTINCT d.id) AS document_count
@@ -71,19 +75,30 @@ def search_machines(
         LEFT JOIN document_machines dm ON dm.machine_id = m.id AND dm.review_status = 'approved'
         LEFT JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial')
             AND d.deactivated_at IS NULL AND d.review_status = 'approved'
-            AND d.is_current_revision = 1
-        WHERE (? = '' OR m.model_name LIKE ? OR m.family LIKE ? OR mf.name LIKE ?)
-        GROUP BY m.id
-        HAVING document_count > 0
+            AND d.is_current_revision = true
+        WHERE (%s = '' OR m.model_name ILIKE %s OR m.family ILIKE %s OR mf.name ILIKE %s)
+        -- mf.name has to be in GROUP BY too -- Postgres's functional
+        -- -dependency exception (grouping by a table's PK lets you select
+        -- that table's other columns ungrouped) only covers m.id's own
+        -- table (machines), not a joined table's columns. SQLite never
+        -- enforced this at all.
+        GROUP BY m.id, mf.name
+        -- Postgres (unlike SQLite) evaluates HAVING before the SELECT list,
+        -- so it can't see the "document_count" alias -- repeat the aggregate.
+        HAVING COUNT(DISTINCT d.id) > 0
             AND (
-                ? IS NULL
-                OR mf.name > ?
-                OR (mf.name = ? AND m.model_name > ?)
-                OR (mf.name = ? AND m.model_name = ? AND m.id > ?)
+                %s::text IS NULL
+                OR mf.name > %s
+                OR (mf.name = %s AND m.model_name > %s)
+                OR (mf.name = %s AND m.model_name = %s AND m.id > %s)
             )
         ORDER BY mf.name, m.model_name, m.id
-        LIMIT ?
+        LIMIT %s
     """
+    # ILIKE, not LIKE -- SQLite's LIKE is case-insensitive by default for
+    # ASCII, Postgres's is case-sensitive. Using plain LIKE here would have
+    # silently broken this autocomplete search for any query not matching
+    # the stored casing exactly (e.g. "axiom" no longer finding "Axiom").
     like = f"%{q}%"
     with get_conn() as conn:
         rows = conn.execute(sql, [
@@ -100,7 +115,7 @@ def search_machines(
 def recent_machines(
     response: Response,
     user: CurrentUser = Depends(get_current_user),
-    limit: int = 10,
+    limit: int = Query(default=10, ge=1, le=100),
     cursor: str | None = None,
 ):
     """Applies the exact same eligibility rules and `HAVING document_count > 0`
@@ -114,7 +129,7 @@ def recent_machines(
     it). The tradeoff is explicit: a favorited-but-now-empty machine
     disappears from recents instead of dead-ending into "no manuals" --
     consistent with what the picker already does, not a new UX decision."""
-    before_fav, before_last_used, before_id = decode_cursor(cursor) if cursor else (None, None, None)
+    before_fav, before_last_used, before_id = decode_cursor(cursor, 3) if cursor else (None, None, None)
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
                COUNT(DISTINCT d.id) AS document_count,
@@ -125,18 +140,26 @@ def recent_machines(
         LEFT JOIN document_machines dm ON dm.machine_id = m.id AND dm.review_status = 'approved'
         LEFT JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial')
             AND d.deactivated_at IS NULL AND d.review_status = 'approved'
-            AND d.is_current_revision = 1
-        WHERE r.user_id = ?
-        GROUP BY m.id
-        HAVING document_count > 0
+            AND d.is_current_revision = true
+        WHERE r.user_id = %s
+        -- mf.name, r.is_favorite, r.last_used_at all need to be in GROUP BY
+        -- too -- see search_machines()'s comment above on why m.id alone
+        -- isn't enough for Postgres once other tables' columns are selected.
+        -- Doesn't change the grouping in practice: recent_machines' real PK
+        -- is (user_id, machine_id), and user_id is fixed by the WHERE
+        -- clause, so each m.id still gets exactly one row/group.
+        GROUP BY m.id, mf.name, r.is_favorite, r.last_used_at
+        -- Postgres (unlike SQLite) evaluates HAVING before the SELECT list,
+        -- so it can't see the "document_count" alias -- repeat the aggregate.
+        HAVING COUNT(DISTINCT d.id) > 0
             AND (
-                ? IS NULL
-                OR r.is_favorite < ?
-                OR (r.is_favorite = ? AND r.last_used_at < ?)
-                OR (r.is_favorite = ? AND r.last_used_at = ? AND m.id < ?)
+                %s::boolean IS NULL
+                OR r.is_favorite < %s
+                OR (r.is_favorite = %s AND r.last_used_at < %s)
+                OR (r.is_favorite = %s AND r.last_used_at = %s AND m.id < %s)
             )
         ORDER BY r.is_favorite DESC, r.last_used_at DESC, m.id DESC
-        LIMIT ?
+        LIMIT %s
     """
     with get_conn() as conn:
         rows = conn.execute(sql, [
@@ -149,12 +172,22 @@ def recent_machines(
     return [_row_to_machine(r) for r in rows]
 
 
+def _require_machine(conn, machine_id: int) -> None:
+    """P1-11 (independent follow-up review): touching recent/favorite state
+    for a nonexistent machine_id used to hit recent_machines' foreign key
+    directly and surface as an unhandled 500 -- validate up front and return
+    a normal 404 instead."""
+    if conn.execute("SELECT 1 FROM machines WHERE id = %s", (machine_id,)).fetchone() is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Machine not found.")
+
+
 @router.post("/{machine_id}/touch")
 def touch_recent(machine_id: int, user: CurrentUser = Depends(get_current_user)):
     with get_conn() as conn:
+        _require_machine(conn, machine_id)
         conn.execute(
-            "INSERT INTO recent_machines (user_id, machine_id, last_used_at) VALUES (?, ?, datetime('now')) "
-            "ON CONFLICT(user_id, machine_id) DO UPDATE SET last_used_at = datetime('now')",
+            "INSERT INTO recent_machines (user_id, machine_id, last_used_at) VALUES (%s, %s, now()) "
+            "ON CONFLICT(user_id, machine_id) DO UPDATE SET last_used_at = now()",
             (user.id, machine_id),
         )
     return {"ok": True}
@@ -163,10 +196,11 @@ def touch_recent(machine_id: int, user: CurrentUser = Depends(get_current_user))
 @router.post("/{machine_id}/favorite")
 def set_favorite(machine_id: int, favorite: bool = True, user: CurrentUser = Depends(get_current_user)):
     with get_conn() as conn:
+        _require_machine(conn, machine_id)
         conn.execute(
             "INSERT INTO recent_machines (user_id, machine_id, last_used_at, is_favorite) "
-            "VALUES (?, ?, datetime('now'), ?) "
-            "ON CONFLICT(user_id, machine_id) DO UPDATE SET is_favorite = ?",
-            (user.id, machine_id, int(favorite), int(favorite)),
+            "VALUES (%s, %s, now(), %s) "
+            "ON CONFLICT(user_id, machine_id) DO UPDATE SET is_favorite = %s",
+            (user.id, machine_id, favorite, favorite),
         )
     return {"ok": True}

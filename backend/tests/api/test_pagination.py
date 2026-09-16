@@ -68,14 +68,45 @@ def test_messages_pagination_covers_every_row_once_and_default_limit_is_unaffect
 
 
 def test_saved_answers_pagination_covers_every_row_once(test_env):
+    """P1-11 (independent follow-up review, applied here 2026-09-14): save
+    is now restricted to a completed, substantive assistant answer -- an
+    unanswerable question (no machine/chunks seeded) produces a no-answer
+    message, which is no longer a valid save target. A real chunk plus a
+    code-token question (see app/providers/extractive.py's
+    _code_token_rescue -- no embeddings are seeded here, so the vector gate
+    itself would otherwise reject every answer) is seeded so all 5 questions
+    get genuine, saveable completed answers."""
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES "
+            "('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
+            "'indexed', 'approved') RETURNING id"
+        )
+        doc_id = cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'approved')",
+            (doc_id,),
+        )
+        conn.execute(
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (%s, 4, 'text', "
+            "'ERROR CODE E9: indicates a tank heater fault. Check the thermistor circuit.', 90, 0)",
+            (doc_id,),
+        )
+
     register_test_user(client, "page-saved@example.com", role="technician")
-    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
     saved_message_ids = []
     for i in range(5):
         msg = client.post(
-            f"/api/conversations/{conv['id']}/messages", json={"content": f"question {i}"}
+            f"/api/conversations/{conv['id']}/messages", json={"content": f"what does error E9 mean, case {i}"}
         ).json()
-        client.post(f"/api/messages/{msg['id']}/save")
+        assert msg["answer_status"] == "completed" and not msg["is_no_answer"], msg
+        save_resp = client.post(f"/api/messages/{msg['id']}/save")
+        assert save_resp.status_code == 201
         saved_message_ids.append(msg["id"])
 
     page1 = client.get("/api/saved-answers", params={"limit": 3})
@@ -92,21 +123,25 @@ def test_saved_answers_pagination_covers_every_row_once(test_env):
 
 
 def _seed_machine(conn, machine_id, manufacturer, model_name):
+    """`machine_id` is used only to derive unique per-row names/hashes below,
+    not as an explicit id -- RESTART IDENTITY (tests/conftest.py's test_env
+    fixture) guarantees a clean slate, and each of these three tables gets
+    exactly one row per call in the same order here, so the generated
+    manufacturers/machines/documents ids naturally come out in lockstep
+    (1, 2, 3, ...) across all three tables, matching what callers assume."""
+    conn.execute("INSERT INTO manufacturers (name) VALUES (%s)", (manufacturer,))
     conn.execute(
-        "INSERT OR IGNORE INTO manufacturers (id, name) VALUES (?, ?)", (machine_id, manufacturer)
+        "INSERT INTO machines (manufacturer_id, model_name) VALUES (%s, %s)",
+        (machine_id, model_name),
     )
     conn.execute(
-        "INSERT INTO machines (id, manufacturer_id, model_name) VALUES (?, ?, ?)",
-        (machine_id, machine_id, model_name),
-    )
-    conn.execute(
-        "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
+        "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
         "file_type, sha256, byte_size, status, review_status, is_current_revision) "
-        "VALUES (?, ?, ?, 'local_directory', ?, 'pdf', ?, 100, 'indexed', 'approved', 1)",
-        (machine_id, f"doc{machine_id}.pdf", f"doc{machine_id}.pdf", f"doc{machine_id}.pdf", f"hash{machine_id}"),
+        "VALUES (%s, %s, 'local_directory', %s, 'pdf', %s, 100, 'indexed', 'approved', true)",
+        (f"doc{machine_id}.pdf", f"doc{machine_id}.pdf", f"doc{machine_id}.pdf", f"hash{machine_id}"),
     )
     conn.execute(
-        "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (?, ?, 'approved')",
+        "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, %s, 'approved')",
         (machine_id, machine_id),
     )
 

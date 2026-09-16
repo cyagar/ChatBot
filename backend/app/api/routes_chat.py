@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sqlite3
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+import psycopg
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, field_serializer
 from rapidfuzz import fuzz
 
@@ -33,11 +34,13 @@ class ConversationOut(BaseModel):
     machine_id: int | None
     machine_label: str | None
     title: str | None
-    started_at: str
-    updated_at: str
+    # Postgres TIMESTAMPTZ columns come back from psycopg as real datetimes,
+    # not strings -- iso_utc() (app/api/common.py) renders the wire string.
+    started_at: datetime
+    updated_at: datetime
 
     @field_serializer("started_at", "updated_at")
-    def _ser_ts(self, v: str) -> str:
+    def _ser_ts(self, v: datetime) -> str:
         return iso_utc(v)
 
 
@@ -72,7 +75,7 @@ class MessageOut(BaseModel):
     conflict_note: str | None = None
     clarifying_options: list[dict] = []
     retry_count: int = 0
-    created_at: str
+    created_at: datetime
     # The requesting user's own current feedback/save state, so a client that
     # reloads a conversation (app restart, rotation recreating a ViewModel,
     # just navigating away and back) can show "already marked" instead of
@@ -84,7 +87,7 @@ class MessageOut(BaseModel):
     is_saved: bool = False
 
     @field_serializer("created_at")
-    def _ser_ts(self, v: str) -> str:
+    def _ser_ts(self, v: datetime) -> str:
         return iso_utc(v)
 
 
@@ -93,7 +96,7 @@ def _machine_label(conn, machine_id: int | None) -> str | None:
         return None
     row = conn.execute(
         "SELECT m.model_name, mf.name AS manufacturer FROM machines m "
-        "JOIN manufacturers mf ON mf.id = m.manufacturer_id WHERE m.id = ?",
+        "JOIN manufacturers mf ON mf.id = m.manufacturer_id WHERE m.id = %s",
         (machine_id,),
     ).fetchone()
     return f"{row['manufacturer']} {row['model_name']}" if row else None
@@ -159,16 +162,16 @@ def _resolve_machine_mention(question: str) -> tuple[int | None, list[dict]]:
 def create_conversation(payload: CreateConversationRequest, user: CurrentUser = Depends(get_current_user)):
     with get_conn() as conn:
         if payload.machine_id is not None:
-            exists = conn.execute("SELECT id FROM machines WHERE id = ?", (payload.machine_id,)).fetchone()
+            exists = conn.execute("SELECT id FROM machines WHERE id = %s", (payload.machine_id,)).fetchone()
             if not exists:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Machine not found.")
         cur = conn.execute(
-            "INSERT INTO conversations (user_id, machine_id) VALUES (?, ?)",
+            "INSERT INTO conversations (user_id, machine_id) VALUES (%s, %s) RETURNING id",
             (user.id, payload.machine_id),
         )
-        conv_id = cur.lastrowid
+        conv_id = cur.fetchone()["id"]
         row = conn.execute(
-            "SELECT id, machine_id, title, started_at, updated_at FROM conversations WHERE id = ?",
+            "SELECT id, machine_id, title, started_at, updated_at FROM conversations WHERE id = %s",
             (conv_id,),
         ).fetchone()
         label = _machine_label(conn, row["machine_id"])
@@ -188,7 +191,7 @@ def _conversation_title(conn, conversation_id: int, stored_title: str | None) ->
     if stored_title:
         return stored_title
     row = conn.execute(
-        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' "
+        "SELECT content FROM messages WHERE conversation_id = %s AND role = 'user' "
         "ORDER BY id ASC LIMIT 1",
         (conversation_id,),
     ).fetchone()
@@ -202,7 +205,7 @@ def _conversation_title(conn, conversation_id: int, stored_title: str | None) ->
 def list_conversations(
     response: Response,
     user: CurrentUser = Depends(get_current_user),
-    limit: int = 20,
+    limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = None,
 ):
     # Cursor pagination (Phase 1, narrowed scope): (updated_at, id) rather
@@ -211,7 +214,7 @@ def list_conversations(
     # this "stable" (a page boundary can't land mid-tie and skip/repeat a
     # row) rather than plain LIMIT/OFFSET, which also shifts under
     # concurrent inserts.
-    before_updated_at, before_id = decode_cursor(cursor) if cursor else (None, None)
+    before_updated_at, before_id = decode_cursor(cursor, 2) if cursor else (None, None)
     with get_conn() as conn:
         # create_conversation runs the moment a technician taps a machine (or
         # "Not sure which machine?") -- before any question is typed, so the
@@ -223,10 +226,10 @@ def list_conversations(
         # on the tablet, 2026-08-25).
         rows = conn.execute(
             "SELECT id, machine_id, title, started_at, updated_at FROM conversations "
-            "WHERE user_id = ? AND EXISTS ("
+            "WHERE user_id = %s AND EXISTS ("
             "    SELECT 1 FROM messages WHERE messages.conversation_id = conversations.id"
-            ") AND (? IS NULL OR updated_at < ? OR (updated_at = ? AND id < ?)) "
-            "ORDER BY updated_at DESC, id DESC LIMIT ?",
+            ") AND (%s::timestamptz IS NULL OR updated_at < %s OR (updated_at = %s AND id < %s)) "
+            "ORDER BY updated_at DESC, id DESC LIMIT %s",
             (user.id, before_updated_at, before_updated_at, before_updated_at, before_id, limit + 1),
         ).fetchall()
         rows, next_cursor = paginate(rows, limit, lambda r: (r["updated_at"], r["id"]))
@@ -244,12 +247,49 @@ def list_conversations(
 
 def _require_own_conversation(conn, conversation_id: int, user_id: int):
     row = conn.execute(
-        "SELECT id, user_id, machine_id, pending_message_id FROM conversations WHERE id = ?",
+        "SELECT id, user_id, machine_id, pending_message_id FROM conversations WHERE id = %s",
         (conversation_id,),
     ).fetchone()
     if not row or row["user_id"] != user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
     return row
+
+
+def _claim_conversation_processing(conn, conversation_id: int) -> bool:
+    """Owner decision (2026-09-16): concurrent questions in one conversation
+    are not supported -- a technician must wait for the in-flight question to
+    finish (or the retry it, since a retry also calls the provider) before
+    sending another, and this must be enforced server-side rather than only
+    by disabling a client button. Same claim-UPDATE pattern used throughout
+    this file (pending_message_id, retry's answer_status, idempotency keys):
+    only the request that flips is_processing false->true may proceed."""
+    result = conn.execute(
+        "UPDATE conversations SET is_processing = true WHERE id = %s AND is_processing = false",
+        (conversation_id,),
+    )
+    return result.rowcount > 0
+
+
+def _release_conversation_processing(conversation_id: int) -> None:
+    """Always called in a finally, on its own connection, AFTER the claiming
+    `with get_conn()` block has already exited (and so already committed) --
+    ask_question/retry_answer/set_conversation_machine all do their provider
+    call outside that block, and this must run even when
+    _generate_and_persist_answer raises, or the conversation would be stuck
+    rejecting every future question with 409 forever.
+
+    NEVER call this from inside a still-open `with get_conn()` block that
+    claimed the lock (an early-return branch that hasn't reached the end of
+    its own `with get_conn()` yet): that connection's transaction is still
+    open and still holds the row lock this function's own fresh connection
+    would need, and since nothing else will ever come release it (it's the
+    same thread, waiting on itself), the second connection blocks forever.
+    Release with `conn.execute("UPDATE conversations SET is_processing = "
+    "false WHERE id = %s", (conversation_id,))` on the SAME `conn` instead in
+    that situation -- see ask_question's clarifying-question branch for the
+    pattern."""
+    with get_conn() as conn:
+        conn.execute("UPDATE conversations SET is_processing = false WHERE id = %s", (conversation_id,))
 
 
 def _fetch_history(conn, conversation_id: int, *, before_message_id: int | None = None) -> list[HistoryTurn]:
@@ -262,14 +302,14 @@ def _fetch_history(conn, conversation_id: int, *, before_message_id: int | None 
     question (concern #5, P1-8)."""
     if before_message_id is not None:
         rows = conn.execute(
-            "SELECT role, content, is_no_answer FROM messages WHERE conversation_id = ? AND id < ? "
-            "AND is_clarifying_question = 0 ORDER BY id DESC LIMIT ?",
+            "SELECT role, content, is_no_answer FROM messages WHERE conversation_id = %s AND id < %s "
+            "AND is_clarifying_question = false ORDER BY id DESC LIMIT %s",
             (conversation_id, before_message_id, MAX_HISTORY_TURNS),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT role, content, is_no_answer FROM messages WHERE conversation_id = ? "
-            "AND is_clarifying_question = 0 ORDER BY id DESC LIMIT ?",
+            "SELECT role, content, is_no_answer FROM messages WHERE conversation_id = %s "
+            "AND is_clarifying_question = false ORDER BY id DESC LIMIT %s",
             (conversation_id, MAX_HISTORY_TURNS),
         ).fetchall()
     return [
@@ -312,7 +352,7 @@ def _generate_and_persist_answer(
     if resolved_query != question:
         with get_conn() as conn:
             conn.execute(
-                "UPDATE messages SET resolved_query = ? WHERE id = ?", (resolved_query, user_message_id)
+                "UPDATE messages SET resolved_query = %s WHERE id = %s", (resolved_query, user_message_id)
             )
 
     # Retrieval itself can fail independently of the provider call below.
@@ -383,13 +423,13 @@ def _generate_and_persist_answer(
             # passages/citations must not be appended alongside the failed
             # attempt's, which could otherwise resurrect a source the new
             # attempt never actually cited.
-            conn.execute("DELETE FROM message_sources WHERE message_id = ?", (retry_message_id,))
+            conn.execute("DELETE FROM message_sources WHERE message_id = %s", (retry_message_id,))
             conn.execute(
-                "UPDATE messages SET content = ?, is_no_answer = ?, machine_id = ?, "
-                "safety_warnings = ?, conflict_note = ?, provider = ?, answer_status = ?, "
-                "retry_count = retry_count + 1 WHERE id = ?",
+                "UPDATE messages SET content = %s, is_no_answer = %s, machine_id = %s, "
+                "safety_warnings = %s, conflict_note = %s, provider = %s, answer_status = %s, "
+                "retry_count = retry_count + 1 WHERE id = %s",
                 (
-                    result.answer, int(result.is_no_answer), machine_id,
+                    result.answer, result.is_no_answer, machine_id,
                     json.dumps(result.safety_warnings) if result.safety_warnings else None,
                     result.conflict_note, result.provider, answer_status, retry_message_id,
                 ),
@@ -399,14 +439,14 @@ def _generate_and_persist_answer(
             cur = conn.execute(
                 "INSERT INTO messages (conversation_id, role, content, is_no_answer, machine_id, "
                 "safety_warnings, conflict_note, provider, answer_status) "
-                "VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (
-                    conversation_id, result.answer, int(result.is_no_answer), machine_id,
+                    conversation_id, result.answer, result.is_no_answer, machine_id,
                     json.dumps(result.safety_warnings) if result.safety_warnings else None,
                     result.conflict_note, result.provider, answer_status,
                 ),
             )
-            msg_id = cur.lastrowid
+            msg_id = cur.fetchone()["id"]
         citation_excerpt_by_chunk = {c.chunk_id: c.excerpt for c in result.citations}
         # Provider citation order, not retrieval order. `rank` keeps meaning
         # retrieval rank (for retrieval-quality auditing); citation_ordinal
@@ -418,20 +458,20 @@ def _generate_and_persist_answer(
             is_citation = p.chunk_id in citation_excerpt_by_chunk
             conn.execute(
                 "INSERT INTO message_sources (message_id, chunk_id, rank, lexical_score, vector_score, "
-                "combined_score, is_citation, excerpt, citation_ordinal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "combined_score, is_citation, excerpt, citation_ordinal) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     msg_id, p.chunk_id, rank, p.lexical_score, p.vector_score, p.combined_score,
-                    int(is_citation), citation_excerpt_by_chunk.get(p.chunk_id),
+                    is_citation, citation_excerpt_by_chunk.get(p.chunk_id),
                     citation_ordinal_by_chunk.get(p.chunk_id),
                 ),
             )
-        conn.execute("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?", (conversation_id,))
+        conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (conversation_id,))
         # pending_message_id is already cleared by the caller before this runs
         # -- ask_question clears it unconditionally on any new user turn, and
         # set_conversation_machine claims it atomically before resuming (P1-8)
         # -- so there is nothing left to clear here.
         row = conn.execute(
-            "SELECT created_at, retry_count FROM messages WHERE id=?", (msg_id,)
+            "SELECT created_at, retry_count FROM messages WHERE id=%s", (msg_id,)
         ).fetchone()
 
     return MessageOut(
@@ -475,11 +515,11 @@ def set_conversation_machine(
     answer."""
     with get_conn() as conn:
         conv = _require_own_conversation(conn, conversation_id, user.id)
-        machine = conn.execute("SELECT id FROM machines WHERE id = ?", (payload.machine_id,)).fetchone()
+        machine = conn.execute("SELECT id FROM machines WHERE id = %s", (payload.machine_id,)).fetchone()
         if not machine:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Machine not found.")
         conn.execute(
-            "UPDATE conversations SET machine_id = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE conversations SET machine_id = %s, updated_at = now() WHERE id = %s",
             (payload.machine_id, conversation_id),
         )
 
@@ -490,32 +530,58 @@ def set_conversation_machine(
             # Atomically claim the pending message before generating anything.
             # A double-tap on a clarify button (easy on a tablet) fires two
             # concurrent requests that would otherwise both read the same
-            # pending_id here and both call the provider -- SQLite serializes
-            # writers, so only one of these UPDATEs can match the row while
+            # pending_id here and both call the provider -- this UPDATE's WHERE
+            # clause is an atomic compare-and-swap (Postgres row-level locking
+            # during the UPDATE serializes concurrent writers on this same
+            # row), so only one of these UPDATEs can match the row while
             # pending_message_id still equals pending_id; the loser sees
             # rowcount 0 and skips generation entirely instead of producing a
             # second duplicate answer.
             claim = conn.execute(
                 "UPDATE conversations SET pending_message_id = NULL "
-                "WHERE id = ? AND pending_message_id = ?",
+                "WHERE id = %s AND pending_message_id = %s",
                 (conversation_id, pending_id),
             )
             if claim.rowcount == 1:
-                pending_row = conn.execute("SELECT content FROM messages WHERE id = ?", (pending_id,)).fetchone()
-                if pending_row is not None:
-                    pending_question = pending_row["content"]
-                    pending_history = _fetch_history(conn, conversation_id, before_message_id=pending_id)
+                # Owner decision (2026-09-16): this resume also does
+                # retrieval/provider work, so it must hold the same
+                # conversation-level processing lock ask_question does -- an
+                # ask_question racing in at exactly this moment must not be
+                # able to start a second concurrent provider call. If the
+                # lock is already held (shouldn't happen in practice, but
+                # would otherwise silently drop this pending question),
+                # restore the pending claim so a later request can retry it
+                # instead of orphaning it.
+                if _claim_conversation_processing(conn, conversation_id):
+                    pending_row = conn.execute("SELECT content FROM messages WHERE id = %s", (pending_id,)).fetchone()
+                    if pending_row is not None:
+                        pending_question = pending_row["content"]
+                        pending_history = _fetch_history(conn, conversation_id, before_message_id=pending_id)
+                    else:
+                        # Same-connection release -- see the matching comment
+                        # in ask_question's clarifying-question branch.
+                        conn.execute(
+                            "UPDATE conversations SET is_processing = false WHERE id = %s", (conversation_id,)
+                        )
+                else:
+                    conn.execute(
+                        "UPDATE conversations SET pending_message_id = %s WHERE id = %s",
+                        (pending_id, conversation_id),
+                    )
 
         row = conn.execute(
-            "SELECT id, machine_id, title, started_at, updated_at FROM conversations WHERE id = ?",
+            "SELECT id, machine_id, title, started_at, updated_at FROM conversations WHERE id = %s",
             (conversation_id,),
         ).fetchone()
         label = _machine_label(conn, row["machine_id"])
 
     if pending_question is not None:
-        _generate_and_persist_answer(
-            conversation_id, pending_id, pending_question, payload.machine_id, pending_history or []
-        )
+        try:
+            _generate_and_persist_answer(
+                conversation_id, pending_id, pending_question, payload.machine_id, pending_history or []
+            )
+        finally:
+            _release_conversation_processing(conversation_id)
 
     return ConversationOut(
         id=row["id"], machine_id=row["machine_id"], machine_label=label,
@@ -540,7 +606,7 @@ def _hydrate_message(conn, row, user_id: int) -> MessageOut:
         # citation numbering still lines up with the answer's own claims.
         # COALESCE keeps pre-0004 rows (citation_ordinal NULL) ordering by
         # rank, their historical behavior, rather than arbitrarily.
-        "WHERE ms.message_id = ? AND ms.is_citation = 1 "
+        "WHERE ms.message_id = %s AND ms.is_citation = true "
         "ORDER BY COALESCE(ms.citation_ordinal, ms.rank), ms.rank",
         (row["id"],),
     ).fetchall()
@@ -564,12 +630,12 @@ def _hydrate_message(conn, row, user_id: int) -> MessageOut:
             clarifying_options = []
 
     feedback_row = conn.execute(
-        "SELECT rating FROM feedback WHERE message_id = ? AND user_id = ? "
+        "SELECT rating FROM feedback WHERE message_id = %s AND user_id = %s "
         "ORDER BY created_at DESC, id DESC LIMIT 1",
         (row["id"], user_id),
     ).fetchone()
     is_saved = conn.execute(
-        "SELECT 1 FROM saved_answers WHERE message_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM saved_answers WHERE message_id = %s AND user_id = %s LIMIT 1",
         (row["id"], user_id),
     ).fetchone() is not None
 
@@ -594,7 +660,7 @@ def get_messages(
     conversation_id: int,
     response: Response,
     user: CurrentUser = Depends(get_current_user),
-    limit: int = 500,
+    limit: int = Query(default=500, ge=1, le=2000),
     cursor: str | None = None,
 ):
     # Default limit is generous (real conversations in this app today are
@@ -603,13 +669,13 @@ def get_messages(
     # conversation in one response. Oldest-first (id ASC), so the cursor
     # pages forward: "id" alone is a stable, already-unique sort key here,
     # no tiebreaker column needed the way updated_at needed one above.
-    (after_id,) = decode_cursor(cursor) if cursor else (None,)
+    (after_id,) = decode_cursor(cursor, 1) if cursor else (None,)
     with get_conn() as conn:
         _require_own_conversation(conn, conversation_id, user.id)
         rows = conn.execute(
             "SELECT id, role, content, is_clarifying_question, is_no_answer, "
             "safety_warnings, conflict_note, answer_status, clarifying_options, retry_count, created_at "
-            "FROM messages WHERE conversation_id = ? AND (? IS NULL OR id > ?) ORDER BY id LIMIT ?",
+            "FROM messages WHERE conversation_id = %s AND (%s::integer IS NULL OR id > %s) ORDER BY id LIMIT %s",
             (conversation_id, after_id, after_id, limit + 1),
         ).fetchall()
         rows, next_cursor = paginate(rows, limit, lambda r: (r["id"],))
@@ -619,7 +685,7 @@ def get_messages(
 
 def _message_by_idempotency_key(conn, conversation_id: int, idempotency_key: str):
     return conn.execute(
-        "SELECT id FROM messages WHERE conversation_id = ? AND idempotency_key = ? AND role = 'user'",
+        "SELECT id FROM messages WHERE conversation_id = %s AND idempotency_key = %s AND role = 'user'",
         (conversation_id, idempotency_key),
     ).fetchone()
 
@@ -632,7 +698,7 @@ def _reply_to_user_message(conn, conversation_id: int, user_message_id: int):
     return conn.execute(
         "SELECT id, role, content, is_clarifying_question, is_no_answer, "
         "safety_warnings, conflict_note, answer_status, clarifying_options, retry_count, created_at "
-        "FROM messages WHERE conversation_id = ? AND role = 'assistant' AND id > ? "
+        "FROM messages WHERE conversation_id = %s AND role = 'assistant' AND id > %s "
         "ORDER BY id ASC LIMIT 1",
         (conversation_id, user_message_id),
     ).fetchone()
@@ -685,26 +751,58 @@ def ask_question(
             if existing is not None:
                 return _idempotent_replay(conn, conversation_id, existing["id"], user.id)
 
+        # Owner decision (2026-09-16): concurrent questions in one
+        # conversation are not supported -- a technician must wait for (or
+        # stop) an in-flight question before asking another, and this must be
+        # enforced server-side, not only by a disabled client button. Claimed
+        # before the user message is even inserted, so a rejected second
+        # question never creates a turn.
+        if not _claim_conversation_processing(conn, conversation_id):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="Another question is still being answered in this conversation. "
+                "Wait for it to finish, or stop it, before asking another.",
+            )
+
         # Bounded prior turns, captured before this question is inserted, so
         # follow-ups like "what about replacing it?" have real context instead
         # of only ever seeing the latest question in isolation (concern #5).
         history = _fetch_history(conn, conversation_id)
 
         try:
-            cur = conn.execute(
-                "INSERT INTO messages (conversation_id, role, content, idempotency_key) VALUES (?, 'user', ?, ?)",
-                (conversation_id, question, idempotency_key),
-            )
-        except sqlite3.IntegrityError:
+            # A nested transaction (SAVEPOINT under the connection's already
+            # -open outer transaction) -- unlike sqlite3, a Postgres
+            # constraint violation aborts the whole transaction until a
+            # ROLLBACK, so without this savepoint the idempotency-key lookup
+            # in the except block below would itself fail with
+            # InFailedSqlTransaction instead of running.
+            with conn.transaction():
+                cur = conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content, idempotency_key) "
+                    "VALUES (%s, 'user', %s, %s) RETURNING id",
+                    (conversation_id, question, idempotency_key),
+                )
+                user_message_id = cur.fetchone()["id"]
+        except psycopg.errors.UniqueViolation:
             # Lost a race against a concurrent request carrying the same key
             # -- the pre-check above is a fast path, not the safety
             # mechanism; the UNIQUE index on (conversation_id,
             # idempotency_key) is. The winner's user message is now visible.
+            # (In practice the processing-lock claim above already serializes
+            # same-conversation requests, so this branch is now mostly a
+            # defensive fallback rather than the primary safety net it used
+            # to be.)
+            # Same-connection release (not _release_conversation_processing --
+            # see the comment on that helper): this except block runs inside
+            # the still-open outer transaction that claimed the lock, which
+            # hasn't committed yet, so a second connection would block
+            # forever waiting on a lock this one hasn't released.
             existing = _message_by_idempotency_key(conn, conversation_id, idempotency_key)
             if existing is None:
+                conn.execute("UPDATE conversations SET is_processing = false WHERE id = %s", (conversation_id,))
                 raise  # not actually a key collision -- some other integrity error
+            conn.execute("UPDATE conversations SET is_processing = false WHERE id = %s", (conversation_id,))
             return _idempotent_replay(conn, conversation_id, existing["id"], user.id)
-        user_message_id = cur.lastrowid
 
         # A new user turn always supersedes any earlier pending clarification
         # (P1-8): if the technician typed a fresh question instead of picking
@@ -713,7 +811,7 @@ def ask_question(
         # to resolve a machine, the branch below sets pending_message_id to
         # this new message instead.
         conn.execute(
-            "UPDATE conversations SET pending_message_id = NULL WHERE id = ?", (conversation_id,)
+            "UPDATE conversations SET pending_message_id = NULL WHERE id = %s", (conversation_id,)
         )
 
         # --- Clarify instead of guessing when the machine is unclear ---
@@ -721,7 +819,7 @@ def ask_question(
             resolved_id, candidates = _resolve_machine_mention(question)
             if resolved_id is not None:
                 machine_id = resolved_id
-                conn.execute("UPDATE conversations SET machine_id = ? WHERE id = ?", (machine_id, conversation_id))
+                conn.execute("UPDATE conversations SET machine_id = %s WHERE id = %s", (machine_id, conversation_id))
             else:
                 clarifying_text = (
                     "Which machine are you working on? "
@@ -733,22 +831,35 @@ def ask_question(
                 )
                 cur = conn.execute(
                     "INSERT INTO messages (conversation_id, role, content, is_clarifying_question, "
-                    "clarifying_options) VALUES (?, 'assistant', ?, 1, ?)",
+                    "clarifying_options) VALUES (%s, 'assistant', %s, true, %s) RETURNING id",
                     (conversation_id, clarifying_text, json.dumps(candidates)),
                 )
-                msg_id = cur.lastrowid
+                msg_id = cur.fetchone()["id"]
                 conn.execute(
-                    "UPDATE conversations SET updated_at = datetime('now'), pending_message_id = ? WHERE id = ?",
+                    "UPDATE conversations SET updated_at = now(), pending_message_id = %s WHERE id = %s",
                     (user_message_id, conversation_id),
                 )
+                # Waiting on the technician to pick a machine, not on the
+                # provider -- must not hold the lock indefinitely (would block
+                # the already-supported "ask something else instead" case;
+                # see test_asking_a_new_question_clears_a_stale_pending_clarification).
+                # Released on THIS still-open connection, not via
+                # _release_conversation_processing -- that helper opens a
+                # separate connection, which would block forever waiting on
+                # the row lock this transaction hasn't committed (and won't,
+                # until this function returns) yet.
+                conn.execute("UPDATE conversations SET is_processing = false WHERE id = %s", (conversation_id,))
                 return MessageOut(
                     id=msg_id, role="assistant", content=clarifying_text,
                     is_clarifying_question=True, is_no_answer=False,
                     clarifying_options=candidates,
-                    created_at=conn.execute("SELECT created_at FROM messages WHERE id=?", (msg_id,)).fetchone()["created_at"],
+                    created_at=conn.execute("SELECT created_at FROM messages WHERE id=%s", (msg_id,)).fetchone()["created_at"],
                 )
 
-    return _generate_and_persist_answer(conversation_id, user_message_id, question, machine_id, history)
+    try:
+        return _generate_and_persist_answer(conversation_id, user_message_id, question, machine_id, history)
+    finally:
+        _release_conversation_processing(conversation_id)
 
 
 @router.post("/conversations/{conversation_id}/messages/{message_id}/retry", response_model=MessageOut)
@@ -779,14 +890,14 @@ def retry_answer(
     with get_conn() as conn:
         conv = _require_own_conversation(conn, conversation_id, user.id)
         row = conn.execute(
-            "SELECT id, role, answer_status FROM messages WHERE id = ? AND conversation_id = ?",
+            "SELECT id, role, answer_status FROM messages WHERE id = %s AND conversation_id = %s",
             (message_id, conversation_id),
         ).fetchone()
         if not row or row["role"] != "assistant":
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Message not found.")
 
         claim = conn.execute(
-            "UPDATE messages SET answer_status = 'retrying' WHERE id = ? AND answer_status = 'failed'",
+            "UPDATE messages SET answer_status = 'retrying' WHERE id = %s AND answer_status = 'failed'",
             (message_id,),
         )
         if claim.rowcount == 0:
@@ -795,8 +906,19 @@ def retry_answer(
                                      detail="A retry is already in progress for this answer.")
             raise HTTPException(status.HTTP_409_CONFLICT, detail="Only a failed answer can be retried.")
 
+        # Owner decision (2026-09-16): a retry also calls the provider, so it
+        # shares ask_question's conversation-level processing lock -- a fresh
+        # question must not be askable while a retry is in flight either.
+        if not _claim_conversation_processing(conn, conversation_id):
+            conn.execute("UPDATE messages SET answer_status = 'failed' WHERE id = %s", (message_id,))
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="Another question is still being answered in this conversation. "
+                "Wait for it to finish, or stop it, before retrying.",
+            )
+
         user_row = conn.execute(
-            "SELECT id, content FROM messages WHERE conversation_id = ? AND role = 'user' AND id < ? "
+            "SELECT id, content FROM messages WHERE conversation_id = %s AND role = 'user' AND id < %s "
             "ORDER BY id DESC LIMIT 1",
             (conversation_id, message_id),
         ).fetchone()
@@ -807,15 +929,21 @@ def retry_answer(
             # has a preceding user question and a resolved machine at
             # generation time), but a stuck claim would make every future
             # retry attempt 409 with "already in progress" permanently.
-            conn.execute("UPDATE messages SET answer_status = 'failed' WHERE id = ?", (message_id,))
+            conn.execute("UPDATE messages SET answer_status = 'failed' WHERE id = %s", (message_id,))
+            # Same-connection release -- see the matching comment in
+            # ask_question's clarifying-question branch.
+            conn.execute("UPDATE conversations SET is_processing = false WHERE id = %s", (conversation_id,))
             raise HTTPException(status.HTTP_409_CONFLICT, detail="This answer cannot be retried.")
 
         history = _fetch_history(conn, conversation_id, before_message_id=user_row["id"])
 
-    return _generate_and_persist_answer(
-        conversation_id, user_row["id"], user_row["content"], machine_id, history,
-        retry_message_id=message_id,
-    )
+    try:
+        return _generate_and_persist_answer(
+            conversation_id, user_row["id"], user_row["content"], machine_id, history,
+            retry_message_id=message_id,
+        )
+    finally:
+        _release_conversation_processing(conversation_id)
 
 
 class FeedbackRequest(BaseModel):
@@ -823,18 +951,26 @@ class FeedbackRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=1000)
 
 
+_ELIGIBLE_FOR_FEEDBACK_SQL = (
+    "SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+    "WHERE m.id = %s AND c.user_id = %s AND m.role = 'assistant' "
+    "AND m.answer_status = 'completed' AND m.is_clarifying_question = false AND m.is_no_answer = false"
+)
+
+
 @router.post("/messages/{message_id}/feedback", status_code=status.HTTP_201_CREATED)
 def submit_feedback(message_id: int, payload: FeedbackRequest, user: CurrentUser = Depends(get_current_user)):
+    """P1-11 (independent follow-up review): used to accept feedback against
+    any owned message row -- the user's own question, a clarifying prompt, a
+    failed/retrying answer, or a no-answer response -- none of which is a
+    real "was this answer helpful" target. Restricted to completed,
+    substantive assistant answers."""
     with get_conn() as conn:
-        msg = conn.execute(
-            "SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id "
-            "WHERE m.id = ? AND c.user_id = ?",
-            (message_id, user.id),
-        ).fetchone()
+        msg = conn.execute(_ELIGIBLE_FOR_FEEDBACK_SQL, (message_id, user.id)).fetchone()
         if not msg:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Message not found.")
         conn.execute(
-            "INSERT INTO feedback (message_id, user_id, rating, comment) VALUES (?, ?, ?, ?)",
+            "INSERT INTO feedback (message_id, user_id, rating, comment) VALUES (%s, %s, %s, %s)",
             (message_id, user.id, payload.rating, payload.comment),
         )
     return {"ok": True}
@@ -842,23 +978,24 @@ def submit_feedback(message_id: int, payload: FeedbackRequest, user: CurrentUser
 
 @router.post("/messages/{message_id}/save", status_code=status.HTTP_201_CREATED)
 def save_answer(message_id: int, user: CurrentUser = Depends(get_current_user)):
+    """P1-11: same eligibility restriction as submit_feedback above -- only a
+    completed, substantive assistant answer is a meaningful "saved answer";
+    a clarifying question, failed attempt, or no-answer row is not."""
     with get_conn() as conn:
-        msg = conn.execute(
-            "SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id "
-            "WHERE m.id = ? AND c.user_id = ?",
-            (message_id, user.id),
-        ).fetchone()
+        msg = conn.execute(_ELIGIBLE_FOR_FEEDBACK_SQL, (message_id, user.id)).fetchone()
         if not msg:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Message not found.")
         # Unlike feedback (a rating a technician might deliberately resubmit
         # after reconsidering), saving the same answer twice carries no new
         # information -- it's always either a genuine repeat click or a
         # client that lost track of already-saved state (e.g. a rehydrated
-        # ChatViewModel that hasn't loaded is_saved yet). INSERT OR IGNORE
-        # against the UNIQUE(user_id, message_id) index makes a duplicate
-        # save a no-op instead of a second saved_answers row.
+        # ChatViewModel that hasn't loaded is_saved yet). ON CONFLICT DO
+        # NOTHING against the UNIQUE(user_id, message_id) index (SQLite's
+        # INSERT OR IGNORE, ported) makes a duplicate save a no-op instead of
+        # a second saved_answers row.
         conn.execute(
-            "INSERT OR IGNORE INTO saved_answers (user_id, message_id) VALUES (?, ?)",
+            "INSERT INTO saved_answers (user_id, message_id) VALUES (%s, %s) "
+            "ON CONFLICT (user_id, message_id) DO NOTHING",
             (user.id, message_id),
         )
     return {"ok": True}
@@ -875,7 +1012,7 @@ class SavedAnswerOut(BaseModel):
 def list_saved_answers(
     response: Response,
     user: CurrentUser = Depends(get_current_user),
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=200),
     cursor: str | None = None,
 ):
     """P1-3 (2026-08-24 independent follow-up review): a saved-answer view is
@@ -883,7 +1020,7 @@ def list_saved_answers(
     -- MessageOut alone (the old response shape) carries none of that. Each
     entry now also names which conversation it can be resumed from, so the
     UI can offer "Open conversation" rather than showing an orphaned answer."""
-    before_saved_at, before_id = decode_cursor(cursor) if cursor else (None, None)
+    before_saved_at, before_id = decode_cursor(cursor, 2) if cursor else (None, None)
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT m.id, m.role, m.content, m.is_clarifying_question, m.is_no_answer, "
@@ -892,9 +1029,9 @@ def list_saved_answers(
             "FROM saved_answers sa "
             "JOIN messages m ON m.id = sa.message_id "
             "JOIN conversations c ON c.id = m.conversation_id "
-            "WHERE sa.user_id = ? "
-            "AND (? IS NULL OR sa.saved_at < ? OR (sa.saved_at = ? AND m.id < ?)) "
-            "ORDER BY sa.saved_at DESC, m.id DESC LIMIT ?",
+            "WHERE sa.user_id = %s "
+            "AND (%s::timestamptz IS NULL OR sa.saved_at < %s OR (sa.saved_at = %s AND m.id < %s)) "
+            "ORDER BY sa.saved_at DESC, m.id DESC LIMIT %s",
             (user.id, before_saved_at, before_saved_at, before_saved_at, before_id, limit + 1),
         ).fetchall()
         rows, next_cursor = paginate(rows, limit, lambda r: (r["saved_at"], r["id"]))
@@ -902,7 +1039,7 @@ def list_saved_answers(
         out = []
         for r in rows:
             question_row = conn.execute(
-                "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' AND id < ? "
+                "SELECT content FROM messages WHERE conversation_id = %s AND role = 'user' AND id < %s "
                 "ORDER BY id DESC LIMIT 1",
                 (r["conversation_id"], r["id"]),
             ).fetchone()

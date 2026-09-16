@@ -48,6 +48,16 @@ def _configure_tesseract() -> bool:
         return False
 
 
+def _strip_nul(text: str) -> str:
+    """Postgres text columns reject embedded NUL (0x00) bytes outright --
+    confirmed live 2026-09-16 against a real Drive manual (180UC_DWT_I-O_ED4),
+    where PyMuPDF's get_text() returned them for some pages (a known quirk
+    with certain malformed/subset embedded fonts), which aborted that
+    document's whole ingestion with an unhandled psycopg.DataError. SQLite
+    never enforced this, so nothing caught it before the Postgres migration."""
+    return text.replace("\x00", "") if "\x00" in text else text
+
+
 def _ocr_image_bytes(png_bytes: bytes) -> str:
     import io
 
@@ -55,7 +65,7 @@ def _ocr_image_bytes(png_bytes: bytes) -> str:
     from PIL import Image
 
     with Image.open(io.BytesIO(png_bytes)) as img:
-        return pytesseract.image_to_string(img)
+        return _strip_nul(pytesseract.image_to_string(img))
 
 
 def extract_pdf(path: Path, ocr_available: bool = False) -> ExtractedDocument:
@@ -79,7 +89,7 @@ def extract_pdf(path: Path, ocr_available: bool = False) -> ExtractedDocument:
 
     for i, fpage in enumerate(fitz_doc):
         page_number = i + 1
-        text = fpage.get_text()
+        text = _strip_nul(fpage.get_text())
         char_count = len(text.strip())
 
         if char_count < MIN_CHARS_PER_PAGE_FOR_TEXT_LAYER:
@@ -164,7 +174,7 @@ def _detect_pdf_headings(fpage) -> list[tuple[str, int]]:
             spans = line.get("spans", [])
             if not spans:
                 continue
-            text = "".join(s.get("text", "") for s in spans).strip()
+            text = _strip_nul("".join(s.get("text", "") for s in spans).strip())
             if not text:
                 continue
             size = max(s.get("size", 0) for s in spans)
@@ -197,7 +207,7 @@ def extract_docx(path: Path) -> ExtractedDocument:
     tables: list[ExtractedTable] = []
 
     for para in doc.paragraphs:
-        t = para.text.strip()
+        t = _strip_nul(para.text.strip())
         if not t:
             continue
         text_parts.append(t)
@@ -207,7 +217,7 @@ def extract_docx(path: Path) -> ExtractedDocument:
             headings.append((t, int(m.group(1)) - 1))
 
     for table in doc.tables:
-        rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+        rows = [[_strip_nul(cell.text.strip()) for cell in row.cells] for row in table.rows]
         if rows:
             tables.append(ExtractedTable(page_number=None, rows=rows))
 

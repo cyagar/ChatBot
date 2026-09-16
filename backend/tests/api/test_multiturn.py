@@ -35,7 +35,7 @@ def _embed_seeded_chunks():
         vectors = embed_texts([r["content"] for r in rows])
         for row, vec in zip(rows, vectors):
             conn.execute(
-                "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (?, ?, ?, ?)",
+                "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (%s, %s, %s, %s)",
                 (row["id"], "test-model", len(vec), vector_to_blob(vec)),
             )
 
@@ -45,38 +45,41 @@ def _register(email):
 
 
 def _seed_axiom_with_heater_chunks(conn):
-    conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-    conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+    conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+    conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
     cur = conn.execute(
         "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
         "file_type, sha256, byte_size, status, review_status) VALUES "
         "('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
-        "'indexed', 'approved')"
+        "'indexed', 'approved') RETURNING id"
     )
-    doc_id = cur.lastrowid
-    conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (?, 1, 'approved')", (doc_id,))
+    doc_id = cur.fetchone()["id"]
+    conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'approved')", (doc_id,))
+    # chunk_id 1/2 assertions below (test_follow_up_resolution_changes_which_
+    # passage_retrieval_surfaces) rely on these landing as ids 1 and 2 --
+    # RESTART IDENTITY (tests/conftest.py) plus this fixed insertion order
+    # guarantees that, same as elsewhere in this test suite.
     conn.execute(
-        "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-        "VALUES (1, ?, 4, 'text', "
+        "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+        "VALUES (%s, 4, 'text', "
         "'TANK HEATER FAILURE CHECK: If the Axiom brewer is not heating, check the tank heater "
         "and thermistor circuit for continuity.', 140, 0)",
         (doc_id,),
     )
     conn.execute(
-        "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-        "VALUES (2, ?, 5, 'text', "
+        "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+        "VALUES (%s, 5, 'text', "
         "'TANK HEATER SERVICE PROCEDURE: To install a new tank heater on the Axiom, disconnect "
         "power, remove the four screws, and unplug the wire harness connector J12.', 160, 1)",
         (doc_id,),
     )
-    conn.execute("INSERT INTO chunks_fts (rowid, content) SELECT id, content FROM chunks")
     return doc_id
 
 
 def test_pending_message_is_resumed_without_a_duplicate_user_turn(test_env):
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
 
     _register("resume@example.com")
     conv = client.post("/api/conversations", json={"machine_id": None}).json()
@@ -87,7 +90,7 @@ def test_pending_message_is_resumed_without_a_duplicate_user_turn(test_env):
 
     with get_conn() as conn:
         pending = conn.execute(
-            "SELECT pending_message_id FROM conversations WHERE id = ?", (conv["id"],)
+            "SELECT pending_message_id FROM conversations WHERE id = %s", (conv["id"],)
         ).fetchone()
     assert pending["pending_message_id"] is not None
 
@@ -96,7 +99,7 @@ def test_pending_message_is_resumed_without_a_duplicate_user_turn(test_env):
 
     with get_conn() as conn:
         pending_after = conn.execute(
-            "SELECT pending_message_id FROM conversations WHERE id = ?", (conv["id"],)
+            "SELECT pending_message_id FROM conversations WHERE id = %s", (conv["id"],)
         ).fetchone()
     assert pending_after["pending_message_id"] is None
 
@@ -118,8 +121,8 @@ def test_concurrent_machine_confirmation_does_not_duplicate_the_answer(test_env)
     the provider, and both persist an assistant answer -- two answers to one
     question. Server-side, only one request may resume it."""
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
 
     _register("doubletap@example.com")
     conv = client.post("/api/conversations", json={"machine_id": None}).json()
@@ -147,15 +150,15 @@ def test_concurrent_machine_confirmation_does_not_duplicate_the_answer(test_env)
 
     with get_conn() as conn:
         pending = conn.execute(
-            "SELECT pending_message_id FROM conversations WHERE id = ?", (conv["id"],)
+            "SELECT pending_message_id FROM conversations WHERE id = %s", (conv["id"],)
         ).fetchone()
     assert pending["pending_message_id"] is None
 
 
 def test_asking_a_new_question_clears_a_stale_pending_clarification(test_env):
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
 
     _register("stalepending@example.com")
     conv = client.post("/api/conversations", json={"machine_id": None}).json()
@@ -163,7 +166,7 @@ def test_asking_a_new_question_clears_a_stale_pending_clarification(test_env):
     client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "What does error E4 mean?"})
     with get_conn() as conn:
         pending = conn.execute(
-            "SELECT pending_message_id FROM conversations WHERE id = ?", (conv["id"],)
+            "SELECT pending_message_id FROM conversations WHERE id = %s", (conv["id"],)
         ).fetchone()
     assert pending["pending_message_id"] is not None
 
@@ -178,7 +181,7 @@ def test_asking_a_new_question_clears_a_stale_pending_clarification(test_env):
 
     with get_conn() as conn:
         pending_after = conn.execute(
-            "SELECT pending_message_id FROM conversations WHERE id = ?", (conv["id"],)
+            "SELECT pending_message_id FROM conversations WHERE id = %s", (conv["id"],)
         ).fetchone()
     assert pending_after["pending_message_id"] is None
 
@@ -200,7 +203,7 @@ def test_follow_up_question_persists_a_resolved_retrieval_query(test_env):
 
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT content, resolved_query FROM messages WHERE conversation_id = ? AND role = 'user' ORDER BY id",
+            "SELECT content, resolved_query FROM messages WHERE conversation_id = %s AND role = 'user' ORDER BY id",
             (conv["id"],),
         ).fetchall()
     assert rows[0]["content"] == "Why is it not heating?"

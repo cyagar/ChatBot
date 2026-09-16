@@ -9,17 +9,17 @@ client = TestClient(app)
 
 
 def _seed_pending_document(conn) -> int:
-    conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-    conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+    conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+    conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
     cur = conn.execute(
         "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
         "file_type, sha256, byte_size, status) VALUES ('axiom.pdf', 'axiom.pdf', 'local_directory', "
-        "'axiom.pdf', 'pdf', 'hash1', 100, 'indexed')"
+        "'axiom.pdf', 'pdf', 'hash1', 100, 'indexed') RETURNING id"
     )
-    doc_id = cur.lastrowid
+    doc_id = cur.fetchone()["id"]
     conn.execute(
-        "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-        "VALUES (1, ?, 1, 'text', 'Pending manual content awaiting review.', 40, 0)",
+        "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+        "VALUES (%s, 1, 'text', 'Pending manual content awaiting review.', 40, 0)",
         (doc_id,),
     )
     storage_path = get_settings().local_storage_dir_resolved / "axiom.pdf"
@@ -60,7 +60,7 @@ def test_administrator_can_still_preview_a_pending_documents_raw_file(test_env):
 def test_technician_can_fetch_an_approved_documents_raw_file(test_env):
     with get_conn() as conn:
         doc_id = _seed_pending_document(conn)
-        conn.execute("UPDATE documents SET review_status = 'approved' WHERE id = ?", (doc_id,))
+        conn.execute("UPDATE documents SET review_status = 'approved' WHERE id = %s", (doc_id,))
     register_test_user(client, "manualtech2@example.com")
 
     resp = client.get(f"/api/manuals/{doc_id}/file")

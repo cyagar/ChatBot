@@ -25,18 +25,26 @@ from scripts import reindex_metadata as rm
 def _seed_document(conn, storage_dir, *, doc_id=1, filename="axiom.pdf",
                     manufacturer_name=None, doc_type="unknown", title="Untitled",
                     revision=None, doc_number=None, status_reason=None):
+    # doc_id is not written as an explicit id (Postgres's GENERATED ALWAYS AS
+    # IDENTITY on documents.id would reject that) -- it's only used to build
+    # a unique sha256 below. RESTART IDENTITY (tests/conftest.py's test_env
+    # fixture) plus every caller inserting documents in the same 1, 2, ...
+    # order this argument already implies means the generated id naturally
+    # comes out equal to doc_id anyway.
     manu_id = None
     if manufacturer_name:
-        conn.execute("INSERT OR IGNORE INTO manufacturers (name) VALUES (?)", (manufacturer_name,))
+        conn.execute(
+            "INSERT INTO manufacturers (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (manufacturer_name,)
+        )
         manu_id = conn.execute(
-            "SELECT id FROM manufacturers WHERE name = ?", (manufacturer_name,)
+            "SELECT id FROM manufacturers WHERE name = %s", (manufacturer_name,)
         ).fetchone()["id"]
     conn.execute(
-        "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
+        "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
         "file_type, sha256, byte_size, status, review_status, manufacturer_id, doc_type, title, "
         "revision, doc_number, status_reason) "
-        "VALUES (?, ?, ?, 'local_directory', ?, 'pdf', ?, 100, 'indexed', 'approved', ?, ?, ?, ?, ?, ?)",
-        (doc_id, filename, filename, filename, f"hash{doc_id}", manu_id, doc_type, title,
+        "VALUES (%s, %s, 'local_directory', %s, 'pdf', %s, 100, 'indexed', 'approved', %s, %s, %s, %s, %s, %s)",
+        (filename, filename, filename, f"hash{doc_id}", manu_id, doc_type, title,
          revision, doc_number, status_reason),
     )
     (storage_dir / filename).write_bytes(b"dummy")
@@ -45,7 +53,7 @@ def _seed_document(conn, storage_dir, *, doc_id=1, filename="axiom.pdf",
 def _override(conn, doc_id, field_name, corrected_value="whatever"):
     conn.execute(
         "INSERT INTO metadata_overrides (document_id, field, corrected_value, corrected_by) "
-        "VALUES (?, ?, ?, 'admin@example.com')",
+        "VALUES (%s, %s, %s, 'admin@example.com')",
         (doc_id, field_name, corrected_value),
     )
 
@@ -70,7 +78,7 @@ def _meta(**overrides):
 def _read_document(conn, doc_id):
     return conn.execute(
         "SELECT d.*, mf.name AS manufacturer_name FROM documents d "
-        "LEFT JOIN manufacturers mf ON mf.id = d.manufacturer_id WHERE d.id = ?",
+        "LEFT JOIN manufacturers mf ON mf.id = d.manufacturer_id WHERE d.id = %s",
         (doc_id,),
     ).fetchone()
 
@@ -222,7 +230,7 @@ def test_machine_links_update_when_not_overridden(test_env, monkeypatch):
         from app.config import get_settings
         storage_dir = get_settings().local_storage_dir_resolved
         storage_dir.mkdir(parents=True, exist_ok=True)
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
         _seed_document(conn, storage_dir)
         _patch_extraction(monkeypatch, {"axiom.pdf": _meta(machine_matches=[
             MachineMatch(manufacturer="Bunn-O-Matic Corporation", model_name="Axiom",
@@ -243,8 +251,8 @@ def test_machine_links_preserved_when_overridden(test_env, monkeypatch):
         from app.config import get_settings
         storage_dir = get_settings().local_storage_dir_resolved
         storage_dir.mkdir(parents=True, exist_ok=True)
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         _seed_document(conn, storage_dir)
         conn.execute(
             "INSERT INTO document_machines (document_id, machine_id, confidence, review_status) "

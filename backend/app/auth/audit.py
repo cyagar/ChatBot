@@ -15,6 +15,6 @@ def log_audit_event(
 ) -> None:
     conn.execute(
         "INSERT INTO audit_events (actor_user_id, event_type, target_type, target_id, detail) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s)",
         (actor_user_id, event_type, target_type, target_id, detail),
     )

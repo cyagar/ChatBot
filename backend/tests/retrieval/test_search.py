@@ -12,41 +12,48 @@ def _seed_two_machines_with_similar_language(conn):
     """Two machines whose manuals use overlapping vocabulary ('brewer',
     'heating element', 'error') but different specifics — the exact scenario
     plan requirement 11 guards against."""
-    conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
+    # None of these rows write an explicit id -- Postgres's GENERATED ALWAYS
+    # AS IDENTITY columns reject that, and RESTART IDENTITY (tests/conftest.
+    # py's test_env fixture) plus this function's fixed insertion order
+    # already guarantee the generated ids come out as 1, 2, ... exactly as
+    # this file's hardcoded cross-references (machine_id=1, document_id=2,
+    # etc.) assume. content_tsv (chunks' generated tsvector column) is
+    # auto-maintained by Postgres -- unlike SQLite's chunks_fts virtual
+    # table, there is no separate sync step to run after inserting chunks.
+    conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
     conn.execute(
-        "INSERT INTO machines (id, manufacturer_id, model_name, family, machine_type) "
-        "VALUES (1, 1, 'Axiom', 'Axiom Series', 'coffee brewer')"
+        "INSERT INTO machines (manufacturer_id, model_name, family, machine_type) "
+        "VALUES (1, 'Axiom', 'Axiom Series', 'coffee brewer')"
     )
     conn.execute(
-        "INSERT INTO machines (id, manufacturer_id, model_name, family, machine_type) "
-        "VALUES (2, 1, 'ICB Twin', 'Infusion Series', 'coffee brewer')"
+        "INSERT INTO machines (manufacturer_id, model_name, family, machine_type) "
+        "VALUES (1, 'ICB Twin', 'Infusion Series', 'coffee brewer')"
     )
 
     # review_status='approved' explicitly: these fixtures simulate an
     # already-published, reviewed corpus, not the P0-6 review-queue workflow
     # itself (that's covered separately in test_review_status_gates_retrieval).
     conn.execute(
-        "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
-        "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+        "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+        "file_type, sha256, byte_size, status, review_status) VALUES ('axiom.pdf', 'axiom.pdf', "
         "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
     )
     conn.execute(
-        "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
-        "file_type, sha256, byte_size, status, review_status) VALUES (2, 'icb.pdf', 'icb.pdf', "
+        "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+        "file_type, sha256, byte_size, status, review_status) VALUES ('icb.pdf', 'icb.pdf', "
         "'local_directory', 'icb.pdf', 'pdf', 'hash2', 100, 'indexed', 'approved')"
     )
     conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 1, 'approved')")
     conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (2, 2, 'approved')")
 
     conn.execute(
-        "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-        "VALUES (1, 1, 4, 'text', 'Axiom brewer heating element error E4 means the thermistor circuit is open on the Axiom.', 90, 0)"
+        "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+        "VALUES (1, 4, 'text', 'Axiom brewer heating element error E4 means the thermistor circuit is open on the Axiom.', 90, 0)"
     )
     conn.execute(
-        "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-        "VALUES (2, 2, 7, 'text', 'ICB Twin brewer heating element error E4 means a different fault on the ICB Twin control board.', 95, 0)"
+        "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+        "VALUES (2, 7, 'text', 'ICB Twin brewer heating element error E4 means a different fault on the ICB Twin control board.', 95, 0)"
     )
-    conn.execute("INSERT INTO chunks_fts (rowid, content) SELECT id, content FROM chunks")
 
 
 def _embed_seeded_chunks():
@@ -57,7 +64,7 @@ def _embed_seeded_chunks():
         vectors = embed_texts([r["content"] for r in rows])
         for row, vec in zip(rows, vectors):
             conn.execute(
-                "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (?, ?, ?, ?)",
+                "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (%s, %s, %s, %s)",
                 (row["id"], "test-model", len(vec), vector_to_blob(vec)),
             )
 
@@ -95,20 +102,20 @@ def test_vector_search_calls_embed_query_when_eligible_chunks_exist(test_env, mo
     from app.retrieval.embeddings import vector_to_blob
 
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         conn.execute(
-            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
-            "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES ('axiom.pdf', 'axiom.pdf', "
             "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
         )
         conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 1, 'approved')")
         conn.execute(
-            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-            "VALUES (1, 1, 1, 'text', 'Some manual content here.', 25, 0)"
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 1, 'text', 'Some manual content here.', 25, 0)"
         )
         conn.execute(
-            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, 'test-model', 2, ?)",
+            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, 'test-model', 2, %s)",
             (vector_to_blob(np.array([1.0, 0.0], dtype=np.float32)),),
         )
 
@@ -144,20 +151,20 @@ def test_vector_search_returns_empty_list_without_raising_when_embedding_model_f
     from app.retrieval.embeddings import vector_to_blob
 
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         conn.execute(
-            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
-            "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES ('axiom.pdf', 'axiom.pdf', "
             "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
         )
         conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 1, 'approved')")
         conn.execute(
-            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-            "VALUES (1, 1, 1, 'text', 'Some manual content here.', 25, 0)"
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 1, 'text', 'Some manual content here.', 25, 0)"
         )
         conn.execute(
-            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, 'test-model', 2, ?)",
+            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, 'test-model', 2, %s)",
             (vector_to_blob(np.array([1.0, 0.0], dtype=np.float32)),),
         )
 
@@ -178,19 +185,18 @@ def test_hybrid_search_returns_lexical_only_results_when_embedding_model_fails(t
     from app.retrieval import search as search_module
 
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         conn.execute(
-            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
-            "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES ('axiom.pdf', 'axiom.pdf', "
             "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
         )
         conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 1, 'approved')")
         conn.execute(
-            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-            "VALUES (1, 1, 4, 'text', 'Axiom brewer heating element error E4 means the thermistor circuit is open.', 90, 0)"
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 4, 'text', 'Axiom brewer heating element error E4 means the thermistor circuit is open.', 90, 0)"
         )
-        conn.execute("INSERT INTO chunks_fts (rowid, content) SELECT id, content FROM chunks")
 
     def exploding_embed_query(text):
         raise RuntimeError("Could not load embedding model (simulated).")
@@ -244,12 +250,12 @@ def test_review_status_gates_retrieval(test_env):
     and nothing for the pending one, proving both documents.review_status AND
     document_machines.review_status are enforced, not just one of them."""
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (2, 1, 'ICB Twin')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'ICB Twin')")
         conn.execute(
-            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
-            "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES ('axiom.pdf', 'axiom.pdf', "
             "'google_drive', 'f1', 'pdf', 'hash1', 100, 'indexed', 'approved')"
         )
         conn.execute(
@@ -259,10 +265,9 @@ def test_review_status_gates_retrieval(test_env):
             "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 2, 'pending')"
         )
         conn.execute(
-            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-            "VALUES (1, 1, 4, 'text', 'Axiom brewer heating element error E4 troubleshooting steps.', 60, 0)"
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 4, 'text', 'Axiom brewer heating element error E4 troubleshooting steps.', 60, 0)"
         )
-        conn.execute("INSERT INTO chunks_fts (rowid, content) SELECT id, content FROM chunks")
     _embed_seeded_chunks()
 
     from app.retrieval.search import hybrid_search
@@ -277,17 +282,16 @@ def test_review_status_gates_retrieval(test_env):
 @pytest.mark.slow
 def test_unapproved_document_excluded_even_without_a_machine_filter(test_env):
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
         conn.execute(
-            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
-            "file_type, sha256, byte_size, status, review_status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES ('axiom.pdf', 'axiom.pdf', "
             "'google_drive', 'f1', 'pdf', 'hash1', 100, 'indexed', 'pending')"
         )
         conn.execute(
-            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-            "VALUES (1, 1, 4, 'text', 'Freshly ingested content awaiting admin review.', 48, 0)"
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 4, 'text', 'Freshly ingested content awaiting admin review.', 48, 0)"
         )
-        conn.execute("INSERT INTO chunks_fts (rowid, content) SELECT id, content FROM chunks")
     _embed_seeded_chunks()
 
     from app.retrieval.search import hybrid_search
@@ -318,11 +322,14 @@ def test_near_empty_chunks_excluded_from_results(test_env):
     filter these out before a provider ever sees them."""
     with get_conn() as conn:
         _seed_two_machines_with_similar_language(conn)
+        # This becomes chunk id=3: the shared fixture above already inserted
+        # exactly two chunks (ids 1, 2) in this same test's clean-slate
+        # transaction, so the next GENERATED ALWAYS AS IDENTITY value is 3,
+        # matching the id this test asserts against below.
         conn.execute(
-            "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-            "VALUES (3, 1, 4, 'text', 'E', 1, 1)"
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 4, 'text', 'E', 1, 1)"
         )
-        conn.execute("INSERT INTO chunks_fts (rowid, content) SELECT id, content FROM chunks WHERE id = 3")
     _embed_seeded_chunks()
 
     from app.retrieval.search import hybrid_search
@@ -334,7 +341,7 @@ def test_near_empty_chunks_excluded_from_results(test_env):
 def test_deactivated_document_excluded_from_retrieval(test_env):
     with get_conn() as conn:
         _seed_two_machines_with_similar_language(conn)
-        conn.execute("UPDATE documents SET deactivated_at = datetime('now') WHERE id = 1")
+        conn.execute("UPDATE documents SET deactivated_at = now() WHERE id = 1")
 
     from app.retrieval.search import lexical_search
 
@@ -351,7 +358,7 @@ def test_superseded_document_is_excluded_from_retrieval_not_merely_penalized(tes
     this system exists to prevent."""
     with get_conn() as conn:
         _seed_two_machines_with_similar_language(conn)
-        conn.execute("UPDATE documents SET is_current_revision = 0 WHERE id = 1")
+        conn.execute("UPDATE documents SET is_current_revision = false WHERE id = 1")
 
     from app.retrieval.search import lexical_search
 
@@ -375,7 +382,7 @@ def test_machine_picker_excludes_machines_whose_only_manual_is_superseded(test_e
     picker_client = TestClient(app)
     with get_conn() as conn:
         _seed_two_machines_with_similar_language(conn)
-        conn.execute("UPDATE documents SET is_current_revision = 0 WHERE id = 1")
+        conn.execute("UPDATE documents SET is_current_revision = false WHERE id = 1")
 
     register_test_user(picker_client, "supersededpicker@example.com")
     listing = picker_client.get("/api/machines").json()

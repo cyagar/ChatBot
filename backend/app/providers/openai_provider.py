@@ -30,7 +30,7 @@ MAX_OUTPUT_TOKENS = 1200
 
 _JSON_SHAPE_INSTRUCTION = (
     "Respond with ONLY this JSON shape: "
-    '{"is_no_answer": false, "no_answer_explanation": null, '
+    '{"is_no_answer": false, "no_answer_explanation": null, "confidence": "high", '
     '"claims": [{"text": "...", "cited_excerpt_numbers": [1]}], '
     '"steps": [{"text": "...", "cited_excerpt_numbers": [1]}], '
     '"warnings": [{"text": "...", "cited_excerpt_numbers": [3]}]}. '
@@ -41,8 +41,11 @@ _JSON_SHAPE_INSTRUCTION = (
     "(quoted verbatim from its excerpt) in its own warnings entry -- each entry's "
     "cited_excerpt_numbers must be a non-empty list referencing only the excerpt numbers "
     "shown above, and must be the excerpt(s) that actually contain that entry's number(s) "
-    "or wording, not just the general topic. Do not include a conflict_note field -- "
-    "revision conflicts are detected separately from excerpt metadata."
+    "or wording, not just the general topic. Set confidence to \"low\" when the excerpts "
+    "only partially or indirectly address the question even though what you found is still "
+    "verified (see the system prompt); set it to \"high\" when the excerpts directly and "
+    "completely answer it. Do not include a conflict_note field -- revision conflicts are "
+    "detected separately from excerpt metadata."
 )
 
 

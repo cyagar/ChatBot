@@ -47,17 +47,22 @@ class RetrievedChunk:
     combined_score: float = 0.0
 
 
-_FTS_SPECIAL = re.compile(r'["\'\(\)\*\:\^\-]')
+_FTS_SPECIAL = re.compile(r'["\'\(\)\*\:\^\-&|!<>]')
 
 
 def _sanitize_fts_query(q: str) -> str:
-    """FTS5 has its own query syntax; user text must be neutralized to avoid both
-    syntax errors and unintended operators. Each term is quoted as a literal."""
+    """Postgres to_tsquery() has its own query syntax (&, |, !, (), :, <->) --
+    user text must be neutralized to avoid both syntax errors and unintended
+    operators, same reasoning as the old FTS5 sanitizer this replaced (that
+    version stripped FTS5's own special-character set; this one strips
+    to_tsquery's instead, a superset that also covers tsquery's boolean
+    operators). Each term is OR'd together -- broad recall across whatever
+    words the question actually contains, same as before."""
     cleaned = _FTS_SPECIAL.sub(" ", q)
     terms = [t for t in cleaned.split() if t.strip()]
     if not terms:
         return ""
-    return " OR ".join(f'"{t}"' for t in terms)
+    return " | ".join(terms)
 
 
 def _machine_filter_sql(machine_id: int | None) -> tuple[str, list]:
@@ -65,7 +70,7 @@ def _machine_filter_sql(machine_id: int | None) -> tuple[str, list]:
         return "", []
     return (
         " AND d.id IN (SELECT document_id FROM document_machines "
-        "WHERE machine_id = ? AND review_status = 'approved') ",
+        "WHERE machine_id = %s AND review_status = 'approved') ",
         [machine_id],
     )
 
@@ -81,7 +86,7 @@ def _revision_filter_sql(include_superseded: bool) -> str:
     rerank boost only makes that outcome less likely, not impossible.
     `include_superseded=True` exists for the admin query tester, where seeing
     what WOULD have matched is the point."""
-    return "" if include_superseded else " AND d.is_current_revision = 1 "
+    return "" if include_superseded else " AND d.is_current_revision = true "
 
 
 def lexical_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POOL,
@@ -91,24 +96,29 @@ def lexical_search(query: str, machine_id: int | None, limit: int = CANDIDATE_PO
         return []
     filter_sql, filter_params = _machine_filter_sql(machine_id)
     revision_sql = _revision_filter_sql(include_superseded)
+    # Ported from SQLite's FTS5 virtual table (chunks_fts + bm25()) to
+    # Postgres full-text search: chunks.content_tsv (a GENERATED tsvector
+    # column, GIN-indexed -- see backend/migrations/0001_initial_schema.sql)
+    # plus ts_rank(), matched with @@ against a to_tsquery() built from the
+    # same OR-of-terms this always sent FTS5.
     sql = f"""
-        SELECT c.id AS chunk_id, bm25(chunks_fts) AS score
-        FROM chunks_fts
-        JOIN chunks c ON c.id = chunks_fts.rowid
+        SELECT c.id AS chunk_id, ts_rank(c.content_tsv, to_tsquery('english', %s)) AS score
+        FROM chunks c
         JOIN documents d ON d.id = c.document_id
-        WHERE chunks_fts MATCH ?
+        WHERE c.content_tsv @@ to_tsquery('english', %s)
           AND d.status IN ('indexed','partial')
           AND d.deactivated_at IS NULL
           AND d.review_status = 'approved'
           {revision_sql}
           {filter_sql}
-        ORDER BY score
-        LIMIT ?
+        ORDER BY score DESC
+        LIMIT %s
     """
     with get_conn() as conn:
-        rows = conn.execute(sql, [fts_query, *filter_params, limit]).fetchall()
-    # bm25() returns lower = better; negate so higher = better.
-    return [(r["chunk_id"], -r["score"]) for r in rows]
+        rows = conn.execute(sql, [fts_query, fts_query, *filter_params, limit]).fetchall()
+    # ts_rank() already returns higher = better, unlike FTS5's bm25() (lower
+    # = better) -- no negation needed here, unlike the old return.
+    return [(r["chunk_id"], r["score"]) for r in rows]
 
 
 def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POOL,
@@ -178,7 +188,7 @@ def reciprocal_rank_fusion(
 def _hydrate(chunk_ids: list[int]) -> dict[int, RetrievedChunk]:
     if not chunk_ids:
         return {}
-    placeholders = ",".join("?" for _ in chunk_ids)
+    placeholders = ",".join("%s" for _ in chunk_ids)
     sql = f"""
         SELECT c.id AS chunk_id, c.document_id, c.content, c.page_number,
                c.section_heading, c.chunk_type,

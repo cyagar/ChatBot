@@ -28,8 +28,8 @@ def _register(email):
 
 
 def _seed_machine(conn):
-    conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-    conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+    conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+    conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
 
 
 def _seed_heater_chunk(conn):
@@ -37,18 +37,17 @@ def _seed_heater_chunk(conn):
         "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
         "file_type, sha256, byte_size, status, review_status) VALUES "
         "('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
-        "'indexed', 'approved')"
+        "'indexed', 'approved') RETURNING id"
     )
-    doc_id = cur.lastrowid
-    conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (?, 1, 'approved')", (doc_id,))
+    doc_id = cur.fetchone()["id"]
+    conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'approved')", (doc_id,))
     conn.execute(
-        "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-        "VALUES (1, ?, 4, 'text', "
+        "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+        "VALUES (%s, 4, 'text', "
         "'TANK HEATER FAILURE CHECK: If the Axiom brewer is not heating, check the tank heater "
         "and thermistor circuit for continuity.', 140, 0)",
         (doc_id,),
     )
-    conn.execute("INSERT INTO chunks_fts (rowid, content) SELECT id, content FROM chunks")
 
 
 def _make_failing_then_recovering_search(monkeypatch):

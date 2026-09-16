@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime
 
 from fastapi import HTTPException, Response, status
 
@@ -26,15 +27,44 @@ NEXT_CURSOR_HEADER = "X-Next-Cursor"
 HAS_MORE_HEADER = "X-Has-More"
 
 
+def _json_default(value):
+    # A cursor part can be a Postgres TIMESTAMPTZ column's value, which
+    # psycopg hands back as a real datetime -- json.dumps doesn't know how
+    # to serialize that on its own. The decoded isoformat string round-trips
+    # fine as a query parameter (Postgres infers timestamptz from context),
+    # so there's no matching decode_cursor-side conversion needed.
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def encode_cursor(*parts) -> str:
-    return base64.urlsafe_b64encode(json.dumps(list(parts)).encode("utf-8")).decode("ascii")
+    return base64.urlsafe_b64encode(
+        json.dumps(list(parts), default=_json_default).encode("utf-8")
+    ).decode("ascii")
 
 
-def decode_cursor(cursor: str) -> list:
+_CURSOR_SCALAR_TYPES = (str, int, float, bool, type(None))
+
+
+def decode_cursor(cursor: str, expected_len: int) -> list:
+    """P1-10 (independent follow-up review): decoding used to accept any
+    valid base64/JSON and hand it straight to the caller's tuple-unpack --
+    a well-formed cursor with the wrong shape (too few/many elements, or a
+    nested list/dict where a scalar SQL parameter is expected) raised an
+    unhandled ValueError/TypeError instead of a clean 400. Every caller now
+    declares how many parts it expects and gets a 400 for anything else."""
     try:
-        return json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
+        parts = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
     except Exception:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid pagination cursor.") from None
+    if (
+        not isinstance(parts, list)
+        or len(parts) != expected_len
+        or not all(isinstance(p, _CURSOR_SCALAR_TYPES) for p in parts)
+    ):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid pagination cursor.")
+    return parts
 
 
 def paginate(rows: list, limit: int, cursor_for_row) -> tuple[list, str | None]:

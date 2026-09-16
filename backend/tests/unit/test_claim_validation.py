@@ -128,6 +128,40 @@ def test_genuinely_supported_answer_passes():
     assert "81-118-31" in result.answer
 
 
+def test_low_confidence_answer_surfaces_a_caveat_in_the_response():
+    """Owner decision (2026-09-16): threshold shouldn't be super high, but a
+    low-confidence answer must say so in the response text itself. Every
+    claim/step/warning still passes the exact same verbatim-evidence check
+    as a high-confidence answer -- confidence only changes the displayed
+    text, never what's allowed to be asserted."""
+    passages = [_passage(1, 1, "Error E4 indicates an open thermistor circuit.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "confidence": "low",
+        "claims": [{"text": "Error E4 indicates an open thermistor circuit.", "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test")
+    assert result is not None
+    assert "low confidence" in result.answer.lower()
+    assert "E4" in result.answer
+
+
+def test_high_or_missing_confidence_has_no_caveat():
+    """Backward compatible: a response with no "confidence" field at all
+    (every fixture above, and local_extractive which has no such concept)
+    must not grow a caveat it never asked for."""
+    passages = [_passage(1, 1, "Error E4 indicates an open thermistor circuit.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Error E4 indicates an open thermistor circuit.", "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test")
+    assert result is not None
+    assert "low confidence" not in result.answer.lower()
+
+
 def test_citation_to_nonexistent_excerpt_number_is_rejected():
     passages = [_passage(1, 1, "Only one excerpt exists.")]
     raw = json.dumps({

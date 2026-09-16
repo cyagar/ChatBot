@@ -11,6 +11,8 @@ unchanged rather than being reinterpreted or double-converted.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from app.api.common import iso_utc
 
 
@@ -34,3 +36,15 @@ def test_none_stays_none():
 
 def test_fractional_seconds_are_preserved():
     assert iso_utc("2026-08-26 14:30:00.123456") == "2026-08-26T14:30:00.123456+00:00"
+
+
+def test_tz_aware_datetime_object_passes_through():
+    # What psycopg actually hands back for a TIMESTAMPTZ column -- the
+    # primary input shape now that the app runs on Postgres, not SQLite.
+    dt = datetime(2026, 8, 26, 14, 30, tzinfo=timezone.utc)
+    assert iso_utc(dt) == "2026-08-26T14:30:00+00:00"
+
+
+def test_naive_datetime_object_gains_a_utc_offset():
+    dt = datetime(2026, 8, 26, 14, 30)
+    assert iso_utc(dt) == "2026-08-26T14:30:00+00:00"

@@ -34,8 +34,8 @@ def test_retrieval_failure_degrades_to_an_honest_no_answer_response(test_env, mo
     monkeypatch.setattr(routes_chat, "hybrid_search", exploding_hybrid_search)
 
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
 
     register_test_user(client, "retrievalfail@example.com", role="technician")
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()
@@ -62,8 +62,8 @@ def test_retrieval_failure_is_still_persisted_not_silently_dropped(test_env, mon
     monkeypatch.setattr(routes_chat, "hybrid_search", exploding_hybrid_search)
 
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
 
     register_test_user(client, "retrievalfail2@example.com", role="technician")
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()

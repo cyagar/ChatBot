@@ -25,20 +25,43 @@ router = APIRouter(prefix="/api/manuals", tags=["manuals"])
 _MIME_BY_TYPE = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "image": "image/jpeg",
 }
+_PIL_FORMAT_TO_MIME = {
+    "JPEG": "image/jpeg",
+    "PNG": "image/png",
+    "GIF": "image/gif",
+    "BMP": "image/bmp",
+    "TIFF": "image/tiff",
+    "WEBP": "image/webp",
+}
+
+
+def _sniff_image_mime(path) -> str:
+    """P1-18 (independent follow-up review): file_type='image' collapses
+    every raster format ingestion accepts into one bucket (see
+    app/ingestion/extractors.py's sniff_file_type) -- serving it as a
+    hardcoded 'image/jpeg' mislabeled any PNG/GIF/etc file. Sniff the real
+    format from the bytes actually on disk instead of trusting the coarse
+    ingestion-time bucket."""
+    from PIL import Image
+
+    try:
+        with Image.open(path) as img:
+            return _PIL_FORMAT_TO_MIME.get(img.format or "", "application/octet-stream")
+    except Exception:
+        return "application/octet-stream"
 
 
 def _get_document(document_id: int, *, allow_unapproved: bool = False):
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id, original_filename, storage_path, file_type, status "
-            "FROM documents WHERE id = ? AND deactivated_at IS NULL",
+            "FROM documents WHERE id = %s AND deactivated_at IS NULL",
             (document_id,),
         ).fetchone()
         if row is not None and not allow_unapproved:
             approved = conn.execute(
-                "SELECT 1 FROM documents WHERE id = ? AND review_status = 'approved'",
+                "SELECT 1 FROM documents WHERE id = %s AND review_status = 'approved'",
                 (document_id,),
             ).fetchone()
             if approved is None:
@@ -63,12 +86,22 @@ def get_manual_file(document_id: int, user: CurrentUser = Depends(get_current_us
     path = settings.local_storage_dir_resolved / doc["storage_path"]
     if not path.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Stored file is missing.")
-    mime = _MIME_BY_TYPE.get(doc["file_type"], "application/octet-stream")
+    if doc["file_type"] == "image":
+        mime = _sniff_image_mime(path)
+    else:
+        mime = _MIME_BY_TYPE.get(doc["file_type"], "application/octet-stream")
+    # P1-18 (independent follow-up review): a hand-built
+    # `f'inline; filename="{name}"'` header string let a stored filename
+    # containing a `"` break out of the quoted parameter (and, depending on
+    # the ASGI server, a control character could reach the raw header).
+    # FileResponse's own `filename=`/`content_disposition_type=` builds this
+    # header using Starlette's RFC 6266-aware encoding instead of raw
+    # string interpolation.
     return FileResponse(
         path,
         media_type=mime,
         filename=doc["original_filename"],
-        headers={"Content-Disposition": f'inline; filename="{doc["original_filename"]}"'},
+        content_disposition_type="inline",
     )
 
 
@@ -109,7 +142,7 @@ def get_evidence(document_id: int, chunk_id: int, user: CurrentUser = Depends(ge
             "SELECT c.id, c.content, c.page_number, c.section_heading, c.chunk_type, "
             "d.original_filename, d.title, d.revision, d.doc_type, d.file_type, d.is_current_revision "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "WHERE c.id = ? AND c.document_id = ? AND d.deactivated_at IS NULL"
+            "WHERE c.id = %s AND c.document_id = %s AND d.deactivated_at IS NULL"
             + ("" if user.role == "administrator" else " AND d.review_status = 'approved'"),
             (chunk_id, document_id),
         ).fetchone()

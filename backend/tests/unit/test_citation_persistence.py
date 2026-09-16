@@ -76,19 +76,25 @@ class _SubsetCitingProvider(AIProvider):
 @pytest.fixture
 def six_passages(test_env):
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        # None of these rows write an explicit id -- Postgres's GENERATED
+        # ALWAYS AS IDENTITY columns reject that, and RESTART IDENTITY
+        # (tests/conftest.py's test_env fixture) plus this fixture's fixed
+        # insertion order already guarantee the generated ids come out as
+        # 1, 2, ... exactly as this test's hardcoded chunk_id assertions
+        # (e.g. [2, 5]) assume.
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         conn.execute(
-            "INSERT INTO documents (id, original_filename, storage_path, source_system, "
+            "INSERT INTO documents (original_filename, storage_path, source_system, "
             "file_type, sha256, byte_size, status) VALUES "
-            "(1, 'manual.pdf', 'manual.pdf', 'local_directory', 'pdf', 'deadbeef', 100, 'indexed')"
+            "('manual.pdf', 'manual.pdf', 'local_directory', 'pdf', 'deadbeef', 100, 'indexed')"
         )
         conn.execute("INSERT INTO document_machines (document_id, machine_id, confidence) VALUES (1, 1, 1.0)")
         for i in range(1, 7):
             conn.execute(
-                "INSERT INTO chunks (id, document_id, page_number, chunk_type, content, char_count, ordinal) "
-                "VALUES (?, 1, 1, 'text', ?, 20, ?)",
-                (i, f"excerpt content number {i}", i),
+                "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+                "VALUES (1, 1, 'text', %s, 20, %s)",
+                (f"excerpt content number {i}", i),
             )
     return [_passage(i, 1, f"excerpt content number {i}") for i in range(1, 7)]
 

@@ -14,13 +14,6 @@ from app.main import app
 client = TestClient(app)
 
 
-def test_index_page_renders(test_env):
-    resp = client.get("/")
-    assert resp.status_code == 200
-    assert "text/html" in resp.headers["content-type"]
-    assert "app.js" in resp.text
-
-
 def test_admin_page_renders(test_env):
     resp = client.get("/admin")
     assert resp.status_code == 200
@@ -28,14 +21,10 @@ def test_admin_page_renders(test_env):
     assert "admin.js" in resp.text
 
 
-def test_manifest_is_valid_json(test_env):
-    resp = client.get("/manifest.webmanifest")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["name"]
-    assert body["icons"]
-
-
-def test_service_worker_served(test_env):
-    resp = client.get("/service-worker.js")
-    assert resp.status_code == 200
+def test_technician_pwa_routes_are_gone(test_env):
+    """Owner decision (2026-09-16): Android is the only technician client in
+    production -- the technician PWA (index.html, app.js, service worker,
+    manifest) was removed entirely. The admin web UI stays."""
+    assert client.get("/").status_code == 404
+    assert client.get("/manifest.webmanifest").status_code == 404
+    assert client.get("/service-worker.js").status_code == 404

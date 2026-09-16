@@ -45,10 +45,11 @@ def bootstrap_admin(email: str, password: str, display_name: str | None = None) 
                 "Use the admin invitation flow (POST /api/admin/invitations) to add more accounts."
             )
         cur = conn.execute(
-            "INSERT INTO users (email, password_hash, role, display_name) VALUES (?, ?, 'administrator', ?)",
+            "INSERT INTO users (email, password_hash, role, display_name) "
+            "VALUES (%s, %s, 'administrator', %s) RETURNING id",
             (email, hash_password(password), display_name),
         )
-        user_id = cur.lastrowid
+        user_id = cur.fetchone()["id"]
         log_audit_event(conn, "admin_bootstrap", actor_user_id=user_id, target_type="user",
                          target_id=user_id, detail=f"Bootstrap administrator created: {email}")
     return user_id

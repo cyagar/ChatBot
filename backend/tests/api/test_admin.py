@@ -18,16 +18,16 @@ def _register_admin(email="admin@example.com"):
 
 
 def _seed_document(conn) -> int:
-    conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-    conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+    conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+    conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
     cur = conn.execute(
         "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
         "file_type, sha256, byte_size, status, manufacturer_id, doc_type, title, is_current_revision) "
         "VALUES ('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
-        "'indexed', 1, 'service_repair', 'Axiom Service Manual', 1)"
+        "'indexed', 1, 'service_repair', 'Axiom Service Manual', true) RETURNING id"
     )
-    doc_id = cur.lastrowid
-    conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (?, 1)", (doc_id,))
+    doc_id = cur.fetchone()["id"]
+    conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (%s, 1)", (doc_id,))
     return doc_id
 
 
@@ -60,7 +60,7 @@ def test_document_at_a_stale_pipeline_version_needs_reprocessing(test_env):
     already uses to review documents, not buried only in ingestion_events."""
     with get_conn() as conn:
         doc_id = _seed_document(conn)
-        conn.execute("UPDATE documents SET chunking_version = 0 WHERE id = ?", (doc_id,))
+        conn.execute("UPDATE documents SET chunking_version = 0 WHERE id = %s", (doc_id,))
     _register_admin()
 
     doc = next(d for d in client.get("/api/admin/documents").json() if d["id"] == doc_id)
@@ -81,7 +81,7 @@ def test_metadata_correction_updates_and_logs_audit_trail(test_env):
 
     with get_conn() as conn:
         override = conn.execute(
-            "SELECT * FROM metadata_overrides WHERE document_id = ? AND field = 'title'", (doc_id,)
+            "SELECT * FROM metadata_overrides WHERE document_id = %s AND field = 'title'", (doc_id,)
         ).fetchone()
     assert override is not None
     assert override["corrected_value"] == "Corrected Title"
@@ -173,9 +173,9 @@ def test_approving_document_and_link_removes_it_from_the_queue(test_env):
     assert all(d["id"] != doc_id for d in queue)
 
     with get_conn() as conn:
-        row = conn.execute("SELECT review_status, reviewed_by FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        row = conn.execute("SELECT review_status, reviewed_by FROM documents WHERE id = %s", (doc_id,)).fetchone()
         audit = conn.execute(
-            "SELECT event_type FROM audit_events WHERE target_type = 'document' AND target_id = ?", (doc_id,)
+            "SELECT event_type FROM audit_events WHERE target_type = 'document' AND target_id = %s", (doc_id,)
         ).fetchall()
     assert row["review_status"] == "approved"
     assert row["reviewed_by"] is not None
@@ -193,7 +193,7 @@ def test_rejecting_link_keeps_document_out_of_retrieval_via_queue(test_env):
 
     with get_conn() as conn:
         link = conn.execute(
-            "SELECT review_status FROM document_machines WHERE document_id = ? AND machine_id = 1", (doc_id,)
+            "SELECT review_status FROM document_machines WHERE document_id = %s AND machine_id = 1", (doc_id,)
         ).fetchone()
     assert link["review_status"] == "rejected"
 
@@ -214,7 +214,7 @@ def test_metadata_correction_approves_the_links_it_sets(test_env):
 
     with get_conn() as conn:
         link = conn.execute(
-            "SELECT review_status, reviewed_by FROM document_machines WHERE document_id = ? AND machine_id = 1",
+            "SELECT review_status, reviewed_by FROM document_machines WHERE document_id = %s AND machine_id = 1",
             (doc_id,),
         ).fetchone()
     assert link["review_status"] == "approved"
@@ -227,22 +227,29 @@ def test_metadata_correction_approves_the_links_it_sets(test_env):
 
 def _seed_document_at_source_ref(conn, source_ref, *, sha256, review_status="pending",
                                   status="indexed", title="Axiom Service Manual") -> int:
+    # ON CONFLICT DO NOTHING (SQLite's INSERT OR IGNORE, ported) against
+    # manufacturers.name's/machines' own UNIQUE constraints -- this helper is
+    # called twice per test (old + new document at the same source_ref), and
+    # unlike the explicit id=1 the old version forced, letting the first call
+    # create manufacturer/machine id=1 and the second no-op is what actually
+    # needs the conflict guard now.
     conn.execute(
-        "INSERT OR IGNORE INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')"
+        "INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation') ON CONFLICT (name) DO NOTHING"
     )
     conn.execute(
-        "INSERT OR IGNORE INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')"
+        "INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom') "
+        "ON CONFLICT (manufacturer_id, model_name) DO NOTHING"
     )
     cur = conn.execute(
         "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
         "file_type, sha256, byte_size, status, review_status, manufacturer_id, doc_type, title, "
         "is_current_revision, ingested_at) "
-        "VALUES ('axiom.pdf', ?, 'google_drive', ?, 'pdf', ?, 100, ?, ?, 1, 'service_repair', ?, 1, "
-        "datetime('now'))",
+        "VALUES ('axiom.pdf', %s, 'google_drive', %s, 'pdf', %s, 100, %s, %s, 1, 'service_repair', %s, true, "
+        "now()) RETURNING id",
         (sha256, source_ref, sha256, status, review_status, title),
     )
-    doc_id = cur.lastrowid
-    conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (?, 1)", (doc_id,))
+    doc_id = cur.fetchone()["id"]
+    conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (%s, 1)", (doc_id,))
     return doc_id
 
 
@@ -263,10 +270,10 @@ def test_approving_replacement_deactivates_old_document_at_same_source_ref(test_
     assert resp.status_code == 200
 
     with get_conn() as conn:
-        old_row = conn.execute("SELECT deactivated_at, status_reason FROM documents WHERE id = ?", (old_id,)).fetchone()
-        new_row = conn.execute("SELECT deactivated_at, review_status FROM documents WHERE id = ?", (new_id,)).fetchone()
+        old_row = conn.execute("SELECT deactivated_at, status_reason FROM documents WHERE id = %s", (old_id,)).fetchone()
+        new_row = conn.execute("SELECT deactivated_at, review_status FROM documents WHERE id = %s", (new_id,)).fetchone()
         audit = conn.execute(
-            "SELECT event_type FROM audit_events WHERE target_type = 'document' AND target_id = ?", (new_id,)
+            "SELECT event_type FROM audit_events WHERE target_type = 'document' AND target_id = %s", (new_id,)
         ).fetchall()
     assert old_row["deactivated_at"] is not None, "the old document must be retired once its replacement is approved"
     assert "Superseded" in (old_row["status_reason"] or "")
@@ -288,8 +295,8 @@ def test_rejecting_replacement_leaves_old_document_active(test_env):
     assert resp.status_code == 200
 
     with get_conn() as conn:
-        old_row = conn.execute("SELECT deactivated_at FROM documents WHERE id = ?", (old_id,)).fetchone()
-        new_row = conn.execute("SELECT deactivated_at, review_status FROM documents WHERE id = ?", (new_id,)).fetchone()
+        old_row = conn.execute("SELECT deactivated_at FROM documents WHERE id = %s", (old_id,)).fetchone()
+        new_row = conn.execute("SELECT deactivated_at, review_status FROM documents WHERE id = %s", (new_id,)).fetchone()
     assert old_row["deactivated_at"] is None, "rejecting a replacement must not touch the document it targeted"
     assert new_row["deactivated_at"] is None, "a rejected document is kept (not deactivated) for the review record"
     assert new_row["review_status"] == "rejected"
@@ -331,14 +338,16 @@ def test_concurrent_approval_of_two_replacement_candidates_leaves_exactly_one_ac
     import app.api.routes_admin as routes_admin_module
     from app.db import get_conn as real_get_conn
 
-    select_sql = "SELECT id, source_ref FROM documents WHERE id = ? AND deactivated_at IS NULL"
+    # Must match routes_admin.py's review_document() SQL text exactly --
+    # %s placeholders (psycopg), not SQLite's ?.
+    select_sql = "SELECT id, source_ref FROM documents WHERE id = %s AND deactivated_at IS NULL"
     # Both requests' reads must land before either commits (a Barrier makes
     # that deterministic instead of hoping thread scheduling cooperates);
     # only THEN does candidate_b additionally wait for candidate_a's full
     # commit before candidate_b's own write proceeds -- reproducing "read
-    # stale, write late" exactly. sqlite3.Connection itself can't be
-    # monkeypatched (it's an immutable C type), so the connection this route
-    # sees is wrapped in a thin Python proxy instead.
+    # stale, write late" exactly. psycopg.Connection itself can't be
+    # monkeypatched (it's a C-backed type, like sqlite3.Connection was), so
+    # the connection this route sees is wrapped in a thin Python proxy instead.
     both_read = threading.Barrier(2, timeout=5)
     a_committed = threading.Event()
 
@@ -384,14 +393,14 @@ def test_concurrent_approval_of_two_replacement_candidates_leaves_exactly_one_ac
 
     with get_conn() as conn:
         active_approved = conn.execute(
-            "SELECT id FROM documents WHERE source_ref = ? AND deactivated_at IS NULL "
+            "SELECT id FROM documents WHERE source_ref = %s AND deactivated_at IS NULL "
             "AND review_status = 'approved'",
             (source_ref,),
         ).fetchall()
         all_rows = {
             r["id"]: (r["review_status"], r["deactivated_at"])
             for r in conn.execute(
-                "SELECT id, review_status, deactivated_at FROM documents WHERE source_ref = ?", (source_ref,)
+                "SELECT id, review_status, deactivated_at FROM documents WHERE source_ref = %s", (source_ref,)
             ).fetchall()
         }
     assert len(active_approved) == 1, (
@@ -502,11 +511,11 @@ def test_machine_picker_excludes_machines_with_only_pending_links(test_env):
     dead-ends into "no manuals" the moment retrieval applies its own approval
     filter (independent follow-up review P0-6)."""
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         conn.execute(
-            "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
-            "file_type, sha256, byte_size, status) VALUES (1, 'axiom.pdf', 'axiom.pdf', "
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status) VALUES ('axiom.pdf', 'axiom.pdf', "
             "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed')"
         )
         conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (1, 1)")
@@ -538,11 +547,11 @@ def test_disable_and_enable_user_round_trip(test_env):
 
     assert client.post(f"/api/admin/users/{user_id}/disable").status_code == 200
     with get_conn() as conn:
-        row = conn.execute("SELECT is_disabled, token_version FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = conn.execute("SELECT is_disabled, token_version FROM users WHERE id = %s", (user_id,)).fetchone()
     assert row["is_disabled"] == 1
     assert row["token_version"] == 1
 
     assert client.post(f"/api/admin/users/{user_id}/enable").status_code == 200
     with get_conn() as conn:
-        row = conn.execute("SELECT is_disabled FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = conn.execute("SELECT is_disabled FROM users WHERE id = %s", (user_id,)).fetchone()
     assert row["is_disabled"] == 0

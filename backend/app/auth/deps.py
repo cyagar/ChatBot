@@ -27,7 +27,7 @@ def get_current_user(tma_session: str | None = Cookie(default=None, alias=SESSIO
 
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT id, email, role, display_name, is_disabled, token_version FROM users WHERE id = ?",
+            "SELECT id, email, role, display_name, is_disabled, token_version FROM users WHERE id = %s",
             (int(payload["sub"]),),
         ).fetchone()
     if not row:

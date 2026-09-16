@@ -54,18 +54,18 @@ def seed_dev_technician(email: str, password: str, display_name: str | None = No
     password_hash = hash_password(creds.password)
 
     with get_conn() as conn:
-        existing = conn.execute("SELECT id FROM users WHERE email = ?", (creds.email,)).fetchone()
+        existing = conn.execute("SELECT id FROM users WHERE email = %s", (creds.email,)).fetchone()
         if existing:
             conn.execute(
-                "UPDATE users SET password_hash = ?, display_name = ?, token_version = token_version + 1 WHERE id = ?",
+                "UPDATE users SET password_hash = %s, display_name = %s, token_version = token_version + 1 WHERE id = %s",
                 (password_hash, display_name, existing["id"]),
             )
             return existing["id"], False
         cur = conn.execute(
-            "INSERT INTO users (email, password_hash, role, display_name) VALUES (?, ?, 'technician', ?)",
+            "INSERT INTO users (email, password_hash, role, display_name) VALUES (%s, %s, 'technician', %s) RETURNING id",
             (creds.email, password_hash, display_name),
         )
-        return cur.lastrowid, True
+        return cur.fetchone()["id"], True
 
 
 def main():

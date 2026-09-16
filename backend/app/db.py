@@ -1,20 +1,22 @@
-import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+
+import psycopg
+from psycopg.rows import dict_row
 
 from app.config import get_settings
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
-def _connect() -> sqlite3.Connection:
+def _connect() -> psycopg.Connection:
     settings = get_settings()
-    settings.db_path_resolved.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.db_path_resolved, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+    # Pooled endpoint (PgBouncer, transaction mode): correct choice for
+    # request-scoped, connection-per-call app traffic. Never use this
+    # connection for anything needing session state (SET, LISTEN/NOTIFY,
+    # multi-statement transactions spanning route boundaries) -- see
+    # run_migrations() below, which deliberately uses the direct URL instead.
+    return psycopg.connect(settings.database_url, row_factory=dict_row)
 
 
 @contextmanager
@@ -31,66 +33,45 @@ def get_conn():
 
 
 def split_sql_statements(script: str) -> list[str]:
-    """Split a migration script into individual statements.
+    """Split a migration script into individual statements on ';' boundaries.
 
-    Uses sqlite3.complete_statement rather than a naive split on ';' because
-    a semicolon can legitimately appear inside a string literal -- migration
-    0003's grandfathering review_note contains one, and a naive split would
-    tear that INSERT in half (independent follow-up review P1-9)."""
-    statements: list[str] = []
-    buf = ""
-    for line in script.splitlines(keepends=True):
-        buf += line
-        if sqlite3.complete_statement(buf):
-            stmt = buf.strip()
-            if stmt:
-                statements.append(stmt)
-            buf = ""
-    tail = buf.strip()
-    if tail:
-        statements.append(tail)
-    return statements
+    Safe because these migration files are authored by us and never contain a
+    semicolon inside a string literal or comment -- unlike the old SQLite
+    migrations (one of which grandfathered seed data with an embedded
+    semicolon), starting the Postgres database empty means no migration here
+    ever carries row data, only schema."""
+    return [stmt.strip() + ";" for stmt in script.split(";") if stmt.strip()]
 
 
 def run_migrations() -> list[str]:
     """Apply any .sql files in migrations/ not yet recorded in schema_migrations.
     Safe to call repeatedly (idempotent).
 
-    Each migration runs inside one explicit transaction together with its own
-    schema_migrations INSERT, so a failure part-way through rolls the whole
-    migration back and leaves no record -- the next start retries it cleanly
-    from the original schema. This deliberately does NOT use
-    conn.executescript(), which issues an implicit COMMIT before running and
-    would therefore leave partially-applied schema changes behind with no
-    migration row to explain them (independent follow-up review P1-9).
-    SQLite DDL is transactional, which is what makes the rollback complete;
-    don't "simplify" this back to executescript()."""
+    Uses the direct (unpooled) connection, not the pooled app connection --
+    Postgres DDL needs real session-level transaction control, which a
+    PgBouncer transaction-mode pooler doesn't support (see the neon-postgres
+    skill's pooled-vs-direct guidance). Each migration runs inside its own
+    transaction together with its own schema_migrations INSERT, so a failure
+    part-way through rolls the whole migration back and leaves no record --
+    the next start retries it cleanly from the original schema."""
+    settings = get_settings()
     applied = []
-    conn = _connect()
-    # Explicit transaction control: with the default isolation_level, sqlite3
-    # decides on its own when to BEGIN, which is exactly the ambiguity this
-    # function must not have.
-    conn.isolation_level = None
+    conn = psycopg.connect(settings.database_url_unpooled, row_factory=dict_row, autocommit=True)
     try:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
-            "version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))"
+            "version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
         )
-        already = {r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
+        already = {r["version"] for r in conn.execute("SELECT version FROM schema_migrations").fetchall()}
         for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
             version = path.stem
             if version in already:
                 continue
             statements = split_sql_statements(path.read_text(encoding="utf-8"))
-            conn.execute("BEGIN")
-            try:
+            with conn.transaction():
                 for stmt in statements:
                     conn.execute(stmt)
-                conn.execute("INSERT INTO schema_migrations (version) VALUES (?)", (version,))
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
+                conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
             applied.append(version)
     finally:
         conn.close()

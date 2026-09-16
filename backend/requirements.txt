@@ -4,11 +4,14 @@ uvicorn[standard]==0.52.4
 pydantic==2.13.4
 pydantic[email]==2.13.4
 pydantic-settings==2.7.0
-python-multipart==0.0.20
+python-multipart==0.0.32
+
+# --- Database (Postgres/Neon) ---
+psycopg[binary]==3.2.10
 
 # --- Auth / security ---
 bcrypt==5.0.0
-pyjwt==2.10.1
+pyjwt==2.14.0
 slowapi==0.1.9
 
 # --- Document processing ---
@@ -28,12 +31,16 @@ sentence-transformers==6.0.0
 torch==2.13.0
 
 # --- Templating ---
-jinja2==3.1.5
+jinja2==3.1.6
 
 # --- Testing ---
 pytest==8.3.4
 pytest-asyncio==0.25.2
 httpx==0.28.1
+# Pinned directly rather than relied on transitively via pydantic-settings --
+# tests/conftest.py imports it explicitly to load backend/.env.test (the
+# dedicated Neon test branch), so it must stay resolvable on its own.
+python-dotenv==1.2.3
 
 # --- Optional: enabled once a provider API key is supplied via .env ---
 anthropic==0.125.0

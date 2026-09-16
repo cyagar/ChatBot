@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timezone
 
+import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.auth.audit import log_audit_event
 from app.auth.deps import SESSION_COOKIE, CurrentUser, get_current_user
@@ -23,9 +23,22 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=72)  # bcrypt's hard limit is 72 bytes
+    password: str = Field(min_length=8, max_length=72)
     display_name: str | None = Field(default=None, max_length=100)
     invite_token: str = Field(min_length=1, max_length=200)
+
+    @field_validator("password")
+    @classmethod
+    def _password_fits_bcrypt(cls, v: str) -> str:
+        """P0-5 (independent follow-up review): max_length=72 above counts
+        *characters*, but bcrypt's hard limit is 72 UTF-8 *bytes* -- a
+        40-emoji password can be under 72 characters yet well over 72 bytes,
+        which used to reach app.auth.security.hash_password's own byte check
+        and raise an uncaught ValueError (an unhandled 500) instead of a
+        normal 422 naming the problem."""
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 bytes when UTF-8 encoded.")
+        return v
 
 
 class LoginRequest(BaseModel):
@@ -45,7 +58,7 @@ class UserOut(BaseModel):
     # app.auth.deps.require_admin actually gates (routes_admin.py). This
     # lists what the server already enforces; it does not itself enforce
     # anything.
-    capabilities: list[str] = []
+    capabilities: list[str] = Field(default_factory=list)
 
 
 _TECHNICIAN_CAPABILITIES = [
@@ -109,11 +122,14 @@ def register(payload: RegisterRequest, request: Request, response: Response):
     only a request that flips used_at from NULL to non-NULL proceeds.
     """
     token_hash = hash_invitation_token(payload.invite_token)
-    now = datetime.now(timezone.utc).isoformat()
+    # invitations.expires_at is TIMESTAMPTZ -- psycopg hands it back as a
+    # real tz-aware datetime (unlike SQLite's TEXT column, which forced an
+    # isoformat-string comparison), so `now` must be one too.
+    now = datetime.now(timezone.utc)
 
     with get_conn() as conn:
         invite = conn.execute(
-            "SELECT id, email, role, expires_at, used_at, revoked_at FROM invitations WHERE token_hash = ?",
+            "SELECT id, email, role, expires_at, used_at, revoked_at FROM invitations WHERE token_hash = %s",
             (token_hash,),
         ).fetchone()
         if invite is None:
@@ -131,34 +147,42 @@ def register(payload: RegisterRequest, request: Request, response: Response):
             )
 
         claim = conn.execute(
-            "UPDATE invitations SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL",
+            "UPDATE invitations SET used_at = now() WHERE id = %s AND used_at IS NULL",
             (invite["id"],),
         )
         if claim.rowcount == 0:
             # Lost the race to a concurrent request for this same token.
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="This invitation has already been used.")
 
-        existing = conn.execute("SELECT id FROM users WHERE email = ?", (payload.email,)).fetchone()
+        existing = conn.execute("SELECT id FROM users WHERE email = %s", (payload.email,)).fetchone()
         if existing:
-            conn.execute("UPDATE invitations SET used_at = NULL WHERE id = ?", (invite["id"],))
+            conn.execute("UPDATE invitations SET used_at = NULL WHERE id = %s", (invite["id"],))
             raise HTTPException(status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
 
         try:
-            cur = conn.execute(
-                "INSERT INTO users (email, password_hash, role, display_name) VALUES (?, ?, ?, ?)",
-                (payload.email, hash_password(payload.password), invite["role"], payload.display_name),
-            )
-        except sqlite3.IntegrityError:
+            # A nested transaction (SAVEPOINT under the connection's already
+            # -open outer transaction) -- unlike sqlite3, a Postgres
+            # constraint violation aborts the whole transaction until a
+            # ROLLBACK, so without this savepoint the recovery UPDATE in the
+            # except block below would itself fail with
+            # InFailedSqlTransaction instead of running.
+            with conn.transaction():
+                cur = conn.execute(
+                    "INSERT INTO users (email, password_hash, role, display_name) "
+                    "VALUES (%s, %s, %s, %s) RETURNING id",
+                    (payload.email, hash_password(payload.password), invite["role"], payload.display_name),
+                )
+                user_id = cur.fetchone()["id"]
+        except psycopg.errors.UniqueViolation:
             # A DIFFERENT invitation for the same email, redeemed concurrently
             # with this one, can still slip past the "existing" check above
             # (each connection's read happens before either commits) --
             # users.email's UNIQUE constraint is the actual backstop for that
             # case. Restore the claim so this invite isn't burned for an
             # account that was never created.
-            conn.execute("UPDATE invitations SET used_at = NULL WHERE id = ?", (invite["id"],))
+            conn.execute("UPDATE invitations SET used_at = NULL WHERE id = %s", (invite["id"],))
             raise HTTPException(status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
-        user_id = cur.lastrowid
-        conn.execute("UPDATE invitations SET used_by = ? WHERE id = ?", (user_id, invite["id"]))
+        conn.execute("UPDATE invitations SET used_by = %s WHERE id = %s", (user_id, invite["id"]))
         log_audit_event(conn, "invite_used", actor_user_id=user_id, target_type="invitation",
                          target_id=invite["id"], detail=f"Registered as {invite['role']} via invitation.")
 
@@ -175,14 +199,14 @@ def login(payload: LoginRequest, request: Request, response: Response):
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id, email, password_hash, role, display_name, is_disabled, token_version "
-            "FROM users WHERE email = ?",
+            "FROM users WHERE email = %s",
             (payload.email,),
         ).fetchone()
         if not row or not verify_password(payload.password, row["password_hash"]):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
         if row["is_disabled"]:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="This account has been disabled.")
-        conn.execute("UPDATE users SET last_login_at = datetime('now') WHERE id = ?", (row["id"],))
+        conn.execute("UPDATE users SET last_login_at = now() WHERE id = %s", (row["id"],))
 
     _set_session_cookie(response, row["id"], row["role"], row["token_version"])
     return UserOut(id=row["id"], email=row["email"], role=row["role"], display_name=row["display_name"],

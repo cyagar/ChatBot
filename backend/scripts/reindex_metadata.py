@@ -158,15 +158,15 @@ def reindex_documents(conn, storage_dir: Path, ocr_available: bool, apply: bool)
                 if apply:
                     if name == "manufacturer":
                         manu_id = _get_or_create_manufacturer(conn, new_value)
-                        conn.execute("UPDATE documents SET manufacturer_id = ? WHERE id = ?", (manu_id, doc["id"]))
+                        conn.execute("UPDATE documents SET manufacturer_id = %s WHERE id = %s", (manu_id, doc["id"]))
                     else:
-                        conn.execute(f"UPDATE documents SET {name} = ? WHERE id = ?", (new_value, doc["id"]))
+                        conn.execute(f"UPDATE documents SET {name} = %s WHERE id = %s", (new_value, doc["id"]))
 
         # --- doc_number: no override mechanism exists, always refresh ---
         if doc["doc_number"] != meta.doc_number:
             result.field_changes.append(FieldChange("doc_number", doc["doc_number"], meta.doc_number))
             if apply:
-                conn.execute("UPDATE documents SET doc_number = ? WHERE id = ?", (meta.doc_number, doc["id"]))
+                conn.execute("UPDATE documents SET doc_number = %s WHERE id = %s", (meta.doc_number, doc["id"]))
 
         # --- machine_links ---
         if "machine_links" in overridden:
@@ -174,7 +174,7 @@ def reindex_documents(conn, storage_dir: Path, ocr_available: bool, apply: bool)
         else:
             old_rows = conn.execute(
                 "SELECT m.model_name FROM document_machines dm JOIN machines m ON m.id = dm.machine_id "
-                "WHERE dm.document_id = ? AND dm.confidence < 1.0",
+                "WHERE dm.document_id = %s AND dm.confidence < 1.0",
                 (doc["id"],),
             ).fetchall()
             old_names = sorted(r["model_name"] for r in old_rows)
@@ -183,14 +183,14 @@ def reindex_documents(conn, storage_dir: Path, ocr_available: bool, apply: bool)
                 result.field_changes.append(FieldChange("machine_links", old_names, new_names))
                 if apply:
                     conn.execute(
-                        "DELETE FROM document_machines WHERE document_id = ? AND confidence < 1.0",
+                        "DELETE FROM document_machines WHERE document_id = %s AND confidence < 1.0",
                         (doc["id"],),
                     )
                     for match in meta.machine_matches:
                         mid = _get_or_create_machine(conn, match)
                         conn.execute(
-                            "INSERT OR IGNORE INTO document_machines (document_id, machine_id, confidence) "
-                            "VALUES (?, ?, ?)",
+                            "INSERT INTO document_machines (document_id, machine_id, confidence) "
+                            "VALUES (%s, %s, %s) ON CONFLICT (document_id, machine_id) DO NOTHING",
                             (doc["id"], mid, match.confidence),
                         )
 
@@ -198,7 +198,7 @@ def reindex_documents(conn, storage_dir: Path, ocr_available: bool, apply: bool)
         reconciled = _reconcile_notes(doc["status_reason"], meta.notes)
         if reconciled != (doc["status_reason"] or None):
             if apply:
-                conn.execute("UPDATE documents SET status_reason = ? WHERE id = ?", (reconciled, doc["id"]))
+                conn.execute("UPDATE documents SET status_reason = %s WHERE id = %s", (reconciled, doc["id"]))
 
         if meta.notes:
             result.notes = meta.notes

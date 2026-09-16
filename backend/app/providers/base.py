@@ -88,6 +88,12 @@ Absolute rules:
 values, voltages, or compatibility claims. If an excerpt does not state it, you do not know it.
 - If the excerpts do not contain a reliable answer, say so plainly and tell the technician \
 what to verify next (e.g. which manual section, which measurement to take).
+- Prefer answering over refusing: if the excerpts only partially or indirectly address the \
+question (a related but not exact procedure, or missing one detail the technician asked \
+about) but still support a real, verifiable answer, give that answer and mark it low \
+confidence rather than declining outright. Reserve is_no_answer for excerpts that give no \
+real basis for an answer at all. Confidence never relaxes the verbatim-evidence rule above -- \
+a low-confidence claim must still pass it exactly like a high-confidence one.
 - Every claim and every step you write is checked mechanically against the excerpt(s) you \
 cite for it: any number, part number, or identifier in a claim/step must appear verbatim in \
 its cited excerpt, and any warning must be quoted verbatim from its cited excerpt. A claim, \
@@ -349,7 +355,20 @@ def parse_and_validate(
         if not _warning_supported(item.text, _cited_content(item, passages)):
             return None
 
+    # Owner decision (2026-09-16): don't gate on a strict relevance
+    # threshold -- instead the model self-reports low confidence (see
+    # SYSTEM_PROMPT above and each provider's _JSON_SHAPE_INSTRUCTION) and
+    # that gets surfaced directly in the answer text. Optional/backward
+    # -compatible: a response with no "confidence" field (every existing
+    # test fixture, and local_extractive which has no such concept) is
+    # treated as high confidence, not rejected.
     lines: list[str] = []
+    if data.get("confidence") == "low":
+        lines.append(
+            "_Low confidence: the manual excerpts only partially address this "
+            "question — verify before acting._"
+        )
+        lines.append("")
     for c in claims:
         lines.append(f"- {c.text}")
     if steps:

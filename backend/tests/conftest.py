@@ -3,20 +3,40 @@ import sys
 from pathlib import Path
 
 import pytest
+from dotenv import dotenv_values
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Dedicated Neon branch for tests ("test", a schema-only child of
+# "production" on project ChatBot -- see backend/.env.test's own header).
+# Loaded explicitly and monkeypatched below so tests NEVER inherit
+# backend/.env's production DATABASE_URL, no matter what's ambient.
+TEST_ENV_FILE = Path(__file__).resolve().parent.parent / ".env.test"
 
 
 @pytest.fixture
 def test_env(tmp_path, monkeypatch):
-    """Isolated settings + a fresh migrated SQLite DB per test. Uses env vars
-    (not a .env file) so tests never touch the developer's real data."""
-    db_dir = tmp_path / "db"
-    storage_dir = tmp_path / "storage"
-    for d in (db_dir, storage_dir):
-        d.mkdir(parents=True, exist_ok=True)
+    """Isolated settings + a migrated Postgres test-branch DB per test. Uses
+    env vars (not the developer's backend/.env) so tests never touch
+    production data."""
+    if not TEST_ENV_FILE.is_file():
+        raise RuntimeError(
+            f"{TEST_ENV_FILE} is missing. Tests must not fall back to "
+            "backend/.env's production DATABASE_URL -- create a dedicated "
+            "Neon test branch (`neon branches create --name test --parent "
+            "production --schema-only`) and write its connection strings "
+            "there before running the suite."
+        )
+    test_db_vars = dotenv_values(TEST_ENV_FILE)
+    for key in ("DATABASE_URL", "DATABASE_URL_UNPOOLED"):
+        value = test_db_vars.get(key)
+        if not value:
+            raise RuntimeError(f"{TEST_ENV_FILE} is missing {key}.")
+        monkeypatch.setenv(key, value)
 
-    monkeypatch.setenv("DB_PATH", str(db_dir / "test.db"))
+    storage_dir = tmp_path / "storage"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+
     monkeypatch.setenv("LOCAL_STORAGE_DIR", str(storage_dir))
     monkeypatch.setenv("SECRET_KEY", "test-secret-key")
     monkeypatch.setenv("AI_PROVIDER", "local_extractive")
@@ -33,6 +53,27 @@ def test_env(tmp_path, monkeypatch):
 
     from app.db import run_migrations
     run_migrations()
+
+    # The Postgres test branch is one persistent schema shared by every test
+    # (no more per-test tmp_path SQLite file), so it needs explicit
+    # wipe-before-use -- otherwise a row committed by one test is still
+    # there for the next. TRUNCATE ... RESTART IDENTITY also resets the
+    # IDENTITY sequences, so IDs are deterministic (start at 1) per test,
+    # matching the old SQLite-per-test behavior. Queried from pg_tables
+    # rather than hardcoded so a future migration's new table is covered
+    # automatically. Done at setup, not teardown, so a crashed/interrupted
+    # previous run can't leave a dirty table behind for the next one.
+    from app.db import get_conn
+    with get_conn() as conn:
+        tables = [
+            row["tablename"]
+            for row in conn.execute(
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname = 'public' AND tablename != 'schema_migrations'"
+            ).fetchall()
+        ]
+        if tables:
+            conn.execute(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE")
 
     # slowapi's limiter storage is process-global, not per-request -- without
     # this, request counts from earlier tests in the same run accumulate
@@ -61,7 +102,7 @@ def register_test_user(client, email, role="technician", password="password123",
     from app.db import get_conn
 
     with get_conn() as conn:
-        admin_row = conn.execute("SELECT id FROM users WHERE email = ?", (admin_email,)).fetchone()
+        admin_row = conn.execute("SELECT id FROM users WHERE email = %s", (admin_email,)).fetchone()
     if admin_row is None:
         from app.auth.bootstrap import bootstrap_admin
         bootstrap_admin(admin_email, admin_password)

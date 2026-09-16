@@ -20,7 +20,7 @@ def _register_admin(email="admin@example.com"):
 
 def _insert_run(conn, *, status, trigger, started_at, finished_at):
     conn.execute(
-        "INSERT INTO ingestion_runs (status, trigger, started_at, finished_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO ingestion_runs (status, trigger, started_at, finished_at) VALUES (%s, %s, %s, %s)",
         (status, trigger, started_at, finished_at),
     )
 
@@ -141,7 +141,7 @@ def test_reindex_run_row_exists_synchronously_before_the_background_task_runs(te
     assert run_id is not None
 
     with get_conn() as conn:
-        row = conn.execute("SELECT status, trigger FROM ingestion_runs WHERE id = ?", (run_id,)).fetchone()
+        row = conn.execute("SELECT status, trigger FROM ingestion_runs WHERE id = %s", (run_id,)).fetchone()
     assert row is not None, "the run row must exist by the time the 202 response is returned"
     assert row["status"] == "running"
     assert row["trigger"] == "manual"
@@ -158,8 +158,8 @@ def test_ingest_all_marks_the_passed_in_run_failed_if_it_cannot_get_the_lock(tes
     from app.ingestion.pipeline import _INGEST_LOCK, ingest_all
 
     with get_conn() as conn:
-        cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', 'manual')")
-        run_id = cur.lastrowid
+        cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', 'manual') RETURNING id")
+        run_id = cur.fetchone()["id"]
 
     _INGEST_LOCK.acquire(blocking=False)
     try:
@@ -169,7 +169,7 @@ def test_ingest_all_marks_the_passed_in_run_failed_if_it_cannot_get_the_lock(tes
         _INGEST_LOCK.release()
 
     with get_conn() as conn:
-        row = conn.execute("SELECT status, finished_at FROM ingestion_runs WHERE id = ?", (run_id,)).fetchone()
+        row = conn.execute("SELECT status, finished_at FROM ingestion_runs WHERE id = %s", (run_id,)).fetchone()
     assert row["status"] == "failed"
     assert row["finished_at"] is not None
 

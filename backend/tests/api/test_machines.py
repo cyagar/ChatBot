@@ -38,27 +38,33 @@ client = TestClient(app)
 
 
 def _insert_document(conn, doc_id, *, status="indexed", deactivated_at=None,
-                      review_status="approved", is_current_revision=1):
+                      review_status="approved", is_current_revision=True):
+    # doc_id is not written as an explicit id (Postgres's GENERATED ALWAYS AS
+    # IDENTITY on documents.id would reject that) -- it's only used to build
+    # unique per-call filenames/hashes below. RESTART IDENTITY (tests/
+    # conftest.py's test_env fixture) plus every caller inserting documents
+    # in the same 1, 2, ... order this argument already implies means the
+    # generated id naturally comes out equal to doc_id anyway.
     conn.execute(
-        "INSERT INTO documents (id, original_filename, storage_path, source_system, source_ref, "
+        "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
         "file_type, sha256, byte_size, status, deactivated_at, review_status, is_current_revision) "
-        "VALUES (?, ?, ?, 'local_directory', ?, 'pdf', ?, 100, ?, ?, ?, ?)",
-        (doc_id, f"doc{doc_id}.pdf", f"doc{doc_id}.pdf", f"doc{doc_id}.pdf", f"hash{doc_id}",
+        "VALUES (%s, %s, 'local_directory', %s, 'pdf', %s, 100, %s, %s, %s, %s)",
+        (f"doc{doc_id}.pdf", f"doc{doc_id}.pdf", f"doc{doc_id}.pdf", f"hash{doc_id}",
          status, deactivated_at, review_status, is_current_revision),
     )
 
 
 def _link(conn, doc_id, machine_id, *, review_status="approved"):
     conn.execute(
-        "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (?, ?, ?)",
+        "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, %s, %s)",
         (doc_id, machine_id, review_status),
     )
 
 
 def test_document_count_excludes_deactivated_documents(test_env):
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         _insert_document(conn, 1)
         _insert_document(conn, 2, deactivated_at="2026-01-01T00:00:00")
         _link(conn, 1, 1)
@@ -76,8 +82,8 @@ def test_document_count_excludes_deactivated_documents(test_env):
 
 def test_document_count_excludes_unapproved_document_review_status(test_env):
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         _insert_document(conn, 1)
         _insert_document(conn, 2, review_status="pending")
         _link(conn, 1, 1)
@@ -98,8 +104,8 @@ def test_document_count_excludes_unapproved_link_review_status(test_env):
     still part of "apply the rules consistently" and losing it silently
     would be worse than one test not discriminating the specific bug."""
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         _insert_document(conn, 1)
         _insert_document(conn, 2)
         _link(conn, 1, 1, review_status="approved")
@@ -117,10 +123,10 @@ def test_document_count_excludes_unapproved_link_review_status(test_env):
 
 def test_document_count_excludes_superseded_revisions(test_env):
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         _insert_document(conn, 1)
-        _insert_document(conn, 2, is_current_revision=0)
+        _insert_document(conn, 2, is_current_revision=False)
         _link(conn, 1, 1)
         _link(conn, 2, 1)
 
@@ -139,8 +145,8 @@ def test_machine_with_only_ineligible_documents_does_not_appear(test_env):
     must vanish from the picker entirely once nothing it links to is eligible
     -- otherwise it's exactly the dead-end the P0-6/P1-6 docstring names."""
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         _insert_document(conn, 1, deactivated_at="2026-01-01T00:00:00")
         _link(conn, 1, 1)
 
@@ -156,8 +162,8 @@ def test_search_and_recent_machines_report_the_same_document_count(test_env):
     half. Seeds one eligible and one ineligible (deactivated) link so a
     query that only fixed one of the two endpoints would be caught here."""
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         _insert_document(conn, 1)
         _insert_document(conn, 2, deactivated_at="2026-01-01T00:00:00")
         _link(conn, 1, 1)
@@ -183,8 +189,8 @@ def test_recent_machines_drops_a_favorite_whose_only_manual_went_away(test_env):
     hides the same machine. This must fail under the query state before that
     fix (no HAVING clause on recent_machines' SQL) and pass now."""
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
         _insert_document(conn, 1)
         _link(conn, 1, 1)
 
@@ -193,7 +199,7 @@ def test_recent_machines_drops_a_favorite_whose_only_manual_went_away(test_env):
     client.post("/api/machines/1/favorite", params={"favorite": True})
 
     with get_conn() as conn:
-        conn.execute("UPDATE documents SET deactivated_at = datetime('now') WHERE id = 1")
+        conn.execute("UPDATE documents SET deactivated_at = now() WHERE id = 1")
 
     recent_result = client.get("/api/machines/recent").json()
 

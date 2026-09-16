@@ -84,32 +84,32 @@ def _store_file(local_path: Path, sha256: str) -> str:
 def _get_or_create_manufacturer(conn, name: str | None) -> int | None:
     if not name:
         return None
-    row = conn.execute("SELECT id FROM manufacturers WHERE name = ?", (name,)).fetchone()
+    row = conn.execute("SELECT id FROM manufacturers WHERE name = %s", (name,)).fetchone()
     if row:
         return row["id"]
-    cur = conn.execute("INSERT INTO manufacturers (name) VALUES (?)", (name,))
-    return cur.lastrowid
+    cur = conn.execute("INSERT INTO manufacturers (name) VALUES (%s) RETURNING id", (name,))
+    return cur.fetchone()["id"]
 
 
 def _get_or_create_machine(conn, match) -> int:
     manu_id = _get_or_create_manufacturer(conn, match.manufacturer)
     row = conn.execute(
-        "SELECT id FROM machines WHERE manufacturer_id = ? AND model_name = ?",
+        "SELECT id FROM machines WHERE manufacturer_id = %s AND model_name = %s",
         (manu_id, match.model_name),
     ).fetchone()
     if row:
         return row["id"]
     cur = conn.execute(
         "INSERT INTO machines (manufacturer_id, model_name, family, machine_type, aliases) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
         (manu_id, match.model_name, match.family, match.machine_type, json.dumps([])),
     )
-    return cur.lastrowid
+    return cur.fetchone()["id"]
 
 
 def _document_full_text(conn, document_id: int) -> str:
     rows = conn.execute(
-        "SELECT content FROM chunks WHERE document_id = ? ORDER BY ordinal", (document_id,)
+        "SELECT content FROM chunks WHERE document_id = %s ORDER BY ordinal", (document_id,)
     ).fetchall()
     return "\n".join(r["content"] for r in rows)
 
@@ -133,8 +133,8 @@ def ingest_all(
         if run_id is not None:
             with get_conn() as conn:
                 conn.execute(
-                    "UPDATE ingestion_runs SET status='failed', finished_at=datetime('now'), "
-                    "trigger=? WHERE id = ?",
+                    "UPDATE ingestion_runs SET status='failed', finished_at=now(), "
+                    "trigger=%s WHERE id = %s",
                     (trigger, run_id),
                 )
                 _record_event(conn, run_id, "(run)", "failed",
@@ -164,8 +164,10 @@ def _ingest_all_locked(
     # taking it on faith.
     if run_id is None:
         with get_conn() as conn:
-            cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', ?)", (trigger,))
-            run_id = cur.lastrowid
+            cur = conn.execute(
+                "INSERT INTO ingestion_runs (status, trigger) VALUES ('running', %s) RETURNING id", (trigger,)
+            )
+            run_id = cur.fetchone()["id"]
 
     report = IngestionReport(run_id=run_id)
     had_error = False
@@ -208,7 +210,7 @@ def _ingest_all_locked(
         logger.exception("Ingestion run %s aborted", run_id)
         with get_conn() as conn:
             conn.execute(
-                "UPDATE ingestion_runs SET status='failed', finished_at=datetime('now') WHERE id = ?",
+                "UPDATE ingestion_runs SET status='failed', finished_at=now() WHERE id = %s",
                 (run_id,),
             )
             _record_event(conn, run_id, "(run)", "failed", f"Ingestion run aborted: {e}", None)
@@ -217,7 +219,7 @@ def _ingest_all_locked(
     final_status = "completed_with_errors" if had_error else "completed"
     with get_conn() as conn:
         conn.execute(
-            "UPDATE ingestion_runs SET status=?, finished_at=datetime('now') WHERE id = ?",
+            "UPDATE ingestion_runs SET status=%s, finished_at=now() WHERE id = %s",
             (final_status, run_id),
         )
     return report
@@ -226,7 +228,7 @@ def _ingest_all_locked(
 def _record_event(conn, run_id: int, filename: str, event: str, detail: str | None, document_id: int | None):
     conn.execute(
         "INSERT INTO ingestion_events (run_id, document_id, original_filename, event, detail) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s)",
         (run_id, document_id, filename, event, detail),
     )
 
@@ -282,7 +284,7 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
     with get_conn() as conn:
         existing = conn.execute(
             "SELECT id, status, sha256, extraction_version, chunking_version FROM documents "
-            "WHERE source_ref = ? AND deactivated_at IS NULL ORDER BY ingested_at DESC, id DESC LIMIT 1",
+            "WHERE source_ref = %s AND deactivated_at IS NULL ORDER BY ingested_at DESC, id DESC LIMIT 1",
             (sf.source_ref,),
         ).fetchone()
 
@@ -321,8 +323,8 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
             storage_name = _store_file(local_path, sf.sha256)
             if stable_retry_id is not None:
                 conn.execute(
-                    "UPDATE documents SET status = ?, status_reason = ?, page_count = ?, "
-                    "ingested_at = datetime('now') WHERE id = ?",
+                    "UPDATE documents SET status = %s, status_reason = %s, page_count = %s, "
+                    "ingested_at = now() WHERE id = %s",
                     (extracted.status, extracted.reason, extracted.page_count or None, stable_retry_id),
                 )
                 doc_id = stable_retry_id
@@ -335,12 +337,13 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
                 cur = conn.execute(
                     "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
                     "file_type, sha256, byte_size, page_count, status, status_reason, ingested_at, "
-                    "deactivated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+                    "deactivated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now()) "
+                    "RETURNING id",
                     (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
                      sf.sha256, sf.byte_size, extracted.page_count or None,
                      extracted.status, reason),
                 )
-                doc_id = cur.lastrowid
+                doc_id = cur.fetchone()["id"]
                 _record_event(conn, run_id, sf.filename, extracted.status, reason, doc_id)
                 return FileOutcome(sf.filename, extracted.status, reason, doc_id,
                                    page_count=extracted.page_count or None)
@@ -348,12 +351,12 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
                 cur = conn.execute(
                     "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
                     "file_type, sha256, byte_size, page_count, status, status_reason, ingested_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) RETURNING id",
                     (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
                      sf.sha256, sf.byte_size, extracted.page_count or None,
                      extracted.status, extracted.reason),
                 )
-                doc_id = cur.lastrowid
+                doc_id = cur.fetchone()["id"]
             _record_event(conn, run_id, sf.filename, extracted.status, extracted.reason, doc_id)
         return FileOutcome(sf.filename, extracted.status, extracted.reason, doc_id,
                            page_count=extracted.page_count or None)
@@ -364,9 +367,9 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
     if stable_retry_id is not None:
         with get_conn() as conn:
             conn.execute(
-                "UPDATE documents SET deactivated_at = datetime('now'), "
+                "UPDATE documents SET deactivated_at = now(), "
                 "status_reason = COALESCE(status_reason || ' | ', '') "
-                "|| 'Superseded: re-processing succeeded where a prior attempt did not.' WHERE id = ?",
+                "|| 'Superseded: re-processing succeeded where a prior attempt did not.' WHERE id = %s",
                 (stable_retry_id,),
             )
 
@@ -380,7 +383,7 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
     # --- Exact duplicate of an already-stored file ---
     with get_conn() as conn:
         dup_row = conn.execute(
-            "SELECT id, original_filename FROM documents WHERE sha256 = ? AND status IN ('indexed','partial') "
+            "SELECT id, original_filename FROM documents WHERE sha256 = %s AND status IN ('indexed','partial') "
             "AND deactivated_at IS NULL LIMIT 1",
             (sf.sha256,),
         ).fetchone()
@@ -389,16 +392,16 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
             cur = conn.execute(
                 "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
                 "file_type, sha256, byte_size, status, status_reason, duplicate_of, ingested_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'duplicate', ?, ?, datetime('now'))",
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, 'duplicate', %s, %s, now()) RETURNING id",
                 (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
                  sf.sha256, sf.byte_size,
                  f"Byte-identical to '{dup_row['original_filename']}' (document {dup_row['id']}).",
                  dup_row["id"]),
             )
-            doc_id = cur.lastrowid
+            doc_id = cur.fetchone()["id"]
             conn.execute(
                 "INSERT INTO duplicate_matches (kept_document_id, duplicate_document_id, match_type, similarity) "
-                "VALUES (?, ?, 'exact_hash', 1.0)",
+                "VALUES (%s, %s, 'exact_hash', 1.0)",
                 (dup_row["id"], doc_id),
             )
             detail = f"Byte-identical to '{dup_row['original_filename']}'. Not indexed for retrieval."
@@ -423,8 +426,8 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
                 cur = conn.execute(
                     "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
                     "file_type, sha256, byte_size, page_count, status, status_reason, ingested_at, "
-                    "deactivated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, datetime('now'), "
-                    "datetime('now'))",
+                    "deactivated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'failed', %s, now(), "
+                    "now()) RETURNING id",
                     (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
                      sf.sha256, sf.byte_size, extracted.page_count, reason),
                 )
@@ -433,11 +436,11 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
                 cur = conn.execute(
                     "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
                     "file_type, sha256, byte_size, page_count, status, status_reason, ingested_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?, datetime('now'))",
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'failed', %s, now()) RETURNING id",
                     (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
                      sf.sha256, sf.byte_size, extracted.page_count, reason),
                 )
-            doc_id = cur.lastrowid
+            doc_id = cur.fetchone()["id"]
             _record_event(conn, run_id, sf.filename, "failed", reason, doc_id)
         return FileOutcome(sf.filename, "failed", reason, doc_id)
 
@@ -472,47 +475,45 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
             "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
             "file_type, sha256, byte_size, page_count, manufacturer_id, doc_type, title, revision, "
             "doc_number, status, status_reason, extraction_version, chunking_version, ingested_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) "
+            "RETURNING id",
             (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
              sf.sha256, sf.byte_size, extracted.page_count, manu_id, meta.doc_type,
              meta.title, meta.revision, meta.doc_number, status,
              " | ".join(status_reason_parts) if status_reason_parts else None,
              CURRENT_EXTRACTION_VERSION, CURRENT_CHUNKING_VERSION),
         )
-        doc_id = cur.lastrowid
+        doc_id = cur.fetchone()["id"]
 
         for match in meta.machine_matches:
             machine_id = _get_or_create_machine(conn, match)
             conn.execute(
-                "INSERT OR IGNORE INTO document_machines (document_id, machine_id, confidence) "
-                "VALUES (?, ?, ?)",
+                "INSERT INTO document_machines (document_id, machine_id, confidence) "
+                "VALUES (%s, %s, %s) ON CONFLICT (document_id, machine_id) DO NOTHING",
                 (doc_id, machine_id, match.confidence),
             )
 
         for ordinal, ch in enumerate(chunks):
             conn.execute(
                 "INSERT INTO chunks (document_id, page_number, section_heading, chunk_type, "
-                "content, char_count, ordinal) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "content, char_count, ordinal) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (doc_id, ch.page_number, ch.section_heading, ch.chunk_type,
                  ch.content, len(ch.content), ordinal),
             )
-        conn.execute(
-            "INSERT INTO chunks_fts (rowid, content) "
-            "SELECT id, content FROM chunks WHERE document_id = ?",
-            (doc_id,),
-        )
+        # No SQLite chunks_fts sync step needed -- chunks.content_tsv is a
+        # Postgres GENERATED column, auto-maintained on every insert.
 
         if near:
             near_id, sim = near
             conn.execute(
                 "INSERT INTO duplicate_matches (kept_document_id, duplicate_document_id, match_type, similarity) "
-                "VALUES (?, ?, 'near_duplicate_content', ?)",
+                "VALUES (%s, %s, 'near_duplicate_content', %s)",
                 (near_id, doc_id, sim),
             )
             note = (f"Near-duplicate of document {near_id} (content similarity {sim:.2f}). "
                     "Both kept; revision comparison surfaces conflicts at answer time.")
             conn.execute(
-                "UPDATE documents SET status_reason = COALESCE(status_reason || ' | ', '') || ? WHERE id = ?",
+                "UPDATE documents SET status_reason = COALESCE(status_reason || ' | ', '') || %s WHERE id = %s",
                 (note, doc_id),
             )
             status_reason_parts.append(note)
@@ -557,8 +558,15 @@ def _embed_pending_chunks(batch_size: int = 64) -> int:
         with get_conn() as conn:
             for row, vec in zip(batch, vectors):
                 conn.execute(
-                    "INSERT OR REPLACE INTO embeddings (chunk_id, model_name, dim, vector) "
-                    "VALUES (?, ?, ?, ?)",
+                    # ON CONFLICT ... DO UPDATE (SQLite's INSERT OR REPLACE,
+                    # ported) against embeddings' own chunk_id PRIMARY KEY --
+                    # REPLACE semantics update in place rather than
+                    # delete-then-insert, which matters here since nothing
+                    # else references embeddings by a surrogate row id.
+                    "INSERT INTO embeddings (chunk_id, model_name, dim, vector) "
+                    "VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (chunk_id) DO UPDATE SET "
+                    "model_name = EXCLUDED.model_name, dim = EXCLUDED.dim, vector = EXCLUDED.vector",
                     (row["id"], model_name, len(vec), vector_to_blob(vec)),
                 )
         total += len(batch)

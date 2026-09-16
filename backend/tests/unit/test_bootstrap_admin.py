@@ -41,7 +41,7 @@ def test_rejects_short_password(test_env):
 def test_valid_credentials_succeed(test_env):
     user_id = bootstrap_admin("admin@example.com", "a-valid-password-123")
     with get_conn() as conn:
-        row = conn.execute("SELECT email, role FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = conn.execute("SELECT email, role FROM users WHERE id = %s", (user_id,)).fetchone()
     assert row["email"] == "admin@example.com"
     assert row["role"] == "administrator"
 

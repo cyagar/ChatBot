@@ -32,9 +32,9 @@ def _seed_two_ambiguous_machines(conn):
     """'Axiom' and 'Axiom Pro' both exact-word-match a question mentioning
     'Axiom Pro' -- \\bAxiom\\b matches inside 'Axiom Pro' too -- giving a
     real two-candidate clarification without relying on fuzzy matching."""
-    conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-    conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
-    conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (2, 1, 'Axiom Pro')")
+    conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+    conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+    conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom Pro')")
 
 
 def test_clarifying_options_persist_and_survive_reload_with_exact_equality(test_env):
@@ -66,8 +66,8 @@ def test_clarifying_message_with_no_matched_machine_persists_an_empty_list(test_
     also round-trip consistently -- an empty list live, an empty list on
     reload, not a NULL-vs-[] mismatch that would trip up the frontend."""
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
 
     register_test_user(client, "clarify2@example.com", role="technician")
     conv = client.post("/api/conversations", json={"machine_id": None}).json()

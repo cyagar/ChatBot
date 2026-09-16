@@ -14,6 +14,41 @@ def _register(email="tech1@example.com", password="password123"):
     return register_test_user(client, email, role="technician", password=password)
 
 
+_ANSWERABLE_QUESTION = "what does error E9 mean"
+
+
+def _seed_answerable_machine():
+    """P1-11 (independent follow-up review, applied 2026-09-14): feedback/save
+    are now restricted to a completed, substantive assistant answer -- an
+    unanswerable question (no machine/chunks seeded) produces a no-answer or
+    clarifying message, which is no longer a valid feedback/save target. This
+    seeds a real chunk plus relies on a code-token question (see
+    app/providers/extractive.py's _code_token_rescue -- no embeddings are
+    seeded here, so the vector-similarity gate alone would otherwise reject
+    every answer) so a conversation on machine_id=1 gets a genuine, eligible
+    completed answer."""
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES "
+            "('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
+            "'indexed', 'approved') RETURNING id"
+        )
+        doc_id = cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'approved')",
+            (doc_id,),
+        )
+        conn.execute(
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (%s, 4, 'text', "
+            "'ERROR CODE E9: indicates a tank heater fault. Check the thermistor circuit.', 90, 0)",
+            (doc_id,),
+        )
+
+
 def test_registration_without_invite_is_rejected(test_env):
     """Independent follow-up review P0-5: public self-registration used to
     always succeed (the first registrant even became administrator). Now a
@@ -23,7 +58,7 @@ def test_registration_without_invite_is_rejected(test_env):
     assert resp.status_code == 422
 
     with get_conn() as conn:
-        row = conn.execute("SELECT id FROM users WHERE email = ?", ("uninvited@example.com",)).fetchone()
+        row = conn.execute("SELECT id FROM users WHERE email = %s", ("uninvited@example.com",)).fetchone()
     assert row is None
 
 
@@ -34,7 +69,7 @@ def test_registration_with_bogus_invite_token_is_rejected(test_env):
     )
     assert resp.status_code == 403
     with get_conn() as conn:
-        row = conn.execute("SELECT id FROM users WHERE email = ?", ("nope@example.com",)).fetchone()
+        row = conn.execute("SELECT id FROM users WHERE email = %s", ("nope@example.com",)).fetchone()
     assert row is None
 
 
@@ -88,7 +123,7 @@ def test_duplicate_email_registration_rejected(test_env):
     ).json()
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO users (email, password_hash, role) VALUES (?, 'x', 'technician')",
+            "INSERT INTO users (email, password_hash, role) VALUES (%s, 'x', 'technician')",
             ("raceduplicate@example.com",),
         )
     client.post("/api/auth/logout")
@@ -172,9 +207,12 @@ def test_conversation_and_message_timestamps_carry_an_explicit_utc_offset(test_e
 
 def test_question_on_machine_with_no_manuals_is_honest_no_answer(test_env):
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
+        # RESTART IDENTITY (tests/conftest.py's test_env fixture) guarantees
+        # these come out as id=1 without needing to force an explicit value
+        # into the GENERATED ALWAYS AS IDENTITY column.
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
         conn.execute(
-            "INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')"
+            "INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')"
         )
 
     _register("tech4@example.com")
@@ -234,9 +272,10 @@ def test_concurrent_feedback_submission_does_not_crash_or_corrupt(test_env):
     UNIQUE(message_id, user_id)). This is a characterization test proving
     concurrent submission is merely safe -- no crash, no lost/merged row --
     not a test of deduplication, which was never the ask here."""
+    _seed_answerable_machine()
     _register("feedbackracer@example.com")
-    conv = client.post("/api/conversations", json={"machine_id": None}).json()
-    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test"}).json()
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": _ANSWERABLE_QUESTION}).json()
 
     responses = []
 
@@ -255,7 +294,7 @@ def test_concurrent_feedback_submission_does_not_crash_or_corrupt(test_env):
     assert all(r.status_code == 201 for r in responses), [r.status_code for r in responses]
 
     with get_conn() as conn:
-        rows = conn.execute("SELECT rating FROM feedback WHERE message_id = ?", (msg["id"],)).fetchall()
+        rows = conn.execute("SELECT rating FROM feedback WHERE message_id = %s", (msg["id"],)).fetchall()
     assert sorted(r["rating"] for r in rows) == ["helpful", "incorrect"]
 
 
@@ -266,9 +305,10 @@ def test_get_messages_reports_the_current_users_feedback_and_saved_state(test_en
     the buttons reset to unmarked and a re-tap silently duplicated the row.
     MessageOut.feedback_rating/is_saved is how a client rehydrates that
     state instead of re-deriving it -- this pins the contract."""
+    _seed_answerable_machine()
     _register("tech10@example.com")
-    conv = client.post("/api/conversations", json={"machine_id": None}).json()
-    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test"}).json()
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": _ANSWERABLE_QUESTION}).json()
 
     fresh = next(m for m in client.get(f"/api/conversations/{conv['id']}/messages").json() if m["id"] == msg["id"])
     assert fresh["feedback_rating"] is None
@@ -287,9 +327,10 @@ def test_get_messages_reports_the_most_recent_feedback_rating(test_env):
     reconsidering (helpful, then later incorrect) is an allowed, real case
     (see test_concurrent_feedback_submission_does_not_crash_or_corrupt).
     feedback_rating must report the latest judgment, not the first."""
+    _seed_answerable_machine()
     _register("tech11@example.com")
-    conv = client.post("/api/conversations", json={"machine_id": None}).json()
-    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test"}).json()
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": _ANSWERABLE_QUESTION}).json()
 
     client.post(f"/api/messages/{msg['id']}/feedback", json={"rating": "helpful"})
     client.post(f"/api/messages/{msg['id']}/feedback", json={"rating": "incorrect"})
@@ -304,9 +345,10 @@ def test_save_answer_twice_is_idempotent(test_env):
     (user_id, message_id). Unlike feedback, a duplicate save carries no new
     information, so this is enforced as a real UNIQUE constraint + INSERT OR
     IGNORE (migration 0011), not an append-only log."""
+    _seed_answerable_machine()
     _register("tech12@example.com")
-    conv = client.post("/api/conversations", json={"machine_id": None}).json()
-    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test"}).json()
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": _ANSWERABLE_QUESTION}).json()
 
     first = client.post(f"/api/messages/{msg['id']}/save")
     second = client.post(f"/api/messages/{msg['id']}/save")
@@ -314,7 +356,7 @@ def test_save_answer_twice_is_idempotent(test_env):
     assert second.status_code == 201
 
     with get_conn() as conn:
-        rows = conn.execute("SELECT id FROM saved_answers WHERE message_id = ?", (msg["id"],)).fetchall()
+        rows = conn.execute("SELECT id FROM saved_answers WHERE message_id = %s", (msg["id"],)).fetchall()
     assert len(rows) == 1
 
 
@@ -343,7 +385,7 @@ def test_duplicate_idempotency_key_returns_the_original_reply_not_a_new_turn(tes
 
     with get_conn() as conn:
         user_rows = conn.execute(
-            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user'", (conv["id"],)
+            "SELECT id FROM messages WHERE conversation_id = %s AND role = 'user'", (conv["id"],)
         ).fetchall()
     assert len(user_rows) == 1
 
@@ -371,7 +413,7 @@ def test_different_idempotency_keys_create_separate_turns(test_env):
 
     with get_conn() as conn:
         user_rows = conn.execute(
-            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user'", (conv["id"],)
+            "SELECT id FROM messages WHERE conversation_id = %s AND role = 'user'", (conv["id"],)
         ).fetchall()
     assert len(user_rows) == 2
 
@@ -392,7 +434,7 @@ def test_missing_idempotency_key_behaves_exactly_as_before(test_env):
 
     with get_conn() as conn:
         user_rows = conn.execute(
-            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user'", (conv["id"],)
+            "SELECT id FROM messages WHERE conversation_id = %s AND role = 'user'", (conv["id"],)
         ).fetchall()
     assert len(user_rows) == 2
 
@@ -438,15 +480,16 @@ def test_concurrent_duplicate_idempotency_key_never_creates_two_user_turns(test_
 
     with get_conn() as conn:
         user_rows = conn.execute(
-            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user'", (conv["id"],)
+            "SELECT id FROM messages WHERE conversation_id = %s AND role = 'user'", (conv["id"],)
         ).fetchall()
     assert len(user_rows) == 1
 
 
 def test_save_and_list_saved_answer_roundtrip(test_env):
+    _seed_answerable_machine()
     _register("tech7@example.com")
-    conv = client.post("/api/conversations", json={"machine_id": None}).json()
-    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "test question"}).json()
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": _ANSWERABLE_QUESTION}).json()
 
     save_resp = client.post(f"/api/messages/{msg['id']}/save")
     assert save_resp.status_code == 201
@@ -460,7 +503,7 @@ def test_save_and_list_saved_answer_roundtrip(test_env):
     # conversation it belongs to and the question that produced it, not just
     # the bare answer text.
     assert entry["conversation_id"] == conv["id"]
-    assert entry["question"] == "test question"
+    assert entry["question"] == _ANSWERABLE_QUESTION
 
 
 def test_list_conversations_derives_a_title_from_the_first_user_message(test_env):
@@ -495,8 +538,11 @@ def test_list_conversations_omits_conversations_with_no_questions_asked(test_env
 
 def test_confirm_machine_endpoint_sets_and_persists_machine(test_env):
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (id, name) VALUES (1, 'Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (id, manufacturer_id, model_name) VALUES (1, 1, 'Axiom')")
+        # RESTART IDENTITY (tests/conftest.py's test_env fixture) guarantees
+        # these come out as id=1 without needing to force an explicit value
+        # into the GENERATED ALWAYS AS IDENTITY column.
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
 
     _register("tech8@example.com")
     conv = client.post("/api/conversations", json={"machine_id": None}).json()

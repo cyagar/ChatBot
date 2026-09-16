@@ -15,7 +15,12 @@ class Settings(BaseSettings):
 
     storage_backend: str = "local"
     local_storage_dir: str = "../data/object_storage"
-    db_path: str = "../data/db/app.db"
+
+    # Postgres (Neon). Pooled for normal app traffic; unpooled (direct) for
+    # schema migrations, which need session-level BEGIN/COMMIT semantics that
+    # PgBouncer transaction pooling doesn't support -- see app/db.py.
+    database_url: str = ""
+    database_url_unpooled: str = ""
 
     # Google Drive is the only document source (2026-08-21: local-directory
     # ingestion and the direct-upload path were retired entirely).
@@ -109,6 +114,12 @@ class Settings(BaseSettings):
         if self.ai_provider not in {"local_extractive", "anthropic", "openai"}:
             raise RuntimeError(f"Unknown AI_PROVIDER: {self.ai_provider!r}")
 
+        if not self.database_url or not self.database_url_unpooled:
+            raise RuntimeError(
+                "DATABASE_URL / DATABASE_URL_UNPOOLED are not set -- there is no database to "
+                "connect to."
+            )
+
         # P1-2's "production can boot with the wrong source" half is already
         # structurally impossible: there is no DOCUMENT_SOURCE setting any
         # more, and get_document_source() (app/ingestion/sources.py) can only
@@ -166,11 +177,6 @@ class Settings(BaseSettings):
                 f"Google credential at {path} has type={data.get('type')!r}, expected "
                 "'service_account' (an OAuth client-secret file will not work here)."
             )
-
-    @property
-    def db_path_resolved(self) -> Path:
-        p = Path(self.db_path)
-        return p if p.is_absolute() else (BACKEND_DIR / p).resolve()
 
     @property
     def local_storage_dir_resolved(self) -> Path:

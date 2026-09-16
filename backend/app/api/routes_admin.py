@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, Field, field_serializer
 
 from app.api.common import iso_utc
@@ -39,20 +39,22 @@ class DocumentOut(BaseModel):
     is_current_revision: bool
     machines: list[str]
     machine_ids: list[int]
-    ingested_at: str | None
+    # Postgres TIMESTAMPTZ columns come back from psycopg as real datetimes,
+    # not strings -- iso_utc() (app/api/common.py) accepts either.
+    ingested_at: datetime | None
     review_status: str
-    reviewed_at: str | None
+    reviewed_at: datetime | None
     needs_reprocessing: bool
 
     @field_serializer("ingested_at", "reviewed_at")
-    def _ser_ts(self, v: str | None) -> str | None:
+    def _ser_ts(self, v: datetime | None) -> str | None:
         return iso_utc(v)
 
 
 def _row_to_document(conn, row) -> DocumentOut:
     machines = conn.execute(
         "SELECT m.id, m.model_name, dm.confidence FROM document_machines dm "
-        "JOIN machines m ON m.id = dm.machine_id WHERE dm.document_id = ? ORDER BY m.model_name",
+        "JOIN machines m ON m.id = dm.machine_id WHERE dm.document_id = %s ORDER BY m.model_name",
         (row["id"],),
     ).fetchall()
     return DocumentOut(
@@ -119,10 +121,12 @@ def list_documents(
     if not include_deactivated:
         sql += " AND d.deactivated_at IS NULL"
     if status_filter:
-        sql += " AND d.status = ?"
+        sql += " AND d.status = %s"
         params.append(status_filter)
     if q:
-        sql += " AND d.original_filename LIKE ?"
+        # ILIKE, not LIKE -- see routes_machines.py's search_machines() for
+        # why (SQLite's LIKE is case-insensitive by default, Postgres's isn't).
+        sql += " AND d.original_filename ILIKE %s"
         params.append(f"%{q}%")
     sql += " ORDER BY d.created_at DESC"
     with get_conn() as conn:
@@ -143,40 +147,59 @@ class MetadataCorrection(BaseModel):
 @router.patch("/documents/{document_id}", response_model=DocumentOut)
 def correct_metadata(document_id: int, payload: MetadataCorrection, admin: CurrentUser = Depends(require_admin)):
     with get_conn() as conn:
-        doc = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
+        doc = conn.execute("SELECT * FROM documents WHERE id = %s", (document_id,)).fetchone()
         if not doc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found.")
 
         def _log(field: str, previous, new_value):
             conn.execute(
                 "INSERT INTO metadata_overrides (document_id, field, previous_value, corrected_value, "
-                "corrected_by, reason) VALUES (?, ?, ?, ?, ?, ?)",
+                "corrected_by, reason) VALUES (%s, %s, %s, %s, %s, %s)",
                 (document_id, field, str(previous) if previous is not None else None, str(new_value),
                  admin.email, payload.reason),
             )
 
         if payload.manufacturer_name is not None:
-            manu = conn.execute("SELECT id FROM manufacturers WHERE name = ?", (payload.manufacturer_name,)).fetchone()
-            manu_id = manu["id"] if manu else conn.execute(
-                "INSERT INTO manufacturers (name) VALUES (?)", (payload.manufacturer_name,)
-            ).lastrowid
+            manu = conn.execute("SELECT id FROM manufacturers WHERE name = %s", (payload.manufacturer_name,)).fetchone()
+            if manu:
+                manu_id = manu["id"]
+            else:
+                manu_id = conn.execute(
+                    "INSERT INTO manufacturers (name) VALUES (%s) RETURNING id", (payload.manufacturer_name,)
+                ).fetchone()["id"]
             _log("manufacturer", doc["manufacturer_id"], manu_id)
-            conn.execute("UPDATE documents SET manufacturer_id = ? WHERE id = ?", (manu_id, document_id))
+            conn.execute("UPDATE documents SET manufacturer_id = %s WHERE id = %s", (manu_id, document_id))
 
         for field in ("doc_type", "title", "revision"):
             new_value = getattr(payload, field)
             if new_value is not None:
                 _log(field, doc[field], new_value)
-                conn.execute(f"UPDATE documents SET {field} = ? WHERE id = ?", (new_value, document_id))
+                conn.execute(f"UPDATE documents SET {field} = %s WHERE id = %s", (new_value, document_id))
 
         if payload.is_current_revision is not None:
             _log("is_current_revision", doc["is_current_revision"], payload.is_current_revision)
             conn.execute(
-                "UPDATE documents SET is_current_revision = ? WHERE id = ?",
-                (int(payload.is_current_revision), document_id),
+                "UPDATE documents SET is_current_revision = %s WHERE id = %s",
+                (payload.is_current_revision, document_id),
             )
 
         if payload.machine_ids is not None:
+            # P1-11 (independent follow-up review): machine_ids used to reach
+            # document_machines' INSERT unvalidated -- an admin typo/stale ID
+            # hit the foreign key and surfaced as an unhandled 500 instead of
+            # a clean 4xx naming the bad id.
+            if payload.machine_ids:
+                found = {
+                    r["id"] for r in conn.execute(
+                        "SELECT id FROM machines WHERE id = ANY(%s)", (payload.machine_ids,)
+                    ).fetchall()
+                }
+                missing = sorted(set(payload.machine_ids) - found)
+                if missing:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Unknown machine_ids: {missing}",
+                    )
             _log("machine_links", None, payload.machine_ids)
             # An admin setting links here IS the human review those links get
             # (independent follow-up review P0-6) -- insert them pre-approved
@@ -185,18 +208,19 @@ def correct_metadata(document_id: int, payload: MetadataCorrection, admin: Curre
             # Deliberately clears any prior 'rejected' rows for this document
             # too: the admin is explicitly overriding whatever review state
             # existed before, not appending to it.
-            conn.execute("DELETE FROM document_machines WHERE document_id = ?", (document_id,))
+            conn.execute("DELETE FROM document_machines WHERE document_id = %s", (document_id,))
             for mid in payload.machine_ids:
                 conn.execute(
-                    "INSERT OR IGNORE INTO document_machines "
+                    "INSERT INTO document_machines "
                     "(document_id, machine_id, confidence, review_status, reviewed_by, reviewed_at) "
-                    "VALUES (?, ?, 1.0, 'approved', ?, datetime('now'))",
+                    "VALUES (%s, %s, 1.0, 'approved', %s, now()) "
+                    "ON CONFLICT (document_id, machine_id) DO NOTHING",
                     (document_id, mid, admin.id),
                 )
 
         row = conn.execute(
             "SELECT d.*, mf.name AS manufacturer FROM documents d "
-            "LEFT JOIN manufacturers mf ON mf.id = d.manufacturer_id WHERE d.id = ?",
+            "LEFT JOIN manufacturers mf ON mf.id = d.manufacturer_id WHERE d.id = %s",
             (document_id,),
         ).fetchone()
         return _row_to_document(conn, row)
@@ -207,8 +231,8 @@ def deactivate_document(document_id: int, reason: str = "Deactivated by administ
                          admin: CurrentUser = Depends(require_admin)):
     with get_conn() as conn:
         result = conn.execute(
-            "UPDATE documents SET deactivated_at = datetime('now'), "
-            "status_reason = COALESCE(status_reason || ' | ', '') || ? WHERE id = ? AND deactivated_at IS NULL",
+            "UPDATE documents SET deactivated_at = now(), "
+            "status_reason = COALESCE(status_reason || ' | ', '') || %s WHERE id = %s AND deactivated_at IS NULL",
             (reason, document_id),
         )
         if result.rowcount == 0:
@@ -240,11 +264,11 @@ class ReviewQueueDocumentOut(BaseModel):
     title: str | None
     status: str
     review_status: str
-    ingested_at: str | None
+    ingested_at: datetime | None
     links: list[PendingLinkOut]
 
     @field_serializer("ingested_at")
-    def _ser_ts(self, v: str | None) -> str | None:
+    def _ser_ts(self, v: datetime | None) -> str | None:
         return iso_utc(v)
 
 
@@ -253,7 +277,17 @@ def review_queue(admin: CurrentUser = Depends(require_admin)):
     """Every active document that either isn't approved itself, or has at
     least one non-approved (pending/rejected) machine link -- the second half
     matters even for an already-approved document, since a re-index can
-    propose a *new* link on an existing approved document at any time."""
+    propose a *new* link on an existing approved document at any time.
+
+    P1-12 (independent follow-up review): an approved document with ZERO
+    machine links used to disappear from this queue even though it's
+    unretrievable (retrieval requires an approved link too) -- the LEFT JOIN
+    leaves dm.review_status NULL for such a document, and plain
+    `dm.review_status != 'approved'` evaluates to NULL (not TRUE) against a
+    NULL, so `d.review_status != 'approved' OR dm.review_status != 'approved'`
+    was FALSE OR NULL = NULL, which WHERE treats as excluded. IS DISTINCT FROM
+    is NULL-safe: NULL IS DISTINCT FROM 'approved' is TRUE, so a zero-link
+    approved document is correctly included."""
     with get_conn() as conn:
         docs = conn.execute(
             "SELECT DISTINCT d.id, d.original_filename, d.doc_type, mf.name AS manufacturer, "
@@ -262,7 +296,7 @@ def review_queue(admin: CurrentUser = Depends(require_admin)):
             "LEFT JOIN manufacturers mf ON mf.id = d.manufacturer_id "
             "LEFT JOIN document_machines dm ON dm.document_id = d.id "
             "WHERE d.deactivated_at IS NULL "
-            "AND (d.review_status != 'approved' OR dm.review_status != 'approved') "
+            "AND (d.review_status != 'approved' OR dm.review_status IS DISTINCT FROM 'approved') "
             "ORDER BY d.ingested_at DESC"
         ).fetchall()
         out = []
@@ -273,7 +307,7 @@ def review_queue(admin: CurrentUser = Depends(require_admin)):
                 "FROM document_machines dm "
                 "JOIN machines m ON m.id = dm.machine_id "
                 "JOIN manufacturers mf ON mf.id = m.manufacturer_id "
-                "WHERE dm.document_id = ? ORDER BY dm.review_status, m.model_name",
+                "WHERE dm.document_id = %s ORDER BY dm.review_status, m.model_name",
                 (d["id"],),
             ).fetchall()
             out.append(ReviewQueueDocumentOut(
@@ -324,13 +358,13 @@ def review_document(document_id: int, payload: DocumentReviewRequest, admin: Cur
     there."""
     with get_conn() as conn:
         doc = conn.execute(
-            "SELECT id, source_ref FROM documents WHERE id = ? AND deactivated_at IS NULL", (document_id,)
+            "SELECT id, source_ref FROM documents WHERE id = %s AND deactivated_at IS NULL", (document_id,)
         ).fetchone()
         if not doc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found or deactivated.")
         claim = conn.execute(
-            "UPDATE documents SET review_status = ?, reviewed_by = ?, reviewed_at = datetime('now'), "
-            "review_note = ? WHERE id = ? AND deactivated_at IS NULL",
+            "UPDATE documents SET review_status = %s, reviewed_by = %s, reviewed_at = now(), "
+            "review_note = %s WHERE id = %s AND deactivated_at IS NULL",
             (payload.decision, admin.id, payload.note, document_id),
         )
         if claim.rowcount == 0:
@@ -342,10 +376,10 @@ def review_document(document_id: int, payload: DocumentReviewRequest, admin: Cur
 
         if payload.decision == "approved":
             superseded = conn.execute(
-                "UPDATE documents SET deactivated_at = datetime('now'), "
+                "UPDATE documents SET deactivated_at = now(), "
                 "status_reason = COALESCE(status_reason || ' | ', '') "
-                "|| 'Superseded: document ' || ? || ' was approved at this source path.' "
-                "WHERE source_ref = ? AND id != ? AND deactivated_at IS NULL",
+                "|| 'Superseded: document ' || %s::text || ' was approved at this source path.' "
+                "WHERE source_ref = %s AND id != %s AND deactivated_at IS NULL",
                 (document_id, doc["source_ref"], document_id),
             )
             if superseded.rowcount:
@@ -365,8 +399,8 @@ def review_document_machine_link(document_id: int, machine_id: int, payload: Lin
                                   admin: CurrentUser = Depends(require_admin)):
     with get_conn() as conn:
         result = conn.execute(
-            "UPDATE document_machines SET review_status = ?, reviewed_by = ?, reviewed_at = datetime('now') "
-            "WHERE document_id = ? AND machine_id = ?",
+            "UPDATE document_machines SET review_status = %s, reviewed_by = %s, reviewed_at = now() "
+            "WHERE document_id = %s AND machine_id = %s",
             (payload.decision, admin.id, document_id, machine_id),
         )
         if result.rowcount == 0:
@@ -396,14 +430,17 @@ class InvitationOut(BaseModel):
     id: int
     email: str
     role: str
-    created_at: str
-    expires_at: str
-    used_at: str | None
-    revoked_at: str | None
+    # Postgres TIMESTAMPTZ columns come back from psycopg as real datetimes,
+    # not strings -- iso_utc() (app/api/common.py) accepts either and always
+    # renders a string, which is what actually goes over the wire.
+    created_at: datetime
+    expires_at: datetime
+    used_at: datetime | None
+    revoked_at: datetime | None
     token: str | None = None  # only populated once, in the create response
 
     @field_serializer("created_at", "expires_at", "used_at", "revoked_at")
-    def _ser_ts(self, v: str | None) -> str | None:
+    def _ser_ts(self, v: datetime | None) -> str | None:
         return iso_utc(v)
 
 
@@ -423,20 +460,23 @@ def _check_invite_domain_allowed(email: str) -> None:
 def create_invitation(payload: InvitationCreate, admin: CurrentUser = Depends(require_admin)):
     _check_invite_domain_allowed(payload.email)
     raw_token, token_hash = generate_invitation_token()
-    expires_at = (datetime.now(timezone.utc) + timedelta(hours=payload.expires_in_hours)).isoformat()
+    # A real datetime, not .isoformat() -- psycopg adapts TIMESTAMPTZ params
+    # natively, and iso_utc() (app/api/common.py) now accepts either.
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=payload.expires_in_hours)
 
     with get_conn() as conn:
-        existing_user = conn.execute("SELECT id FROM users WHERE email = ?", (payload.email,)).fetchone()
+        existing_user = conn.execute("SELECT id FROM users WHERE email = %s", (payload.email,)).fetchone()
         if existing_user:
             raise HTTPException(status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
         cur = conn.execute(
-            "INSERT INTO invitations (token_hash, email, role, created_by, expires_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO invitations (token_hash, email, role, created_by, expires_at) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
             (token_hash, payload.email, payload.role, admin.id, expires_at),
         )
-        invite_id = cur.lastrowid
+        invite_id = cur.fetchone()["id"]
         log_audit_event(conn, "invite_created", actor_user_id=admin.id, target_type="invitation",
                          target_id=invite_id, detail=f"role={payload.role} email={payload.email}")
-        row = conn.execute("SELECT * FROM invitations WHERE id = ?", (invite_id,)).fetchone()
+        row = conn.execute("SELECT * FROM invitations WHERE id = %s", (invite_id,)).fetchone()
 
     return InvitationOut(
         id=row["id"], email=row["email"], role=row["role"], created_at=row["created_at"],
@@ -446,10 +486,10 @@ def create_invitation(payload: InvitationCreate, admin: CurrentUser = Depends(re
 
 
 @router.get("/invitations", response_model=list[InvitationOut])
-def list_invitations(admin: CurrentUser = Depends(require_admin), limit: int = 50):
+def list_invitations(admin: CurrentUser = Depends(require_admin), limit: int = Query(default=50, ge=1, le=200)):
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM invitations ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT * FROM invitations ORDER BY id DESC LIMIT %s", (limit,)
         ).fetchall()
     return [
         InvitationOut(id=r["id"], email=r["email"], role=r["role"], created_at=r["created_at"],
@@ -462,8 +502,8 @@ def list_invitations(admin: CurrentUser = Depends(require_admin), limit: int = 5
 def revoke_invitation(invitation_id: int, admin: CurrentUser = Depends(require_admin)):
     with get_conn() as conn:
         result = conn.execute(
-            "UPDATE invitations SET revoked_at = datetime('now') "
-            "WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL",
+            "UPDATE invitations SET revoked_at = now() "
+            "WHERE id = %s AND used_at IS NULL AND revoked_at IS NULL",
             (invitation_id,),
         )
         if result.rowcount == 0:
@@ -477,11 +517,11 @@ class UserOut(BaseModel):
     role: str
     display_name: str | None
     is_disabled: bool
-    created_at: str
-    last_login_at: str | None
+    created_at: datetime
+    last_login_at: datetime | None
 
     @field_serializer("created_at", "last_login_at")
-    def _ser_ts(self, v: str | None) -> str | None:
+    def _ser_ts(self, v: datetime | None) -> str | None:
         return iso_utc(v)
 
 
@@ -506,8 +546,8 @@ def disable_user(user_id: int, admin: CurrentUser = Depends(require_admin)):
         # to this user, even ones that haven't expired yet (P0-5's "session
         # revocation" requirement) -- see app/auth/deps.py's tv check.
         result = conn.execute(
-            "UPDATE users SET is_disabled = 1, disabled_at = datetime('now'), "
-            "token_version = token_version + 1 WHERE id = ? AND is_disabled = 0",
+            "UPDATE users SET is_disabled = true, disabled_at = now(), "
+            "token_version = token_version + 1 WHERE id = %s AND is_disabled = false",
             (user_id,),
         )
         if result.rowcount == 0:
@@ -520,7 +560,7 @@ def disable_user(user_id: int, admin: CurrentUser = Depends(require_admin)):
 def enable_user(user_id: int, admin: CurrentUser = Depends(require_admin)):
     with get_conn() as conn:
         result = conn.execute(
-            "UPDATE users SET is_disabled = 0, disabled_at = NULL WHERE id = ? AND is_disabled = 1",
+            "UPDATE users SET is_disabled = false, disabled_at = NULL WHERE id = %s AND is_disabled = true",
             (user_id,),
         )
         if result.rowcount == 0:
@@ -548,23 +588,23 @@ def trigger_reindex(background_tasks: BackgroundTasks, admin: CurrentUser = Depe
     if _INGEST_LOCK.locked():
         raise HTTPException(status.HTTP_409_CONFLICT, detail="An ingestion run is already in progress.")
     with get_conn() as conn:
-        cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', 'manual')")
-        run_id = cur.lastrowid
+        cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', 'manual') RETURNING id")
+        run_id = cur.fetchone()["id"]
     background_tasks.add_task(ingest_all, run_id=run_id)
     return {"ok": True, "detail": "Re-index started in the background.", "run_id": run_id}
 
 
 @router.get("/ingestion/runs")
-def list_ingestion_runs(admin: CurrentUser = Depends(require_admin), limit: int = 10):
+def list_ingestion_runs(admin: CurrentUser = Depends(require_admin), limit: int = Query(default=10, ge=1, le=200)):
     with get_conn() as conn:
         runs = conn.execute(
-            "SELECT id, started_at, finished_at, status, trigger FROM ingestion_runs ORDER BY id DESC LIMIT ?",
+            "SELECT id, started_at, finished_at, status, trigger FROM ingestion_runs ORDER BY id DESC LIMIT %s",
             (limit,),
         ).fetchall()
         out = []
         for r in runs:
             counts = conn.execute(
-                "SELECT event, COUNT(*) c FROM ingestion_events WHERE run_id = ? GROUP BY event", (r["id"],)
+                "SELECT event, COUNT(*) c FROM ingestion_events WHERE run_id = %s GROUP BY event", (r["id"],)
             ).fetchall()
             out.append({
                 "id": r["id"], "started_at": iso_utc(r["started_at"]), "finished_at": iso_utc(r["finished_at"]),
@@ -601,7 +641,10 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
     hours_since_last_success = None
     is_stale = True
     if last_success is not None:
-        finished = datetime.fromisoformat(last_success["finished_at"]).replace(tzinfo=timezone.utc)
+        # finished_at is already a tz-aware datetime -- Postgres TIMESTAMPTZ,
+        # not SQLite's naive TEXT timestamp that needed fromisoformat() plus
+        # an explicit UTC tzinfo attached by hand.
+        finished = last_success["finished_at"]
         hours_since_last_success = (datetime.now(timezone.utc) - finished).total_seconds() / 3600
         is_stale = hours_since_last_success > settings.ingestion_staleness_threshold_hours
 
@@ -633,12 +676,12 @@ def get_ingestion_report(run_id: int, admin: CurrentUser = Depends(require_admin
     """The plan's required ingestion report: every source file as indexed,
     duplicate, partially processed, failed, or unsupported, with a reason."""
     with get_conn() as conn:
-        run = conn.execute("SELECT * FROM ingestion_runs WHERE id = ?", (run_id,)).fetchone()
+        run = conn.execute("SELECT * FROM ingestion_runs WHERE id = %s", (run_id,)).fetchone()
         if not run:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Run not found.")
         events = conn.execute(
             "SELECT original_filename, event, detail, document_id FROM ingestion_events "
-            "WHERE run_id = ? ORDER BY id",
+            "WHERE run_id = %s ORDER BY id",
             (run_id,),
         ).fetchall()
     return {
@@ -707,20 +750,20 @@ def query_test(payload: QueryTestRequest, admin: CurrentUser = Depends(require_a
 # ---------------------------------------------------------------------------
 
 @router.get("/feedback")
-def list_feedback(admin: CurrentUser = Depends(require_admin), limit: int = 100):
+def list_feedback(admin: CurrentUser = Depends(require_admin), limit: int = Query(default=100, ge=1, le=500)):
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT f.id, f.rating, f.comment, f.created_at, u.email AS user_email, "
             "m.content AS question_or_answer, m.conversation_id "
             "FROM feedback f JOIN users u ON u.id = f.user_id JOIN messages m ON m.id = f.message_id "
-            "ORDER BY f.created_at DESC LIMIT ?",
+            "ORDER BY f.created_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
 @router.get("/unanswered")
-def frequently_unanswered(admin: CurrentUser = Depends(require_admin), limit: int = 50):
+def frequently_unanswered(admin: CurrentUser = Depends(require_admin), limit: int = Query(default=50, ge=1, le=200)):
     """Questions the system explicitly could not answer (is_no_answer=1 on the
     assistant's reply), most recent first — surfaces gaps in manual coverage."""
     with get_conn() as conn:
@@ -730,8 +773,8 @@ def frequently_unanswered(admin: CurrentUser = Depends(require_admin), limit: in
             "JOIN messages prev ON prev.conversation_id = m.conversation_id AND prev.id = ("
             "  SELECT MAX(id) FROM messages WHERE conversation_id = m.conversation_id AND id < m.id AND role='user'"
             ") "
-            "WHERE m.role = 'assistant' AND m.is_no_answer = 1 "
-            "ORDER BY m.created_at DESC LIMIT ?",
+            "WHERE m.role = 'assistant' AND m.is_no_answer = true "
+            "ORDER BY m.created_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
