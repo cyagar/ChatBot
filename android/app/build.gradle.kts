@@ -31,6 +31,22 @@ val releaseBaseUrl = resolveBaseUrl(
     "techManual.baseUrl.release", "TECHMANUAL_BASE_URL_RELEASE", releaseBaseUrlPlaceholder
 )
 
+// Release signing key. Same local.properties-or-env-var pattern as BASE_URL
+// above -- never committed (android/.gitignore blocks /keystore/, *.jks,
+// *.keystore), so a release build fails loudly (verifyReleaseSigningConfig
+// below) rather than silently falling back to an ad-hoc debug-style key.
+// Losing this key permanently is worse than never having built a release at
+// all: every future update needs the SAME key to install over an existing
+// one, so back up android/keystore/release.jks and its passwords somewhere
+// durable outside this machine, not just here.
+fun resolveSigningProperty(propertyKey: String, envVar: String): String? =
+    (System.getenv(envVar) ?: localProperties.getProperty(propertyKey))?.trim()?.ifEmpty { null }
+
+val releaseStoreFilePath = resolveSigningProperty("techManual.release.storeFile", "TECHMANUAL_RELEASE_STORE_FILE")
+val releaseStorePassword = resolveSigningProperty("techManual.release.storePassword", "TECHMANUAL_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = resolveSigningProperty("techManual.release.keyAlias", "TECHMANUAL_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = resolveSigningProperty("techManual.release.keyPassword", "TECHMANUAL_RELEASE_KEY_PASSWORD")
+
 android {
     namespace = "com.hmwagner.techmanual"
     compileSdk = 37
@@ -46,6 +62,23 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        // Only registered when every value is actually present, so a
+        // debug-only checkout (no keystore, nothing in local.properties)
+        // never fails Gradle sync -- verifyReleaseSigningConfig below is
+        // what turns "unconfigured" into a build failure, and only for
+        // assembleRelease/bundleRelease specifically.
+        if (releaseStoreFilePath != null && releaseStorePassword != null &&
+            releaseKeyAlias != null && releaseKeyPassword != null) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFilePath)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -58,6 +91,7 @@ android {
         release {
             isMinifyEnabled = false
             buildConfigField("String", "BASE_URL", "\"$releaseBaseUrl\"")
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
 
@@ -96,8 +130,19 @@ tasks.register("verifyReleaseBaseUrl") {
     }
 }
 
+tasks.register("verifyReleaseSigningConfig") {
+    doLast {
+        check(android.signingConfigs.findByName("release") != null) {
+            "Release signing is not configured. Set techManual.release.storeFile/" +
+                "storePassword/keyAlias/keyPassword in local.properties (or the matching " +
+                "TECHMANUAL_RELEASE_* environment variables) before building a release " +
+                "variant -- see local.properties.example."
+        }
+    }
+}
+
 tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
-    dependsOn("verifyReleaseBaseUrl")
+    dependsOn("verifyReleaseBaseUrl", "verifyReleaseSigningConfig")
 }
 
 dependencies {

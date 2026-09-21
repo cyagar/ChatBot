@@ -18,3 +18,20 @@
 # endpoint, so a placeholder can never ship silently.
 # Env var override: TECHMANUAL_BASE_URL_RELEASE
 # techManual.baseUrl.release=https://api.example.com/
+
+# Release signing key. All four required together, or assembleRelease/
+# bundleRelease fail loudly (verifyReleaseSigningConfig) rather than
+# silently falling back to an unsigned/debug-style build. storeFile is
+# resolved relative to the android/ project root. Generate a keystore with:
+#   keytool -genkeypair -keystore android/keystore/release.jks \
+#     -alias <your-alias> -keyalg RSA -keysize 2048 -validity 10000
+# Never commit the keystore file itself (android/.gitignore already blocks
+# /keystore/, *.jks, *.keystore) -- back it up somewhere durable outside
+# this machine, since losing it means no future update can ever replace an
+# already-installed release build.
+# Env var overrides: TECHMANUAL_RELEASE_STORE_FILE, TECHMANUAL_RELEASE_STORE_PASSWORD,
+#                     TECHMANUAL_RELEASE_KEY_ALIAS, TECHMANUAL_RELEASE_KEY_PASSWORD
+# techManual.release.storeFile=keystore/release.jks
+# techManual.release.storePassword=
+# techManual.release.keyAlias=
+# techManual.release.keyPassword=

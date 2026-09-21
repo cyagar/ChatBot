@@ -8,3 +8,10 @@
 /captures
 .externalNativeBuild
 .cxx
+
+# Release signing key -- never commit. Losing this file means every future
+# release build produces an APK Android treats as a different app; an
+# update built with a different key can never install over an existing one.
+/keystore/
+*.jks
+*.keystore
