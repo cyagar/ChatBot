@@ -35,8 +35,8 @@ Edit `backend/.env`:
 
 - `AI_PROVIDER` — `local_extractive` (default, no API key needed, returns
   verbatim manual passages with citations — zero hallucination risk by
-  construction) or `anthropic`/`openai` (set the matching `*_API_KEY` for
-  generated, synthesized answers).
+  construction) or `anthropic` (set `ANTHROPIC_API_KEY` for generated,
+  synthesized answers).
 - `TESSERACT_CMD` — set if you installed Tesseract and want scanned pages
   indexed.
 - `GOOGLE_DRIVE_FOLDER_ID`/`GOOGLE_SERVICE_ACCOUNT_JSON_PATH` — required to
@@ -142,9 +142,11 @@ this is just so a repeat listing doesn't re-download unchanged files).
 
 ## Deployment
 
-`docker-compose.yml` containers the app as built (SQLite-backed). See
-`docs/ARCHITECTURE.md` for the documented (not yet implemented) path to
-Postgres+pgvector for a multi-instance production deployment.
+`docker-compose.yml` containers the app as built. The database is
+Postgres/Neon (`DATABASE_URL`/`DATABASE_URL_UNPOOLED` in `backend/.env`, not
+containerized); object storage and the Drive download cache stay on local
+disk under `./data`. See `docs/ARCHITECTURE.md` for the broader
+production-architecture roadmap (durable job queue, multi-instance scaling).
 
 ```bash
 docker compose up --build

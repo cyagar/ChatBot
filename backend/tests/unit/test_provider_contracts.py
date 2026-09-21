@@ -5,15 +5,15 @@ responses, retries, token budgets, model retirement, safety fallback, and
 request cancellation."
 
 Every network call here is mocked -- these test the CONTRACT between this
-codebase and the anthropic/openai SDKs (which exceptions map to which
+codebase and the anthropic SDK (which exceptions map to which
 ProviderError, how many attempts happen, what shape a response must have),
 not live model behavior. AI_PROVIDER stays local_extractive for the rest of
 the test suite (see docs/PRODUCTION_READINESS.md); these tests construct
-AnthropicProvider/OpenAIProvider directly, bypassing the AI_PROVIDER-gated
-factory entirely.
+AnthropicProvider directly, bypassing the AI_PROVIDER-gated factory
+entirely.
 
 Also covers "no manual content may be sent to an unapproved provider":
-get_provider() only ever returns one of exactly three hardcoded classes
+get_provider() only ever returns one of exactly two hardcoded classes
 (app/providers/factory.py), and Settings.validate_for_startup() refuses to
 start on any AI_PROVIDER value outside that fixed set -- there is no
 runtime path to a dynamically-configured or unapproved provider.
@@ -56,7 +56,7 @@ def _resp(status_code):
 
 
 def _clear_ambient_proxy_env(monkeypatch):
-    """AnthropicProvider/OpenAIProvider construct a real SDK http client,
+    """AnthropicProvider constructs a real SDK http client,
     whose httpx transport honors *_PROXY env vars from the developer's
     shell by default (trust_env). If one names a socks5:// proxy -- common
     behind a corporate VPN -- httpx raises ImportError at construction
@@ -291,159 +291,15 @@ def test_anthropic_no_passages_short_circuits_without_calling_the_provider(anthr
 
 
 # ---------------------------------------------------------------------------
-# OpenAI
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def openai_provider(test_env, monkeypatch):
-    _clear_ambient_proxy_env(monkeypatch)
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    from app.config import get_settings
-    get_settings.cache_clear()
-    from app.providers.openai_provider import OpenAIProvider
-    provider = OpenAIProvider()
-    yield provider
-    get_settings.cache_clear()
-
-
-class _OpenAIMessage:
-    def __init__(self, content):
-        self.content = content
-
-
-class _OpenAIChoice:
-    def __init__(self, content):
-        self.message = _OpenAIMessage(content)
-
-
-class _OpenAIResponse:
-    def __init__(self, content):
-        self.choices = [_OpenAIChoice(content)]
-
-
-def test_openai_timeout_becomes_provider_error(openai_provider, monkeypatch):
-    import openai
-
-    def raise_timeout(**kwargs):
-        raise openai.APITimeoutError(request=_req())
-
-    monkeypatch.setattr(openai_provider._client.chat.completions, "create", raise_timeout)
-    with pytest.raises(ProviderError, match="timed out"):
-        openai_provider.generate("Why?", "Axiom", [_passage()])
-
-
-def test_openai_rate_limit_becomes_provider_error(openai_provider, monkeypatch):
-    import openai
-
-    def raise_rl(**kwargs):
-        raise openai.RateLimitError("rate limited", response=_resp(429), body=None)
-
-    monkeypatch.setattr(openai_provider._client.chat.completions, "create", raise_rl)
-    with pytest.raises(ProviderError, match="rate-limited"):
-        openai_provider.generate("Why?", "Axiom", [_passage()])
-
-
-def test_openai_retired_model_status_error_becomes_provider_error(openai_provider, monkeypatch):
-    import openai
-
-    def raise_not_found(**kwargs):
-        raise openai.NotFoundError("model not found", response=_resp(404), body=None)
-
-    monkeypatch.setattr(openai_provider._client.chat.completions, "create", raise_not_found)
-    with pytest.raises(ProviderError):
-        openai_provider.generate("Why?", "Axiom", [_passage()])
-
-
-def test_openai_malformed_response_retries_once_then_falls_back(openai_provider, monkeypatch):
-    calls = []
-
-    def create(**kwargs):
-        calls.append(kwargs["messages"])
-        return _OpenAIResponse("not json at all")
-
-    monkeypatch.setattr(openai_provider._client.chat.completions, "create", create)
-    result = openai_provider.generate("Why?", "Axiom", [_passage()])
-    assert len(calls) == 2, "exactly one repair retry, not more, not zero"
-    assert result.is_no_answer is True
-    assert "could not produce a verified" in result.answer.lower()
-
-
-def test_openai_recovers_on_the_repair_retry(openai_provider, monkeypatch):
-    responses = [_OpenAIResponse("garbage, not JSON"), _OpenAIResponse(_valid_json_response())]
-
-    def create(**kwargs):
-        return responses.pop(0)
-
-    monkeypatch.setattr(openai_provider._client.chat.completions, "create", create)
-    result = openai_provider.generate("Why?", "Axiom", [_passage()])
-    assert result.is_no_answer is False
-    assert "81-118-31" in result.answer
-
-
-def test_openai_no_answer_explanation_mentioning_the_machine_name_is_not_rejected(
-    openai_provider, monkeypatch
-):
-    """Parity with the equivalent Anthropic test -- both providers share
-    parse_and_validate, so both share this bug and this fix."""
-    explanation = (
-        "The provided excerpts do not contain an Electrical Setup procedure "
-        "for the Ultra-1/Ultra-2. Please consult the Installation section."
-    )
-    response = json.dumps({
-        "is_no_answer": True, "no_answer_explanation": explanation,
-        "claims": [], "steps": [], "warnings": [],
-    })
-    monkeypatch.setattr(
-        openai_provider._client.chat.completions, "create", lambda **k: _OpenAIResponse(response)
-    )
-    result = openai_provider.generate("How to do electrical setup", "Ultra-1/Ultra-2", [_passage()])
-    assert result.is_no_answer is True
-    assert result.answer == explanation, "the model's real explanation, not the generic fallback"
-
-
-def test_openai_empty_or_none_content_safety_refusal_shape_degrades_gracefully(openai_provider, monkeypatch):
-    """A content-filtered response (message.content is None, a real shape
-    the OpenAI API returns for a refusal) must degrade cleanly, not crash
-    with a TypeError trying to regex-search None."""
-    monkeypatch.setattr(openai_provider._client.chat.completions, "create",
-                         lambda **k: _OpenAIResponse(None))
-    result = openai_provider.generate("Why?", "Axiom", [_passage()])
-    assert result.is_no_answer is True
-
-
-def test_openai_request_sets_a_bounded_token_budget(openai_provider, monkeypatch):
-    captured = {}
-
-    def create(**kwargs):
-        captured["max_completion_tokens"] = kwargs.get("max_completion_tokens")
-        return _OpenAIResponse(_valid_json_response())
-
-    monkeypatch.setattr(openai_provider._client.chat.completions, "create", create)
-    openai_provider.generate("Why?", "Axiom", [_passage()])
-    assert captured["max_completion_tokens"] is not None, \
-        "an unbounded response is both a cost risk and never needed for this app's output shape"
-    assert 0 < captured["max_completion_tokens"] <= 4096
-
-
-def test_openai_no_passages_short_circuits_without_calling_the_provider(openai_provider, monkeypatch):
-    called = []
-    monkeypatch.setattr(openai_provider._client.chat.completions, "create",
-                         lambda **k: called.append(1) or _OpenAIResponse(_valid_json_response()))
-    result = openai_provider.generate("Why?", "Axiom", [])
-    assert called == [], "no passages means no provider call at all -- there is nothing to answer from"
-    assert result.is_no_answer is True
-
-
-# ---------------------------------------------------------------------------
 # Provider selection ("no manual content may be sent to an unapproved
 # provider")
 # ---------------------------------------------------------------------------
 
-def test_only_three_providers_are_ever_reachable(test_env):
+def test_only_two_providers_are_ever_reachable(test_env):
     from app.providers.factory import get_provider
     get_provider.cache_clear()
     provider = get_provider()
-    assert provider.name in ("local_extractive", "anthropic", "openai")
+    assert provider.name in ("local_extractive", "anthropic")
 
 
 def test_unknown_provider_setting_refuses_to_start(test_env, monkeypatch):

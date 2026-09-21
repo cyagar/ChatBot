@@ -7,9 +7,9 @@ warning, invented conflict) directly against parse_and_validate, plus one
 positive case proving a genuinely-supported answer still passes.
 
 These exercise parse_and_validate in isolation -- they do not call the real
-Anthropic/OpenAI APIs (no key is configured in this environment; AI_PROVIDER
-stays local_extractive for the whole suite, see docs/PRODUCTION_READINESS.md).
-They prove the validation logic those providers depend on is sound, not that
+Anthropic API (no key is configured in this environment; AI_PROVIDER stays
+local_extractive for the whole suite, see docs/PRODUCTION_READINESS.md).
+They prove the validation logic that provider depends on is sound, not that
 a live model's output currently passes it.
 """
 from __future__ import annotations

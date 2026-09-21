@@ -1614,13 +1614,14 @@ and will be fully replaced, not migrated, whenever the switch happens.
       one machine-scoped citation out of the retrieved set, a safety-warning
       field explicitly noting no warning was present in the excerpts (not
       inventing one), and an exact reload match on citations/warnings/
-      conflict-note. OpenAI's provider remains unexercised against a live key.
+      conflict-note. **Update (2026-09-21):** the OpenAI provider was removed
+      entirely (dead code -- never live-tested, never configured in any real
+      environment; `AI_PROVIDER` now only accepts `local_extractive` or
+      `anthropic`). If a second generative provider is wanted again later,
+      it should be added back deliberately, not resurrected from history.
 
 ## Explicitly unverified
 
-- [ ] **OpenAI provider.** Only the Anthropic path has been live-tested (see
-      above). `openai_provider.py` is written in the same structural pattern
-      but has never actually been called against a live OpenAI key.
 - [ ] **Conflicting-revision behavior under the generative provider.** The
       extractive provider's revision-conflict surfacing (`_detect_conflict`)
       is code, not model behavior, so it's mechanically guaranteed. Whether

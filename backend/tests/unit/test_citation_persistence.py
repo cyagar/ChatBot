@@ -57,7 +57,7 @@ def test_parse_and_validate_keeps_only_the_cited_subset():
 class _SubsetCitingProvider(AIProvider):
     """Fake provider that always cites only the 2nd and 5th of whatever
     passages it's given, via the real parse_and_validate path -- exercises
-    the same validation the real Anthropic/OpenAI providers rely on."""
+    the same validation the real Anthropic provider relies on."""
 
     name = "test_subset"
 

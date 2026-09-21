@@ -1,12 +1,9 @@
-# Local Docker Compose setup. Ships the app exactly as built (SQLite +
-# local-directory document storage — see docs/ARCHITECTURE.md for why SQLite
-# was substituted for Postgres+pgvector on this development machine).
-#
-# The commented-out `db` service shows the production upgrade path: swap
-# STORAGE_BACKEND/DB engine, uncomment, point DATABASE_URL at it, and implement
-# app/db_postgres.py behind the same get_conn()-shaped interface used
-# throughout app/ — every call site already goes through app/db.py, so no
-# route or ingestion code needs to change, only that one module.
+# Local Docker Compose setup. The database is Postgres/Neon (remote, not
+# containerized here) — DATABASE_URL/DATABASE_URL_UNPOOLED come from the
+# mounted backend/.env below, read directly by app/config.py's
+# pydantic-settings env_file, so they don't need a separate `environment:`
+# entry here. Only object storage and the Drive download cache are local
+# disk under ./data, mounted into the container below.
 #
 # Usage:
 #   docker compose up --build
@@ -29,7 +26,6 @@ services:
       # filename here.
       - ./backend/${GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME}:/app/${GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME}:ro
     environment:
-      - DB_PATH=/data/db/app.db
       - LOCAL_STORAGE_DIR=/data/object_storage
       - GDRIVE_CACHE_DIR=/data/gdrive_cache
       - GOOGLE_SERVICE_ACCOUNT_JSON_PATH=/app/${GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME}
@@ -39,17 +35,3 @@ services:
     mem_limit: 2g
     cpus: 2.0
     pids_limit: 512
-
-  # db:
-  #   image: pgvector/pgvector:pg16
-  #   environment:
-  #     POSTGRES_DB: technician_manual_assistant
-  #     POSTGRES_USER: app
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-  #   volumes:
-  #     - pgdata:/var/lib/postgresql/data
-  #   ports:
-  #     - "5432:5432"
-  #
-  # volumes:
-  #   pgdata:

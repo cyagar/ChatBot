@@ -5,7 +5,7 @@ citations. That makes it strictly non-hallucinating by construction (every
 sentence shown is copied verbatim from an indexed passage), which is why it is the
 safe default while no provider key is configured. Its weakness is synthesis: it
 cannot combine two passages into a single narrative answer or paraphrase for
-brevity. Set AI_PROVIDER=anthropic|openai for that.
+brevity. Set AI_PROVIDER=anthropic for that.
 """
 
 from __future__ import annotations

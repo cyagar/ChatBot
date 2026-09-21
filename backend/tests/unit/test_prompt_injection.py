@@ -5,12 +5,12 @@ required test categories. Two different guarantees apply here:
    construction: it never sends retrieved text to a model, it only selects and
    trims it, so there is no instruction-following channel for injected text to
    exploit. Verified below.
-2. `anthropic`/`openai` rely on the model actually respecting the system
-   prompt's instruction to treat excerpt text as data, not commands. This is
-   NOT verified end-to-end anywhere in this test suite (no API key was
-   available) -- see docs/PRODUCTION_READINESS.md. What IS verified here is
-   that the instruction is actually present in the prompt sent to the model,
-   so at minimum the defense was attempted, not silently omitted.
+2. `anthropic` relies on the model actually respecting the system prompt's
+   instruction to treat excerpt text as data, not commands. This is NOT
+   verified end-to-end anywhere in this test suite (no API key was available)
+   -- see docs/PRODUCTION_READINESS.md. What IS verified here is that the
+   instruction is actually present in the prompt sent to the model, so at
+   minimum the defense was attempted, not silently omitted.
 """
 
 from app.providers.base import SYSTEM_PROMPT
@@ -57,8 +57,8 @@ def test_extractive_provider_only_echoes_text_never_executes_it():
 
 def test_system_prompt_instructs_models_to_treat_excerpts_as_data_not_commands():
     """Structural check that the anti-injection instruction is actually present
-    in what gets sent to anthropic/openai -- does not verify a live model
-    obeys it (untested without an API key; see PRODUCTION_READINESS.md)."""
+    in what gets sent to anthropic -- does not verify a live model obeys it
+    (untested without an API key; see PRODUCTION_READINESS.md)."""
     lowered = SYSTEM_PROMPT.lower()
     assert "ignore" in lowered and "instructions" in lowered
     assert "excerpt" in lowered

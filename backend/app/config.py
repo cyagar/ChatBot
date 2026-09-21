@@ -53,7 +53,6 @@ class Settings(BaseSettings):
 
     ai_provider: str = "local_extractive"
     anthropic_api_key: str = ""
-    openai_api_key: str = ""
 
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     # Pinned commit SHA, not a branch name -- "main" can silently change what
@@ -101,8 +100,6 @@ class Settings(BaseSettings):
                 )
             if self.ai_provider == "anthropic" and not self.anthropic_api_key:
                 raise RuntimeError("AI_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set.")
-            if self.ai_provider == "openai" and not self.openai_api_key:
-                raise RuntimeError("AI_PROVIDER=openai but OPENAI_API_KEY is not set.")
             if not self.allowed_registration_domains:
                 raise RuntimeError(
                     "ALLOWED_REGISTRATION_DOMAINS is not set for APP_ENV="
@@ -111,7 +108,7 @@ class Settings(BaseSettings):
                     "set -- it's the allowlist invitations are restricted to. Set it to a "
                     "comma-separated list before deploying."
                 )
-        if self.ai_provider not in {"local_extractive", "anthropic", "openai"}:
+        if self.ai_provider not in {"local_extractive", "anthropic"}:
             raise RuntimeError(f"Unknown AI_PROVIDER: {self.ai_provider!r}")
 
         if not self.database_url or not self.database_url_unpooled:
@@ -123,8 +120,9 @@ class Settings(BaseSettings):
         # P1-2's "production can boot with the wrong source" half is already
         # structurally impossible: there is no DOCUMENT_SOURCE setting any
         # more, and get_document_source() (app/ingestion/sources.py) can only
-        # ever construct a GoogleDriveSource. LocalDirectorySource survives
-        # solely as test infrastructure, passed explicitly to ingest_all().
+        # ever construct a GoogleDriveSource. FakeDirectorySource
+        # (tests/ingestion/fakes.py) survives solely as test infrastructure,
+        # passed explicitly to ingest_all().
         if not self.google_drive_folder_id:
             raise RuntimeError("GOOGLE_DRIVE_FOLDER_ID is not set -- ingestion has no document source.")
         self._validate_service_account_key()
