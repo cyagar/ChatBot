@@ -51,7 +51,15 @@ def _corpus_status(settings) -> tuple[str, str]:
             ).fetchone()
         if last_success is None:
             return "ok", ""
-        finished = datetime.fromisoformat(last_success["finished_at"])
+        # P1-04 (external review, 2026-09-21): finished_at is a TIMESTAMPTZ
+        # column -- psycopg already hands it back as a real, aware datetime,
+        # not a string (see docs on the Postgres migration's dialect
+        # gotchas). datetime.fromisoformat() on an already-datetime value
+        # raised TypeError every time, which the blanket `except Exception`
+        # below silently turned into ("ok", "") -- so a corpus that hadn't
+        # synced in days, or ever, always reported healthy. Reproduced
+        # directly against this function before the fix.
+        finished = last_success["finished_at"]
         if finished.tzinfo is None:
             finished = finished.replace(tzinfo=timezone.utc)
         hours_since = (datetime.now(timezone.utc) - finished).total_seconds() / 3600
