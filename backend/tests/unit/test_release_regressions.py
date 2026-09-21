@@ -157,3 +157,105 @@ def test_p1_04_stale_corpus_status_accepts_a_real_psycopg_datetime(test_env, mon
     assert status_ == "ok", f"a just-completed sync must report healthy, got ({status_!r}, {message!r})"
 
     get_settings.cache_clear()
+
+
+def test_p0_02_approving_an_unready_replacement_does_not_retire_the_working_manual(test_env):
+    """P0-02: "Approve document" and "Approve link" are two independent
+    buttons on the same review-queue card (admin.js renderReviewQueue) --
+    nothing stops an admin clicking the former first. Before the fix,
+    approving the document record alone was enough for review_document() to
+    immediately deactivate every other active document at the same
+    source_ref, even when the newly-approved document had failed ingestion,
+    extracted zero chunks, or had no approved machine link of its own yet --
+    leaving technicians with nothing retrievable at that source_ref (the old
+    revision retired, the new one not actually servable) until the admin
+    came back and separately approved a link. Fixed by making promotion a
+    single atomic transition: review_document() now verifies status is
+    indexed/partial, chunk_count > 0, and at least one approved
+    document_machines link BEFORE retiring the prior revision, and rejects
+    with 409 (touching nothing) if any condition isn't met yet."""
+    from app.db import get_conn
+    from app.main import app as fastapi_app
+    from fastapi.testclient import TestClient
+    from tests.conftest import register_test_user
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "admin-p002@example.com", role="administrator", admin_email="admin-p002@example.com")
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+
+        # The old, working revision: indexed, approved, with an approved
+        # machine link -- this is what's actually serving technicians today.
+        old_cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, manufacturer_id, doc_type, title, is_current_revision, "
+            "review_status) VALUES ('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', "
+            "'hash-old', 100, 'indexed', 1, 'service_repair', 'Axiom Manual', true, 'approved') RETURNING id"
+        )
+        old_doc_id = old_cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'approved')",
+            (old_doc_id,),
+        )
+        conn.execute(
+            "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
+            "VALUES (%s, 'text', 'brew temperature is 200F', 25, 0)",
+            (old_doc_id,),
+        )
+
+        # The replacement candidate at the SAME source_ref: ingested, but
+        # its machine link hasn't been reviewed yet (still 'pending') --
+        # exactly the state right after a fresh ingestion run, before any
+        # admin review has happened at all.
+        new_cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, manufacturer_id, doc_type, title, is_current_revision) "
+            "VALUES ('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash-new', 100, "
+            "'indexed', 1, 'service_repair', 'Axiom Manual v2', false) RETURNING id"
+        )
+        new_doc_id = new_cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'pending')",
+            (new_doc_id,),
+        )
+        conn.execute(
+            "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
+            "VALUES (%s, 'text', 'brew temperature is 205F', 25, 0)",
+            (new_doc_id,),
+        )
+
+    # The admin clicks "Approve document" on the replacement before ever
+    # looking at its machine link.
+    resp = local_client.post(f"/api/admin/documents/{new_doc_id}/review", json={"decision": "approved"})
+    assert resp.status_code == 409, (
+        f"approving a document with no approved machine link must be rejected, not promoted -- got "
+        f"{resp.status_code}: {resp.text}"
+    )
+
+    with get_conn() as conn:
+        old_row = conn.execute(
+            "SELECT deactivated_at, review_status FROM documents WHERE id = %s", (old_doc_id,)
+        ).fetchone()
+        new_row = conn.execute("SELECT review_status FROM documents WHERE id = %s", (new_doc_id,)).fetchone()
+    assert old_row["deactivated_at"] is None, "the still-working old revision must not have been retired"
+    assert old_row["review_status"] == "approved", "the old revision's own approval must be untouched"
+    assert new_row["review_status"] == "pending", (
+        "a rejected promotion must leave the candidate's review_status alone so it still shows up "
+        f"in the review queue for the admin to fix -- got {new_row['review_status']!r}"
+    )
+
+    # Now the admin does it in the right order: approve the machine link
+    # first, then the document. Promotion should proceed normally.
+    link_resp = local_client.post(
+        f"/api/admin/documents/{new_doc_id}/machines/1/review", json={"decision": "approved"}
+    )
+    assert link_resp.status_code == 200
+
+    resp2 = local_client.post(f"/api/admin/documents/{new_doc_id}/review", json={"decision": "approved"})
+    assert resp2.status_code == 200, f"a ready replacement (indexed, chunked, approved link) must promote -- got {resp2.status_code}: {resp2.text}"
+
+    with get_conn() as conn:
+        old_row2 = conn.execute("SELECT deactivated_at FROM documents WHERE id = %s", (old_doc_id,)).fetchone()
+    assert old_row2["deactivated_at"] is not None, "once the replacement is actually ready, the old revision should be retired"

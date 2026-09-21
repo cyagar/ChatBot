@@ -28,6 +28,13 @@ def _seed_document(conn) -> int:
     )
     doc_id = cur.fetchone()["id"]
     conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (%s, 1)", (doc_id,))
+    # P0-02: review_document() now requires nonempty chunks before a document
+    # can be approved -- every real 'indexed' document has at least one.
+    conn.execute(
+        "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
+        "VALUES (%s, 'text', 'seeded chunk content', 21, 0)",
+        (doc_id,),
+    )
     return doc_id
 
 
@@ -164,9 +171,11 @@ def test_approving_document_and_link_removes_it_from_the_queue(test_env):
         doc_id = _seed_document(conn)
     _register_admin()
 
-    resp = client.post(f"/api/admin/documents/{doc_id}/review", json={"decision": "approved"})
-    assert resp.status_code == 200
+    # P0-02: a document can only be approved once it has an approved machine
+    # link -- link review must happen first.
     resp = client.post(f"/api/admin/documents/{doc_id}/machines/1/review", json={"decision": "approved"})
+    assert resp.status_code == 200
+    resp = client.post(f"/api/admin/documents/{doc_id}/review", json={"decision": "approved"})
     assert resp.status_code == 200
 
     queue = client.get("/api/admin/review-queue").json()
@@ -264,7 +273,17 @@ def test_approving_replacement_deactivates_old_document_at_same_source_ref(test_
     with get_conn() as conn:
         old_id = _seed_document_at_source_ref(conn, source_ref, sha256="old-hash", review_status="approved")
         new_id = _seed_document_at_source_ref(conn, source_ref, sha256="new-hash", review_status="pending")
+        # P0-02: review_document() now requires nonempty chunks and an
+        # approved machine link before a document can be approved/promoted.
+        conn.execute(
+            "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
+            "VALUES (%s, 'text', 'seeded chunk content', 21, 0)",
+            (new_id,),
+        )
     _register_admin()
+    assert client.post(
+        f"/api/admin/documents/{new_id}/machines/1/review", json={"decision": "approved"}
+    ).status_code == 200
 
     resp = client.post(f"/api/admin/documents/{new_id}/review", json={"decision": "approved"})
     assert resp.status_code == 200
@@ -331,7 +350,21 @@ def test_concurrent_approval_of_two_replacement_candidates_leaves_exactly_one_ac
         old_id = _seed_document_at_source_ref(conn, source_ref, sha256="old-hash", review_status="approved")
         candidate_a = _seed_document_at_source_ref(conn, source_ref, sha256="candidate-a", review_status="pending")
         candidate_b = _seed_document_at_source_ref(conn, source_ref, sha256="candidate-b", review_status="pending")
+        # P0-02: review_document() now requires nonempty chunks and an
+        # approved machine link before a document can be approved/promoted --
+        # both candidates need that BEFORE the race below, or every approval
+        # attempt would 409 for a reason unrelated to what this test covers.
+        for candidate_id in (candidate_a, candidate_b):
+            conn.execute(
+                "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
+                "VALUES (%s, 'text', 'seeded chunk content', 21, 0)",
+                (candidate_id,),
+            )
     _register_admin()
+    for candidate_id in (candidate_a, candidate_b):
+        assert client.post(
+            f"/api/admin/documents/{candidate_id}/machines/1/review", json={"decision": "approved"}
+        ).status_code == 200
 
     from contextlib import contextmanager
 
@@ -340,7 +373,12 @@ def test_concurrent_approval_of_two_replacement_candidates_leaves_exactly_one_ac
 
     # Must match routes_admin.py's review_document() SQL text exactly --
     # %s placeholders (psycopg), not SQLite's ?.
-    select_sql = "SELECT id, source_ref FROM documents WHERE id = %s AND deactivated_at IS NULL"
+    # Must match review_document()'s SQL text exactly -- P0-02 added `status`
+    # to this SELECT's column list, which silently broke this comparison
+    # (the barrier below never fired, so the two threads raced with no
+    # synchronization at all instead of the deliberate interleaving this
+    # test depends on).
+    select_sql = "SELECT id, source_ref, status FROM documents WHERE id = %s AND deactivated_at IS NULL"
     # Both requests' reads must land before either commits (a Barrier makes
     # that deterministic instead of hoping thread scheduling cooperates);
     # only THEN does candidate_b additionally wait for candidate_a's full
@@ -519,6 +557,12 @@ def test_machine_picker_excludes_machines_with_only_pending_links(test_env):
             "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed')"
         )
         conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (1, 1)")
+        # P0-02: review_document() now requires nonempty chunks and an
+        # approved machine link before a document can be approved.
+        conn.execute(
+            "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 'text', 'seeded chunk content', 21, 0)"
+        )
 
     _register_admin("machadmin@example.com")
     register_test_user(client, "machtech@example.com", admin_email="machadmin@example.com")
@@ -528,8 +572,8 @@ def test_machine_picker_excludes_machines_with_only_pending_links(test_env):
     assert resp.json() == []
 
     client.post("/api/auth/login", json={"email": "machadmin@example.com", "password": "password123"})
-    assert client.post("/api/admin/documents/1/review", json={"decision": "approved"}).status_code == 200
     assert client.post("/api/admin/documents/1/machines/1/review", json={"decision": "approved"}).status_code == 200
+    assert client.post("/api/admin/documents/1/review", json={"decision": "approved"}).status_code == 200
 
     client.post("/api/auth/login", json={"email": "machtech@example.com", "password": "password123"})
     resp2 = client.get("/api/machines", params={"q": "Axiom"})

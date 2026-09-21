@@ -368,10 +368,64 @@ def review_document(document_id: int, payload: DocumentReviewRequest, admin: Cur
     there."""
     with get_conn() as conn:
         doc = conn.execute(
-            "SELECT id, source_ref FROM documents WHERE id = %s AND deactivated_at IS NULL", (document_id,)
+            "SELECT id, source_ref, status FROM documents WHERE id = %s AND deactivated_at IS NULL", (document_id,)
         ).fetchone()
         if not doc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found or deactivated.")
+
+        if payload.decision == "approved":
+            # Lock every active document at this source_ref up front, in a
+            # single fixed global order (ascending id) -- discovered as a
+            # genuine deadlock while adding the P0-02 readiness checks just
+            # below, which delay how soon this transaction reaches the claim
+            # UPDATE relative to a concurrent approval of a DIFFERENT
+            # candidate at the same source_ref. Without this, two concurrent
+            # approvals can each hold their own row (from the claim UPDATE
+            # further down) while waiting on a row the other holds -- a real
+            # lock-ordering cycle (Postgres reports it as DeadlockDetected),
+            # not just one request blocking behind the other. Acquiring every
+            # row's lock here, in the same order every transaction uses,
+            # makes that cycle impossible: whichever transaction gets here
+            # first locks the lowest id first and the other simply queues
+            # behind it, exactly as the P1-6 concurrency test intends.
+            conn.execute(
+                "SELECT id FROM documents WHERE source_ref = %s AND deactivated_at IS NULL ORDER BY id FOR UPDATE",
+                (doc["source_ref"],),
+            )
+
+            # P0-02 (external review, 2026-09-21): "Approve document" and
+            # "Approve link" are two independent buttons on the same review-
+            # queue card (admin.js renderReviewQueue) -- nothing stopped an
+            # admin clicking the former first. Approving the document alone
+            # used to be enough to retire the prior working revision below,
+            # even when this document failed ingestion, extracted zero
+            # chunks, or has no approved machine link yet -- leaving
+            # technicians with nothing retrievable at this source_ref until
+            # the admin came back and separately approved a link. Promotion
+            # must be a single atomic transition: verify the replacement is
+            # actually ready before retiring the revision that still works.
+            chunk_count = conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks WHERE document_id = %s", (document_id,)
+            ).fetchone()["n"]
+            has_approved_link = conn.execute(
+                "SELECT 1 FROM document_machines WHERE document_id = %s AND review_status = 'approved' LIMIT 1",
+                (document_id,),
+            ).fetchone()
+            problems = []
+            if doc["status"] not in ("indexed", "partial"):
+                problems.append(f"ingestion status is {doc['status']!r}, not indexed/partial")
+            if chunk_count == 0:
+                problems.append("it has no extracted content (0 chunks)")
+            if not has_approved_link:
+                problems.append("it has no approved machine link yet")
+            if problems:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail="Cannot approve and promote this document yet: " + "; ".join(problems) +
+                           ". Approve at least one machine link first -- the previously active "
+                           "revision at this source_ref keeps serving until this document is ready.",
+                )
+
         claim = conn.execute(
             "UPDATE documents SET review_status = %s, reviewed_by = %s, reviewed_at = now(), "
             "review_note = %s WHERE id = %s AND deactivated_at IS NULL",

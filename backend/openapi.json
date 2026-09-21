@@ -52,6 +52,11 @@
             ],
             "title": "Section Heading"
           },
+          "source_withdrawn": {
+            "default": false,
+            "title": "Source Withdrawn",
+            "type": "boolean"
+          },
           "title": {
             "anyOf": [
               {
@@ -252,6 +257,14 @@
             },
             "title": "Machine Ids",
             "type": "array"
+          },
+          "machine_link_review_status": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Machine Link Review Status",
+            "type": "object"
           },
           "machines": {
             "items": {
@@ -643,6 +656,11 @@
               }
             ],
             "title": "Feedback Rating"
+          },
+          "has_withdrawn_source": {
+            "default": false,
+            "title": "Has Withdrawn Source",
+            "type": "boolean"
           },
           "id": {
             "title": "Id",
