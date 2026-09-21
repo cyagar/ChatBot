@@ -3,6 +3,9 @@ tracked one test per finding ID so each fix stays independently verifiable.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -633,3 +636,54 @@ def test_p0_10_test_fixture_refuses_a_database_url_identical_to_production(tmp_p
     conftest_module._refuse_if_production_database(
         "postgresql://prod-host/prod_db", "DATABASE_URL"
     )
+
+
+def test_p0_11_eval_script_refuses_without_a_disposable_clone(tmp_path):
+    """P0-11: the eval script used to crash immediately with AttributeError
+    (Settings.db_path_resolved no longer exists post-Postgres-migration), and
+    even patched, it could touch the live configured PostgreSQL database
+    directly. Rewritten to require EVAL_DATABASE_URL/EVAL_DATABASE_URL_UNPOOLED
+    pointing at a disposable clone, refusing hard (before any migration or
+    query) if either is missing or identical to the real production value.
+    Invoked as a real subprocess (not imported) since the script's guard
+    runs as a module-level side effect at import time -- these three cases
+    never need a real database, since the guard raises before any connection
+    is attempted."""
+    import subprocess
+    import sys as _sys
+
+    script = Path(__file__).resolve().parent.parent.parent / "scripts" / "eval_retrieval.py"
+    fake_prod_env = tmp_path / "fake_prod.env"
+    fake_prod_env.write_text("DATABASE_URL=postgresql://prod-host/prod_db\n")
+
+    base_env = {**os.environ, "TMA_EVAL_PROD_ENV_FILE_FOR_TESTS": str(fake_prod_env)}
+
+    # Missing entirely.
+    result = subprocess.run(
+        [_sys.executable, str(script)], env={k: v for k, v in base_env.items() if k != "EVAL_DATABASE_URL"},
+        capture_output=True, text=True, timeout=30, cwd=script.parent.parent,
+    )
+    assert result.returncode != 0
+    assert "must both be set" in result.stderr
+
+    # Set, but identical to the fake "production" value.
+    result = subprocess.run(
+        [_sys.executable, str(script)],
+        env={**base_env, "EVAL_DATABASE_URL": "postgresql://prod-host/prod_db",
+             "EVAL_DATABASE_URL_UNPOOLED": "postgresql://prod-host/prod_db"},
+        capture_output=True, text=True, timeout=30, cwd=script.parent.parent,
+    )
+    assert result.returncode != 0
+    assert "IDENTICAL to backend/.env's production" in result.stderr
+
+    # A genuinely different (if unreachable) URL -- must pass the guard and
+    # fail later, on an actual connection attempt, not on the guard itself.
+    result = subprocess.run(
+        [_sys.executable, str(script)],
+        env={**base_env, "EVAL_DATABASE_URL": "postgresql://fake-eval-clone-host/evaldb",
+             "EVAL_DATABASE_URL_UNPOOLED": "postgresql://fake-eval-clone-host/evaldb"},
+        capture_output=True, text=True, timeout=30, cwd=script.parent.parent,
+    )
+    assert result.returncode != 0
+    assert "must both be set" not in result.stderr
+    assert "IDENTICAL to backend/.env's production" not in result.stderr
