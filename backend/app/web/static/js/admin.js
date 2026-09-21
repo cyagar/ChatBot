@@ -99,7 +99,14 @@ async function loadTab() {
     state.unanswered = await api("/api/admin/unanswered");
   }
   if (state.tab === "query" && state.machines.length === 0) {
-    state.machines = await api("/api/machines?limit=500");
+    // P1-03 (external review, 2026-09-21): this used to call the
+    // technician-facing /api/machines?limit=500, but that endpoint caps
+    // limit at 100 (routes_machines.py) -- any corpus with >100 machines
+    // made this request fail with 422 before the Query tab could even
+    // render, hiding the primary retrieval-inspection tool. Switched to
+    // /api/admin/machines, which has no such cap and already backs the
+    // metadata editor on the Documents tab (same MachineOut response shape).
+    state.machines = await api("/api/admin/machines");
   }
 }
 
