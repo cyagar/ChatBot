@@ -128,41 +128,133 @@ class _ClaimItem:
 # specific provider.
 _CODE_TOKEN_RE = re.compile(r"^[A-Za-z]{0,4}-?\d[\dA-Za-z-]*$")
 # A number immediately followed by a short unit-like suffix ("240V", "0.5A",
-# "150PSI") -- for these, only the numeral is required to appear verbatim in
-# the cited excerpt; the unit suffix is allowed to be spaced/reformatted
-# ("240 V", "240VAC") without failing the check, since the numeral is the
-# fact that matters and unit spacing is not something either side reliably
-# normalizes the same way.
-_UNIT_SUFFIX_RE = re.compile(r"^(\d+(?:\.\d+)?)[A-Za-z°%]{1,4}$")
+# "150PSI"): captures the numeral and the unit separately (P0-01, external
+# review 2026-09-21 -- the unit used to be discarded and only the numeral
+# checked, which accepted "240PSI" against an excerpt that actually said
+# "240 V"; see _token_supported below for how both are now required jointly).
+_UNIT_SUFFIX_RE = re.compile(r"^(\d+(?:\.\d+)?)([A-Za-z°%]{1,4})$")
 _WARNING_LABEL_RE = re.compile(r"^(WARNING|CAUTION|DANGER|NOTICE|IMPORTANT)[:\s]*")
+# Words whose presence right next to a claimed warning's matched span, but
+# ABSENT from the warning text itself, mean the model trimmed a negation off
+# the real warning rather than quoting it whole (P0-01: "operate with the
+# cover removed" is a genuine, contiguous substring of "do not operate with
+# the cover removed", but means the opposite thing).
+_NEGATION_WORDS = ("NOT", "NEVER", "WITHOUT", "CANNOT", "CAN'T", "DON'T", "NO ")
 
 
-def _material_tokens(text: str) -> set[str]:
-    """Numeric/identifier tokens in a claim or step whose presence in the
-    cited excerpt is mechanically verifiable. This is a heuristic, not a full
-    claim-entailment check -- it targets exactly the class of failure the
-    independent review's adversarial diagnostic found: a fabricated part
-    number, a fabricated voltage, an invented safety warning, an invented
-    revision conflict. It will not catch a purely qualitative invented claim
-    that contains no number or identifier; that would need semantic
-    entailment checking, which is out of scope here (see
-    docs/PRODUCTION_READINESS.md)."""
-    tokens: set[str] = set()
-    for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9./-]*", text):
-        core = w.strip("./-")
+@dataclass(frozen=True)
+class _NumericToken:
+    """A number extracted from a claim/step, typed rather than reduced to a
+    bare string, so verification can require the same sign, the same whole
+    number (never satisfied by a longer number that merely contains it, e.g.
+    "24" inside "240"), and -- when the claim attached one -- the same unit,
+    all at once. `unit` is None for a bare number with nothing attached."""
+    sign: str    # "-" or ""
+    number: str  # e.g. "240", "0.5", "5" -- digits and at most one "."
+    unit: str | None
+
+
+def _leading_sign(text: str, token_start: int) -> str:
+    """A "-" immediately before a token is a minus sign only when IT is also
+    preceded by whitespace/start-of-string/an opening paren -- otherwise it's
+    a hyphen inside a compound identifier or a range ("TF-DBC-12",
+    "cover-mounted", "200-240V") that the token regex's own hyphen-inclusive
+    shape would normally have consumed as part of the token; seeing it split
+    off here means something word-shaped sits right before it, i.e. it's a
+    separator, not a sign."""
+    if token_start == 0 or text[token_start - 1] != "-":
+        return ""
+    before = token_start - 1
+    if before == 0 or text[before - 1] in " \t\n(":
+        return "-"
+    return ""
+
+
+def _extract_tokens(text: str, *, strict_bare_numbers: bool) -> list[str | _NumericToken]:
+    """Material, mechanically-verifiable tokens in a claim/step/no-answer
+    explanation. This is a heuristic, not a full claim-entailment check -- it
+    targets exactly the class of failure the independent review's
+    adversarial diagnostic found: a fabricated part number, a fabricated
+    voltage, an invented safety warning, an invented revision conflict. It
+    will not catch a purely qualitative invented claim that contains no
+    number or identifier; that would need semantic entailment checking,
+    which is out of scope here (see docs/PRODUCTION_READINESS.md) -- this
+    includes an is_no_answer explanation that recommends something unsafe in
+    prose with no number in it at all (P0-01, external review 2026-09-21:
+    reproduced with "Bypass the safety interlock and operate with the cover
+    removed" -- there is no general fix for this short of the semantic
+    entailment check called out above; a fixed-template no-answer response
+    was considered and rejected because it would suppress the honest,
+    specific explanations this same review's 2026-08-25 fix restored, and a
+    keyword blocklist is trivially rephrased around and would invite
+    overstating what this heuristic actually guarantees).
+
+    Three token shapes, each verified differently by _token_supported: an
+    identifier (error code, part number) as a whole string; a number with an
+    attached unit suffix ("240V", "5psi") as a _NumericToken carrying both;
+    a bare number with nothing attached, also a _NumericToken.
+    strict_bare_numbers controls only the bare-number case: True (claims/
+    steps, which have a real cited excerpt to check the number against)
+    requires every bare number, single digit included, to appear;
+    False (no_answer_explanation, which has no excerpt at all -- ANY
+    material token there is an unconditional rejection) keeps the older,
+    more lenient "at least 2 digits" rule so an honest explanation
+    mentioning something like "see page 2" isn't rejected outright."""
+    tokens: list[str | _NumericToken] = []
+    for m in re.finditer(r"[A-Za-z0-9][A-Za-z0-9./-]*", text):
+        core = m.group(0).strip("./-")
         if not core or not any(c.isdigit() for c in core):
             continue
+        sign = _leading_sign(text, m.start())
+
         unit_match = _UNIT_SUFFIX_RE.match(core)
         if unit_match:
-            tokens.add(unit_match.group(1))
+            tokens.append(_NumericToken(sign=sign, number=unit_match.group(1), unit=unit_match.group(2)))
             continue
         if _CODE_TOKEN_RE.match(core) and any(c.isalpha() for c in core):
-            tokens.add(core.upper())
+            tokens.append(core.upper())
             continue
+        if core.replace(".", "", 1).isdigit():
+            # A clean, unit-less number.
+            if strict_bare_numbers or len(re.sub(r"\D", "", core)) >= 2:
+                tokens.append(_NumericToken(sign=sign, number=core.upper(), unit=None))
+            continue
+        # A mixed alnum token that matched neither shape above (e.g.
+        # "Ultra-1" from a machine name: too many leading letters for
+        # _CODE_TOKEN_RE, no adjacent unit letters for _UNIT_SUFFIX_RE) --
+        # kept to the older, unconditional "at least 2 digits" behavior
+        # regardless of strict_bare_numbers. These are usually prompt-given
+        # context (the machine name) rather than a claimed fact, and the
+        # machine-label exemption in _claim_supported only works cleanly
+        # against an opaque whole-string token like this one.
         digits_only = re.sub(r"[^\d]", "", core)
         if len(digits_only) >= 2:
-            tokens.add(core.upper())
+            tokens.append(core.upper())
     return tokens
+
+
+def _token_supported(token: str | _NumericToken, haystack: str) -> bool:
+    """haystack is already _normalize_ws'd (collapsed whitespace, uppercased)
+    by the caller."""
+    if isinstance(token, str):
+        # Whole-token, non-embedded match -- a plain substring check would
+        # let "E4" be satisfied by an excerpt containing only "E40".
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(token) + r"(?![A-Za-z0-9])"
+        return re.search(pattern, haystack) is not None
+
+    # A number's sign and unit are part of the fact, and the match must not
+    # be embeddable inside a longer number (P0-01's "24" vs "240", "24V" vs
+    # "240 V", "240PSI" vs "240 V", "-240 V" fabricated from a positive
+    # excerpt): (?<![\d.]) blocks matching "24" inside "240" or "0.24" from
+    # either direction; requiring the literal sign character (or its
+    # absence) blocks a fabricated negative; requiring the SAME unit
+    # immediately after the number, not just any digits, blocks a unit swap.
+    pattern = r"(?<![\d.])" + re.escape(token.sign) + re.escape(token.number)
+    if token.unit:
+        pattern += r"\s*" + re.escape(token.unit.upper()) + r"(?![A-Za-z0-9])"
+    else:
+        pattern += r"(?!\d)"
+    return re.search(pattern, haystack) is not None
 
 
 def _normalize_ws(text: str) -> str:
@@ -170,18 +262,20 @@ def _normalize_ws(text: str) -> str:
 
 
 def _claim_supported(item_text: str, cited_content: str, machine_label: str | None = None) -> bool:
-    """A claim's material tokens must each appear verbatim in its cited
-    excerpt -- except a token that's actually just the machine's own name
-    (see parse_and_validate's docstring): the model is frequently going to
+    """A claim's material tokens must each appear verbatim (whole number,
+    same sign, same unit -- see _token_supported) in its cited excerpt --
+    except a token that's actually just the machine's own name (see
+    parse_and_validate's docstring): the model is frequently going to
     contextualize a claim by naming the machine it was told about
     ("...for the Ultra-1/Ultra-2"), and that's prompt-given context, not
     something drawn from -- or fabricated against -- the excerpt itself, so
     it's the wrong thing to require the excerpt to contain."""
-    tokens = _material_tokens(item_text) - _material_tokens(machine_label or "")
+    tokens = set(_extract_tokens(item_text, strict_bare_numbers=True))
+    tokens -= set(_extract_tokens(machine_label or "", strict_bare_numbers=True))
     if not tokens:
         return True
     haystack = _normalize_ws(cited_content)
-    return all(_normalize_ws(t) in haystack for t in tokens)
+    return all(_token_supported(t, haystack) for t in tokens)
 
 
 def _warning_supported(warning_text: str, cited_content: str) -> bool:
@@ -189,15 +283,32 @@ def _warning_supported(warning_text: str, cited_content: str) -> bool:
     system prompt instructs this explicitly) -- an invented warning will not
     appear anywhere in the excerpt text at all. The only normalization
     allowed is stripping a leading label the model may have added/reworded
-    ("WARNING:", "CAUTION:") and collapsing whitespace."""
-    norm_warning = _normalize_ws(warning_text)
+    ("WARNING:", "CAUTION:") and collapsing whitespace.
+
+    P0-01 (external review, 2026-09-21): a warning that's a PROPER substring
+    of the excerpt -- the model trimmed something off one end -- used to pass
+    unconditionally, which let "operate with the cover removed" satisfy an
+    excerpt that actually says "do not operate with the cover removed": a
+    real, contiguous substring, but the opposite instruction. The text
+    immediately surrounding the matched span (a short window, not the whole
+    excerpt, to avoid flagging an unrelated negation word in a neighboring
+    sentence) is now checked for a negation word the model's own warning
+    text doesn't contain; finding one rejects the response."""
     norm_content = _normalize_ws(cited_content)
+    norm_warning = _normalize_ws(warning_text)
     if not norm_warning:
         return False
-    if norm_warning in norm_content:
-        return True
-    stripped = _WARNING_LABEL_RE.sub("", norm_warning).strip()
-    return bool(stripped) and stripped in norm_content
+    stripped = _WARNING_LABEL_RE.sub("", norm_warning).strip() or norm_warning
+    idx = norm_content.find(stripped)
+    if idx == -1:
+        return False
+    window = 40
+    prefix = norm_content[max(0, idx - window):idx]
+    suffix = norm_content[idx + len(stripped):idx + len(stripped) + window]
+    for neg in _NEGATION_WORDS:
+        if neg not in stripped and (neg in prefix or neg in suffix):
+            return False
+    return True
 
 
 def detect_conflict(passages: list) -> str | None:
@@ -290,7 +401,7 @@ def parse_and_validate(
     a technician on the "Ultra-1/Ultra-2" got the generic UNVERIFIED_ANSWER
     fallback for several genuinely-unanswerable questions in a row, even
     though the model's actual explanation was honest and specific each time
-    -- `_material_tokens` flagged the machine's own model number (it has two
+    -- `_extract_tokens` flagged the machine's own model number (it has two
     digits, "1" and "2", however far apart) as an unverifiable claim, since
     that check has no cited excerpt to verify a no-answer explanation
     against and rejects unconditionally on any material token. The machine
@@ -325,7 +436,9 @@ def parse_and_validate(
         # it the same as any other unsupported claim -- reject the response
         # so the caller retries with a repair prompt or falls back to
         # UNVERIFIED_ANSWER, rather than display it.
-        unexplained_tokens = _material_tokens(explanation) - _material_tokens(machine_label or "")
+        unexplained_tokens = set(_extract_tokens(explanation, strict_bare_numbers=False)) - set(
+            _extract_tokens(machine_label or "", strict_bare_numbers=False)
+        )
         if unexplained_tokens:
             return None
         return GeneratedAnswer(

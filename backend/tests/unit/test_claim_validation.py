@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.providers.base import parse_and_validate
 from app.retrieval.search import RetrievedChunk
 
@@ -260,6 +262,112 @@ def test_claim_naming_the_machine_is_not_rejected():
     result = parse_and_validate(raw, passages, "test", machine_label="Ultra-1/Ultra-2")
     assert result is not None
     assert result.is_no_answer is False
+
+
+@pytest.mark.parametrize(
+    "excerpt, claim, expect_supported",
+    [
+        # 5 vs 50 psi -- a single-digit claim not present in the excerpt at
+        # all used to have NO material token to check against (P0-01: the
+        # old threshold required at least 2 digits before a bare number
+        # counted as material).
+        ("Set the regulator to 50 PSI.", "Set the regulator to 5 PSI.", False),
+        ("Set the regulator to 50 PSI.", "Set the regulator to 50 PSI.", True),
+        # 24 vs 240 V -- "24" is a genuine substring of "240", which the old
+        # plain containment check accepted.
+        ("The transformer outputs 240 V.", "The transformer outputs 24V.", False),
+        ("The transformer outputs 240 V.", "The transformer outputs 240V.", True),
+        # amperage vs voltage -- the old check discarded the unit suffix and
+        # verified only the numeral, so swapping the unit on a real numeral
+        # passed.
+        ("The heating element operates at 120V and draws 8.5A.", "The heating element draws 120A.", False),
+        ("The heating element operates at 120V and draws 8.5A.", "The heating element draws 8.5A.", True),
+        ("The heating element operates at 120V and draws 8.5A.", "The heating element operates at 120PSI.", False),
+        # negative numbers -- the old tokenizer never captured a leading "-"
+        # at all, so a fabricated negative passed against a positive
+        # excerpt.
+        ("The sensor reads 240 V nominal.", "The sensor reads -240 V nominal.", False),
+        ("The minimum storage temperature is -40F.", "The minimum storage temperature is -40F.", True),
+        # unsupported parts -- a prefix of the real part number is a genuine
+        # substring, which the old plain "in" check accepted.
+        (
+            "Replace the inlet fitting, part number 81-118-31, during service.",
+            "Replace the inlet fitting, part number 81-118-3.",
+            False,
+        ),
+        (
+            "Replace the inlet fitting, part number 81-118-31, during service.",
+            "Replace the inlet fitting, part number 81-118-31.",
+            True,
+        ),
+        # compatibility / digit-embedding -- "5000" is a genuine,
+        # character-for-character substring of "50000".
+        (
+            "This filter (part FL-200) fits machines up to serial 50000.",
+            "This filter (part FL-200) fits machines up to serial 5000.",
+            False,
+        ),
+        (
+            "This filter (part FL-200) fits machines up to serial 50000.",
+            "This filter (part FL-200) fits machines up to serial 50000.",
+            True,
+        ),
+    ],
+)
+def test_p0_01_numeric_claim_adversarial_table(excerpt, claim, expect_supported):
+    """P0-01 (external review, 2026-09-21): the number/identifier check used
+    to normalize a unit-suffixed token down to its bare numeral (discarding
+    the unit) and check substring presence anywhere in the cited passage --
+    a single digit had no material token at all, "24" is a substring of
+    "240", a unit mismatch was silently ignored, and a leading sign was
+    stripped before the token was even captured. Named adversarial cases
+    from the review, run as one table with a positive control alongside
+    each so the stricter checks are proven to still accept a genuinely
+    -supported claim, not just reject everything (a check that rejects
+    every case in this table would pass the negative rows by accident)."""
+    passages = [_passage(1, 1, excerpt)]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": claim, "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test")
+    if expect_supported:
+        assert result is not None, f"expected claim {claim!r} to be ACCEPTED against excerpt {excerpt!r}"
+    else:
+        assert result is None, f"expected claim {claim!r} to be REJECTED against excerpt {excerpt!r}"
+
+
+@pytest.mark.parametrize(
+    "excerpt, warning, expect_supported",
+    [
+        # negated instructions -- trimming the negation word off the front
+        # of a real warning leaves a genuine, contiguous substring of it,
+        # which the old plain containment check accepted.
+        ("Do not operate with the cover removed.", "Operate with the cover removed.", False),
+        ("Do not operate with the cover removed.", "Do not operate with the cover removed.", True),
+        ("WARNING: Never bypass the interlock switch.", "Bypass the interlock switch.", False),
+        ("WARNING: Never bypass the interlock switch.", "Never bypass the interlock switch.", True),
+    ],
+)
+def test_p0_01_warning_negation_adversarial_table(excerpt, warning, expect_supported):
+    """P0-01: a warning that's a proper substring of its cited excerpt used
+    to pass unconditionally -- trimming a leading negation word off a real
+    warning produces exactly that: a genuine substring with the opposite
+    meaning. The claim alongside each warning here deliberately has no
+    material token, so only the warning check is exercised."""
+    passages = [_passage(1, 1, excerpt)]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "This is general guidance with no measurement or part number in it.", "cited_excerpt_numbers": [1]}],
+        "steps": [],
+        "warnings": [{"text": warning, "cited_excerpt_numbers": [1]}],
+    })
+    result = parse_and_validate(raw, passages, "test")
+    if expect_supported:
+        assert result is not None, f"expected warning {warning!r} to be ACCEPTED against excerpt {excerpt!r}"
+    else:
+        assert result is None, f"expected warning {warning!r} to be REJECTED against excerpt {excerpt!r}"
 
 
 def test_claim_naming_the_machine_plus_an_unrelated_fabrication_is_still_rejected():
