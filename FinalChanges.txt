@@ -1,0 +1,955 @@
+FINAL CHANGES — ChatBot release review
+======================================
+Repository: https://github.com/cyagar/ChatBot
+Revision reviewed: 6d5a59747f67097d0f5e384229087b877c0cd480
+Review date: 2026-09-21
+Scope: FastAPI/PostgreSQL backend, ingestion/retrieval/providers, admin web UI,
+native Android client and Gradle/CI, scripts, migrations, tests and documentation.
+
+OVERALL ASSESSMENT
+------------------
+This is a working, thoughtfully scoped Android/Google Drive/manuals prototype
+with machine-filtered retrieval, review gates, invitation-based accounts,
+persisted conversations, saved answers, and real device history in the docs.
+It is close enough for a small supervised pilot only after the release-blocking
+items below have been addressed and checked against the actual APK/backend.
+Some current claims of evidence verification and evaluation accuracy are
+stronger than what the code establishes. The backend test workflow will not
+pass on a fresh checkout as configured. The ready-to-share APK and live server
+were not supplied for inspection: this review cannot verify their actual
+configuration, manual corpus, signature, or on-device behavior.
+
+Priorities: P0 = fix before technician audience testing with operational
+instructions; P1 = fix or explicitly contain during a supervised pilot;
+P2 = follow-up cleanup/performance. A finding marked FIXED means a local
+checkout change was made in this review; OPEN means feedback for the builders.
+"Reproduced" denotes an offline probe with synthetic data and no live
+credentials; "Static" denotes a source-level trace; "Conditional" requires
+checking the chosen deployment or actual APK.
+
+CHANGES MADE IN THE LOCAL CHECKOUT
+----------------------------------
+1. backend/app/rate_limit.py: login/register now always use client IP for
+   throttling, regardless of an arbitrary session cookie. Added an offline
+   regression in backend/tests/unit/test_release_regressions.py.
+2. backend/app/api/routes_config.py: stale-corpus status now accepts actual
+   psycopg datetime values. Added an offline regression in the same test file.
+3. backend/app/web/static/js/admin.js: Query Tester now loads the already
+   available /api/admin/machines list instead of requesting limit=500 from an
+   endpoint that allows at most 100.
+4. backend/tests/unit/test_config_validation.py: six tests now provide harmless
+   nonconnecting PostgreSQL URL placeholders so they reach the credential
+   checks they are meant to exercise.
+5. README.md, android/README.md, docs/ARCHITECTURE.md, backend/.env.example:
+   updated the current Android/PostgreSQL architecture and setup; flagged
+   broken invitation/feedback flows and corrected obsolete SQLite, PWA and
+   database setup instructions. The example secret is now shorter than the
+   production validator's minimum and expressly a placeholder.
+
+These local changes are not a deployed or signed APK. No account, manual,
+remote repository or production database was changed. Remaining source
+findings are recommendations, with precise places to edit.
+
+P0 — MUST ADDRESS BEFORE AN OPERATIONAL TECHNICIAN PILOT
+--------------------------------------------------------
+P0-01. Unsupported numbers and unsafe prose pass the "grounding" validator.
+Status: OPEN; reproduced.
+Code: backend/app/providers/base.py:125-200, 270-355; 372-394;
+      backend/app/providers/anthropic_provider.py:71-111.
+The validator extracts only some token forms, normalizes a unit to its bare
+number, and checks substring presence anywhere in the concatenated cited
+passages. In a synthetic excerpt stating "240 V; Do not operate with the cover
+removed", it accepted all four unsupported claims: "5 psi", "24V", "240PSI"
+and "-240 V". A single digit has no material token; "24" is a substring of
+"240"; a unit mismatch is ignored; signs are stripped. It also accepted
+is_no_answer text "Bypass the safety interlock and operate with the cover
+removed" because it has no material numeric token, and accepted a warning
+fragment with the negation removed. The no-answer prose and ordinary claims
+are not semantic entailment checks. A live model can therefore make a
+plausible but dangerous statement while citing a real manual.
+Fix: parse signed numbers, tolerances and units as whole typed tokens, reject
+unit mismatches and partial-number matches; require each quoted warning to
+preserve the full warning including negation; constrain no-answer explanations
+to fixed safe templates or check them too. Preserve a mapping of each claim/
+step to its cited chunk, and add page-level technician verification prompts.
+Use adversarial cases for 5 vs 50 psi, 24 vs 240 V, amperage vs voltage,
+negative numbers, negated instructions, unsupported parts and compatibility.
+Do not label the current heuristic "verified facts" or "zero hallucination".
+
+P0-02. Approving an unready replacement can remove the working manual.
+Status: OPEN; static.
+Code: backend/app/api/routes_admin.py:329-389;
+      backend/app/ingestion/pipeline.py:260-340; admin.js:418-450.
+POST /documents/{id}/review accepts any active row, including failed,
+unsupported, duplicate, or zero-chunk rows. It immediately deactivates all
+other active documents with that source_ref. A newly ingested replacement has
+machine links pending independent approval; the UI offers document approval
+and link approval as separate operations. If the document is approved first,
+the previous approved revision disappears and the new one may have no
+approved machine link, leaving no retrievable manual. This is a realistic
+normal-use sequence, not only an exotic concurrent write.
+Fix: make promotion an atomic transition that verifies extracted indexed/
+partial content, nonempty chunks, valid original file and at least one
+approved applicable machine link; keep the old revision serving until those
+conditions hold. Link/document review can remain separate internally, but
+the admin action should present a readiness checklist and guard the
+transaction. Exercise approval-first, link-first, failed replacement,
+withdrawn link, and two-admin concurrent promotion on PostgreSQL.
+
+P0-03. Metadata correction can approve previously rejected links.
+Status: OPEN; static.
+Code: backend/app/web/static/js/admin.js:254-280, 497-512;
+      backend/app/api/routes_admin.py:186-219, 49-76.
+Every Save correction sends all checked machine_ids, even if the administrator
+changed only title or revision. The edit form starts checked for all existing
+associations, including rejected and pending ones. The PATCH handler deletes
+every document_machines row and recreates the sent IDs as approved with
+confidence=1.0. A simple title correction can therefore silently override a
+human rejection and expose a manual to a wrong machine.
+Fix: send only dirty fields; include machine_ids only when associations were
+explicitly edited and independently confirmed. Preserve review states for
+unchanged links. If an admin intentionally overrides a rejected link, require
+an explicit link review action and audit its previous state. Add an API/UI
+regression: reject one link, change the title, assert it stays rejected and
+unretrievable.
+
+P0-04. Conversation and retry claims can remain stuck after a process death.
+Status: OPEN; static.
+Code: backend/migrations/0002_conversation_processing_lock.sql;
+      backend/app/api/routes_chat.py:258-292, 740-765, 859-862, 899-946.
+The committed is_processing boolean is cleared in a Python finally block.
+A killed worker, lost DB connection in release, or shutdown between claim
+and finally leaves it true indefinitely; all future questions/retries return
+409. A failed retry can separately remain answer_status='retrying'. The 409
+copy says "stop it" but no stop/cancel API exists.
+Fix: store attempt ID, claimed_at/lease deadline, owner/fencing token and
+terminal status. Bound total work; reclaim only expired attempts atomically
+with fencing so a late old worker cannot write a second answer. Give the
+technician a recovery or cancel action and expose attempt status. Test SIGKILL
+after committed claim, startup/retry recovery, duplicate request, and two
+workers claiming the same conversation. Keep the owner's one-question rule.
+
+P0-05. Machine changes are not serialized with an in-flight answer.
+Status: OPEN; static.
+Code: backend/app/api/routes_chat.py:509-589, 920-944, 295-319;
+      android/app/src/main/java/com/hmwagner/techmanual/ui/chat/ChatScreen.kt:380-391.
+set_conversation_machine updates the conversation machine before checking
+is_processing when there is no pending clarification. Old clarification chips
+remain enabled in every loaded message. A tap can change the machine while an
+answer for the previous one is in progress. Retry uses the conversation's
+current machine rather than the original user's/answer's stored machine; the
+history helper does not partition previous turns by machine. That creates
+cross-machine context, mismatched headers and potentially wrong-model advice.
+Fix: allow a selection only for the current pending clarification under the
+same conversation lock, or require a new conversation on deliberate switch.
+Use per-turn immutable machine_id during generation and retry; ensure history
+for that answer stays in the same machine scope. Disable resolved chips.
+Persist and display the answer's machine label, with a test switching while
+a provider call is blocked and retrying an older answer after a switch.
+
+P0-06. Android can lose the identity of a submitted question.
+Status: OPEN; static, sequence derived from code.
+Code: android/app/src/main/java/com/hmwagner/techmanual/ui/chat/
+      ChatViewModel.kt:87-154, 167-202, 205-275.
+After an ambiguous network failure the UI holds a UUID in pendingEcho. On
+refresh, it clears that pending entry if the last loaded message has role
+"assistant", without checking which request/answer it belongs to. When
+sending is false, send() accepts a new question and overwrites pendingEcho.
+Leaving/re-entering chat recreates its ViewModel and UUID, so a retry may
+send the old question under a new key. On non-2xx, the failure handler also
+overwrites a draft typed during the request with echo.content. These races
+can lose a question or produce duplicate service calls.
+Fix: persist pending attempt ID/content per conversation across navigation and
+process recreation (SavedStateHandle or secure local storage); expose a
+server-assigned user message ID or reply_to/attempt status; reconcile by that
+ID rather than last role, and prevent an unresolved attempt from being
+overwritten. Protect a newer draft from an older request's failure callback.
+Test delayed POST + concurrent refresh, app kill/restart after server accept,
+409 pending, and composing another question while one is uncertain.
+
+P0-07. Android refresh can duplicate messages and possibly duplicate UI keys.
+Status: OPEN; static, sequence derived from code.
+Code: ChatViewModel.kt:87-154, 205-235; ChatScreen.kt:142-155.
+A pull to refresh while a POST is in flight loads the server's persisted
+messages into state. When that POST returns, performSend blindly appends a
+synthetic user turn and the returned assistant answer to the refreshed list.
+If GET already includes the assistant answer, that server ID appears twice in
+LazyColumn(items, key={it.id}); if GET includes the user, the question appears
+twice. Such a race can corrupt the visible history and cause a duplicate-key
+Compose failure.
+Fix: merge by stable server IDs and attempt ID, replace the local echo with
+the acknowledged user turn, and discard an older refresh response using a
+request generation counter. Add a deterministic delayed-response ViewModel
+test covering GET both before and after answer persistence.
+
+P0-08. Evidence requests can reopen a dismissed sheet or show the wrong page.
+Status: OPEN; static.
+Code: ChatViewModel.kt:343-386; ChatScreen.kt:497-557.
+Each citation starts an uncancelled asynchronous fetch. Dismissing the sheet
+does not cancel or invalidate it. Selecting citation B while A is still
+loading lets A return last, with B's document ID/URL in state and A's evidence
+or page. This is a direct risk when technicians use citations to verify
+safety information.
+Fix: cancel the previous Job and compare a monotonically increasing request
+token plus (document_id, chunk_id) before applying any success/error. Reset
+loading on dismissal. Drive an on-device test with A delayed behind B, then
+dismiss during a load; no reopened/wrong manual image should appear.
+
+P0-09. External deployment may discard manuals while keeping DB citations.
+Status: OPEN; conditional on hosting choice.
+Code: backend/app/config.py:16-19; backend/app/ingestion/pipeline.py:69-82,
+      285-316; backend/Dockerfile; docker-compose.yml; scheduler.py:27-53.
+The storage_backend setting has no implementation branch. Files and the Drive
+cache live on local disk while PostgreSQL persists only the storage filename.
+Docker Compose mounts ./data, so a single persistent host can work. The
+owner's proposed Cloud Run deployment uses ephemeral instance files unless
+a durable store is wired in; restart/scale/new instance could break manual
+and page-image access even though retrieval and citations still work.
+Unchanged files are skipped by ingestion, so a new empty local disk is not
+automatically repopulated. The sleep-first timer also waits six hours after
+startup for its first attempt.
+Fix: before using ephemeral/replicated hosts, implement private durable
+object storage, serve originals through it, verify migration/backfill, and
+move scheduling plus the ingestion lock to a single coordinated worker/lease.
+For the existing single-host Compose route, confirm mounted volume
+permissions, persistence, recovery and a fresh-instance file-access test.
+Owner-approved cold starts are separate from losing manual files.
+
+P0-10. The actual full backend quality gate is not currently runnable in CI.
+Status: OPEN; reproduced first failure; docs/test fixture partially fixed.
+Code: .github/workflows/backend-ci.yml:1-71; backend/tests/conftest.py:14-83;
+      backend/tests/unit/test_migrations.py:147-197.
+Backend CI invokes all tests but provisions no PostgreSQL service or .env.test.
+The first DB-dependent test aborts with "backend/.env.test is missing". The
+fixture intentionally runs migrations and TRUNCATE against the configured
+test database; never satisfy CI by reusing a live deployment URL. Before this
+review, six unit settings tests also failed earlier on missing database URLs;
+their isolated inputs were corrected locally.
+Fix: provision ephemeral Postgres in CI, generate dedicated test URLs there,
+guard against production hosts/DB names, and run migrations and the full
+suite. Give parallel jobs isolated databases/schemas; restrict destructive
+privileges. Keep optional live Drive tests clearly gated. Add signed release
+APK assembly and connected Android tests as appropriate to the pilot.
+
+P0-11. Retrieval evaluation script cannot run and its advertised measure is
+       too permissive.
+Status: OPEN; reproduced.
+Code: backend/scripts/eval_retrieval.py:1-75, 76-131, 132-208;
+      data/eval/ground_truth.json; README.md (old testing section).
+It immediately raises AttributeError: Settings has no db_path_resolved.
+Remaining code opens a SQLite backup, writes DB_PATH (unused with Postgres),
+uses '?' SQL placeholders, and tries public registration without an invite.
+Even if the first error were patched, evaluation could touch the configured
+live PostgreSQL database; do not run a partly fixed script there. Its
+"citation support" succeeds if a keyword appears in answer OR excerpt, so an
+uncited invented answer word can pass; it does not validate claim-to-evidence
+or expected chunk type. Failed cases still leave CLI exit code zero. The
+small existing case set was previously used for tuning.
+Fix: run against a disposable, point-in-time PostgreSQL clone with a hard
+production-DSN refusal guard; create an invited eval user without writes to
+live data. Use Postgres SQL and require expected document + chunk + answer
+fact support; fail the process on unmet acceptance thresholds. Hold out new
+technician-written questions, wrong-machine cases, negatives and revisions.
+Include source withdrawal in the ground truth. Do not claim a measured live
+retrieval pass until it runs and is independently scored.
+
+P0-12. Release security settings do not reject an already copied example key.
+Status: OPEN for deployments; example file corrected locally; reproduced.
+Code: backend/app/config.py:92-117; backend/.env.example at reviewed commit.
+The old example SECRET_KEY="change-me-to-a-random-64-char-string" is longer
+than 32 and does not equal "dev-only-insecure-key". With otherwise plausible
+settings, validate_for_startup accepts it under APP_ENV=production. Anyone
+using that known string can mint valid signed session tokens when they know
+a user ID/token_version; the DB checks mitigate stale/disabled users but do
+not make a public signing key private. The new local example uses REPLACE_ME,
+which production startup rejects on length, but old copied .env files remain.
+Fix: reject a maintained list of known placeholders/low entropy defaults;
+generate and store a unique random secret per environment; rotate any
+deployment that ever used the example value, invalidating old sessions.
+Verify APP_ENV, cookie Secure flag, allowed domains, HTTPS and session behavior
+against the actual deployed backend, without disclosing its key.
+
+P0-13. Old advice remains visible after an emergency manual withdrawal.
+Status: OPEN; static, policy choice required.
+Code: backend/app/api/routes_chat.py:593-654, saved-answer handlers
+      1008-1051; backend/app/api/routes_manuals.py:27-101.
+Current retrieval and original-manual serving apply deactivated/review
+filters, but message hydration still returns historical answer text and
+persisted excerpts for a withdrawn document. Saved answers likewise display
+old content, even when the original evidence endpoint has become unavailable.
+An emergency withdrawal could therefore leave unsafe instructions in a
+technician's history or bookmarks.
+Fix: preserve audit/history records but mark each source's current review/
+withdrawal status on hydration. Clearly flag and suppress action-oriented
+content from withdrawn sources in technician views until revalidated; ensure
+admin can inspect the original answer for investigation. Test a saved answer
+and history after deactivating and after superseding its only manual.
+
+P1 — HIGH VALUE PILOT FIXES AND CONTAINMENTS
+---------------------------------------------
+P1-01. Invitation links are broken for newly recruited testers.
+Status: OPEN; reproduced: GET /?invite=synthetic returns 404.
+Code: backend/app/web/static/js/admin.js:453-469;
+      backend/app/main.py:157-170; backend/app/auth/routes.py:87-191;
+      android/app/src/main/java/com/hmwagner/techmanual/network/ApiService.kt.
+The dashboard displays a link to "/?invite=..." left over from the removed
+technician PWA. There is no route/page there, Android deep link, or Android
+registration form. An administrator can create tokens and the JSON API can
+redeem them, but recipients have no supported way to choose a password.
+A precreated pilot account covers an initial small test, but sharing one
+login across testers merges their history/feedback and prevents attribution.
+Fix: implement a minimal HTTPS invitation redemption page with no technician
+PWA, or add an Android registration/deep-link flow; verify expiry, single
+use, email binding, typo and cancellation. Add a password reset/admin-assisted
+recovery path before broad recruitment. Do not send the current generated
+URL. Keep the owner's email/password approach; no SSO redesign is needed.
+
+P1-02. The Android app cannot submit answer feedback.
+Status: OPEN; static.
+Code: backend/app/api/routes_chat.py:949-975;
+      backend/app/api/routes_admin.py:752-775;
+      android/.../network/ApiService.kt:1-83 and
+      android/.../ui/chat/ChatScreen.kt:324-435.
+The backend supports helpful/incorrect/missing_info plus a comment and the
+admin dashboard lists feedback, but Retrofit/Compose have no feedback method
+or controls. For target-audience testing, unanswered questions alone are a
+poor substitute for structured error reports.
+Fix: add per-answer feedback buttons and optional "what was wrong" text,
+persist/reload feedback_rating, include machine, model, citation and
+conversation/message IDs in the admin triage view. If APK cannot be rebuilt
+for the first testers, provide a working external form that captures the
+same identifiers and explain how testers report an unsafe answer.
+
+P1-03. Query Tester asked the wrong machine endpoint.
+Status: FIXED locally; reproduced before fix: HTTP 422.
+Code: backend/app/web/static/js/admin.js:101-103;
+      backend/app/api/routes_machines.py:59-63;
+      backend/app/api/routes_admin.py:92-111.
+It requested /api/machines?limit=500 though the technician endpoint caps
+limit at 100. The Query tab could fail before rendering, hiding the primary
+retrieval inspection tool. It now calls /api/admin/machines, which has no
+technician pagination cap and already backs the metadata editor. Validate
+the tab end-to-end under an authenticated admin session on the actual host.
+
+P1-04. Public corpus status always hides stale PostgreSQL runs.
+Status: FIXED locally; reproduced by passing an old psycopg-style datetime.
+Code: backend/app/api/routes_config.py:34-63;
+      backend/tests/unit/test_release_regressions.py.
+datetime.fromisoformat(datetime_obj) raised TypeError; a blanket except
+converted that to ("ok",""), even after 72 hours with a 48-hour threshold.
+The handler now accepts a datetime directly. Follow-up: a database error or
+no successful run still returns "ok". Report a degraded/unknown status, log
+the exception, and test before the first ingestion as well as DB outages.
+Android currently does not consume /api/config, so maintenance/minimum
+version/support strings do not yet reach users.
+
+P1-05. Ingestion can mark failed/manual-skipped runs "completed".
+Status: OPEN; reproduced with a synthetic failed FileOutcome.
+Code: backend/app/ingestion/pipeline.py:164-215, 321-340, 524-536;
+      backend/app/ingestion/sources.py:309-401;
+      backend/app/api/routes_admin.py:620-663.
+had_error flips on raised exceptions, but a handled extraction returning a
+failed/unsupported FileOutcome (or a source that recorded a download
+failure as "skipped") does not set it. An all-failed synthetic run updated
+ingestion_runs to status='completed'. The admin freshness banner includes
+completed_with_errors as successful, so even a correctly marked partial run
+may mask a manual-coverage gap.
+Fix: derive health from both run-level exceptions and per-file statuses;
+separate intentional unsupported types from failed downloads and partial
+OCR. Report counters and source listing completeness; make "last fully
+successful sync" distinct from "last attempted sync". Alarm when a required
+file is missing/unreadable. Test all failed, mixed, empty listing and source
+listing failure.
+
+P1-06. Admin UI CSP blocks its inline styles and event handlers.
+Status: OPEN; static, browser confirmation needed.
+Code: backend/app/main.py:110-133;
+      backend/app/web/static/js/admin.js:106-417, 254-280.
+CSP says style-src 'self' and script-src 'self', without unsafe-inline.
+The admin template is served with those headers, but JS inserts many
+style="..." attributes (including display:none on edit rows) and at least
+one inline onclick="this.select()" attribute. CSP-compliant browsers ignore
+blocked inline styles/handlers; edit rows may appear prematurely and layout
+breaks. This is not solved by loosening the entire policy.
+Fix: move inline declarations into app.css/admin.css classes, toggle classes
+from JS, and use addEventListener for every handler. Check DevTools CSP
+violations for all tabs and interactions in the deployed admin browser.
+
+P1-07. Admin HTML encoding is unsafe inside attributes.
+Status: OPEN; static.
+Code: backend/app/web/static/js/admin.js:254-275, 558-562.
+esc() puts text in a div and returns innerHTML, which escapes text nodes
+but does not encode a double quote for an HTML attribute. It is used inside
+value="..." and data-search="..." for document titles, revisions and machine
+names. A quoted value can truncate the field and inject attributes/markup.
+Strict CSP limits many script vectors but does not make malformed HTML safe.
+Fix: create nodes and set .value/.textContent/dataset directly, or use a
+separate proven attribute encoder. Add tests with quotes, ampersands, angle
+brackets and pasted HTML in title/revision/model, rendered under strict CSP.
+
+P1-08. Many admin actions fail without a visible recovery path.
+Status: OPEN; static.
+Code: backend/app/web/static/js/admin.js:85-104, 418-555.
+Some invite creation code catches errors, but loading tabs and approving
+documents/links, deactivating, reindexing, saving metadata and running the
+query often await api() without try/catch or disabled/loading state. An
+expired admin cookie, 409, 422, source timeout, or deployment restart can
+leave an action apparently unresponsive; double taps may compound it.
+Fix: centralize error display with correlation ID/status and safe retry
+where applicable, disable active controls, refresh review state after
+conflict, and handle 401 by returning to admin login. Test empty corpus,
+expired admin session and failed reindex. Expose human review of document
+page/contents before approval.
+
+P1-09. Real legacy Word files are always routed to unsupported extraction.
+Status: OPEN; reproduced on synthetic OLE signature.
+Code: backend/app/ingestion/extractors.py:351-428.
+OLE files sniff as "ole"; resolve_file_type trusts the sniff over a ".doc"
+extension; extract() dispatches to extract_legacy_doc only for "doc".
+An actual binary .doc therefore takes the unsupported branch. Conversely
+all ZIP OOXML signatures are labeled "docx", so .xlsx/.pptx may be sent to
+the wrong parser. The documented "legacy .doc supported" claim is false.
+Fix: inspect OLE streams or safely classify expected .doc OLE with the
+extension and WordDocument stream; inspect ZIP member names to distinguish
+.docx from other OOXML; mark unknown containers unsupported explicitly.
+Test with a genuine tiny legacy .doc, DOCX, XLSX and renamed PDFs, including
+extracted text/chunks and safe failure messages.
+
+P1-10. Metadata reindex can overwrite reviewed associations and bad reads.
+Status: OPEN; static.
+Code: backend/scripts/reindex_metadata.py:112-209;
+      backend/tests/unit/test_reindex_metadata.py:228-267, 344-371.
+The reindexer calls extract() and never checks an ExtractedDocument status
+of failed/unsupported if extraction returns normally. It then may replace
+metadata using the filename and empty extracted data. It identifies old
+auto links by model_name alone (ignoring manufacturer) and deletes every
+confidence<1 row on change, even if reviewed approved/rejected; approval
+does not set confidence to 1. It recreates proposed links pending, possibly
+taking an approved manual out of a machine's retrieval.
+Fix: abort per-document update on extraction failure, compare
+(manufacturer, model) IDs rather than display names, preserve reviewed
+links/rejections, and propose new links for explicit review. Dry-run a
+realistic corpus and show old/new decisions before --apply; test a rejected
+link, manual override, same model across manufacturers and failed extraction.
+
+P1-11. Android ignores all server pagination cursors.
+Status: OPEN; static.
+Code: android/.../network/ApiService.kt:20-74;
+      android/.../ui/history/HistoryViewModel.kt;
+      android/.../ui/saved/SavedAnswersViewModel.kt;
+      android/.../ui/machines/MachinesViewModel.kt;
+      backend/app/api/pagination.py:41-83.
+The backend returns plain arrays with X-Next-Cursor headers, but Retrofit
+supplies no cursor arguments and the ViewModels never load another page.
+Users see only the first 20 conversations, 50 saved answers, 25 machine
+search matches, 10 recents and 500 conversation messages by default. With
+ascending message pagination, later replies can disappear when a chat grows.
+Fix: capture Response headers, expose Load more or infinite paging, merge
+rows by stable ID, and display a real "more available" affordance. Decide
+whether chat should start with the newest page. Test >500 turns, >20
+conversations, >50 bookmarks, changing data between pages and empty pages.
+
+P1-12. Machine search resets favorite indicators.
+Status: OPEN; static.
+Code: backend/app/api/routes_machines.py:26-37, 59-116, 119-172;
+      android/.../ui/machines/MachinesViewModel.kt.
+Recent machines include r.is_favorite, but search_machines has no join to
+recent_machines and _row_to_machine defaults absent is_favorite to false.
+Searching for a favorited machine draws an empty star; tapping it can send
+favorite=true rather than removing the favorite. Search and recents disagree.
+Fix: left join the current user's recent row in search, select is_favorite
+with grouping, and synchronize optimistic ViewModel state across both lists.
+Test favorite/unfavorite via search, refresh, recent list and concurrent
+taps. Keep selection of machines restricted to approved current manuals.
+
+P1-13. Chat can show the wrong machine label and strand clarification.
+Status: OPEN; static.
+Code: android/.../ui/chat/ChatScreen.kt:102-110, 380-393;
+      android/.../ui/chat/ChatViewModel.kt:282-299;
+      backend/app/api/routes_chat.py:817-856.
+The toolbar uses the label passed through navigation rather than
+state.conversation.machine_label. A server-resolved machine or a newly
+selected clarification chip updates the ViewModel but not that title; it can
+continue saying "No machine selected". If the backend asks the technician
+to select a machine but finds no candidate options, this chat has no
+machine picker to resolve its pending question. Returning to Machines can
+start a new conversation, leaving the original pending.
+Fix: render the authoritative server conversation/answer machine; expose a
+select-machine action in the same pending conversation even with zero
+suggestions. Disable chips from older resolved clarifications. Test
+automatic mention resolution, "not sure" and a no-match model.
+
+P1-14. Retry and ingestion state are not robust to interruptions.
+Status: OPEN; static, requires database/device confirmation.
+Code: backend/app/ingestion/pipeline.py:116-174;
+      backend/app/ingestion/scheduler.py:27-56;
+      backend/app/api/routes_admin.py:557-619.
+The in-process threading lock guards only one Python process. A scheduled
+run in another replica and a manual run can overlap, touching shared caches
+and document rows. A run row can also remain "running" if a process dies.
+The source is constructed before the main try block, so source setup
+failure may leave a precreated manual run row in that state.
+Fix: single coordinator with database advisory/lease lock and job ID;
+terminalize stale runs on recovery with cause and timestamps. Keep the
+single-instance timer for a tested single-host rollout if that is the
+actual deployment; do not claim cloud replica safety. Add two-process
+overlap and crash-after-start tests.
+
+P1-15. Stored embeddings have no reliable model revision migration.
+Status: OPEN; static.
+Code: backend/migrations/0001_initial_schema.sql:93-99;
+      backend/app/ingestion/pipeline.py:539-573;
+      backend/app/retrieval/search.py:124-169;
+      backend/app/config.py:60-67.
+Only missing chunk IDs are embedded. model_name is stored but neither the
+pinned revision nor vector dimensions are checked against the current query
+model in vector_search. A changed embedding model/revision may compare
+incompatible vectors (dimension error) or silently rank mismatched
+same-dimensional vectors. The pipeline version's needs_reprocessing flag
+tracks text extraction/chunking, not embeddings.
+Fix: store a fingerprint (name, revision, normalization/dimension), refuse
+mixed vector query scoring, and stage/rebuild embeddings before switching
+the query model; report corpus/model coverage. Test a model change with
+dimension mismatch and same-dimensional revision.
+
+P1-16. Large rows and line grouping can detach safety meaning.
+Status: OPEN; static, requires sample-manual QA.
+Code: backend/app/ingestion/chunking.py:67-111, 151-182.
+An oversized table row is split across rendered pseudo-rows. Later pieces
+have empty identifier columns, so an error-code remedy/value can lose its
+code in the retrieved chunk. A WARNING heading/line can also be flushed
+away from the continuation text when classification changes; long warning
+and procedure chunks do not use the same text budget as normal prose.
+Fix: repeat row identifiers/context in every split and preserve warning
+blocks or procedure step continuations as a unit with page/heading.
+Review retrieved chunks against original pages for measured voltages,
+fault codes, safety warnings and long tables. Do not rely only on the test
+assertion that all text survived somewhere.
+
+P1-17. Sign-in state and logout need clearer network behavior.
+Status: OPEN; static.
+Code: android/.../ui/nav/AppNav.kt:114-149;
+      android/.../network/ApiClient.kt:50-65, 89-105, 144-184;
+      android/.../ui/common/LogoutAction.kt.
+At startup any non-2xx /me response clears the cookie and navigates to
+login, including temporary 500/503/429. A true transport exception keeps
+the cached session, so the same outage has inconsistent behavior. Logout
+awaits a network call before clearing local state; the backend logout
+only sends a delete-cookie response and does not revoke the JWT server-side,
+despite Android comments saying "actually revoked". On a dead connection
+the 90-second read timeout can delay sign-out; an in-flight old login could
+repopulate state after a clear.
+Fix: clear credentials on 401/revocation; show a retry/offline state for
+transient server errors; clear local cookie immediately on sign-out and
+best-effort send logout after, with request generation guards. If
+server-wide sign-out is required, explicitly bump token_version for that
+user, understanding it also signs out other devices; otherwise document
+local-only logout accurately. Test slow network, 503, stale 401 and rapid
+logout/login.
+
+P1-18. Cookie jar does not fully enforce cookie semantics.
+Status: OPEN; static.
+Code: android/.../network/PersistentCookieJar.kt:28-90.
+loadForRequest checks only exact host and expiry, not Cookie.matches(url)
+(path, secure, domain rules). hasSession ignores expiry, so an expired cookie
+may trigger an unnecessary /me. The in-memory map is mutable without a
+lock while OkHttp/background calls can read/write it concurrently. If
+encrypting a newly received cookie fails, the old ciphertext is left in
+preferences; after restart an older session can be restored.
+Fix: use Cookie.matches(url), synchronize cookie state, reject expired
+entries for hasSession, and clear old persisted ciphertext on encryption
+failure. Test domain/path/TLS matching, concurrent save/load and Keystore
+failure/recovery on device. Release manifest already disables cleartext;
+this is defense against future host/path changes and stale sessions.
+
+P1-19. Provider call budget can exceed server and client expectations.
+Status: OPEN; conditional, verify with actual model/network.
+Code: backend/app/providers/anthropic_provider.py:19-31, 71-140;
+      android/.../network/ApiClient.kt:144-171.
+The code sets a 30-second SDK timeout but leaves the installed Anthropic
+client's retry default at two. parse_and_validate can ask for a second
+provider call after an invalid response. One technician request can thus
+take much longer than one 30-second call; the Android read timeout is 90
+seconds. The client may report an ambiguous send while the backend still
+works, increasing pending/retry confusion and cost. The model identifier
+is hardcoded; a production deployment should verify its availability.
+Fix: choose max_retries and a total attempt deadline that fits the mobile
+timeout and HTTP proxy; expose processing status; log/review spend and
+timeouts without logging sensitive manual text unnecessarily. Test two
+timeouts and a malformed first response. No live Anthropic call occurred
+in this review.
+
+P1-20. Machine/model/account identifiers need canonicalization.
+Status: OPEN; static.
+Code: backend/app/auth/routes.py:136-207;
+      backend/migrations/0001_initial_schema.sql:24-36.
+Users.email and invitations.email are TEXT with case-sensitive uniqueness;
+invitation redemption compares lowercase but stores payload email as
+entered, and login queries exact email. A user registering mixed case may
+not be able to log in with a lowercased address; separate invitations with
+case variants can create duplicate identities. Fix: decide a canonical
+lowercase email policy, normalize invitation, registration and login, and
+create a unique lower(email) constraint after checking existing rows.
+Test case changes end to end. Avoid modifying machine model display names
+as a side effect of the email fix.
+
+P1-21. Saved-answer controls are inconsistent.
+Status: OPEN; static.
+Code: android/.../ui/chat/ChatScreen.kt:429-431;
+      backend/app/api/routes_chat.py:954-1010;
+      android/.../network/ApiService.kt:59-75.
+The button appears for failed and no-answer assistant messages, but the
+backend permits saving only completed answers with actual content; tapping
+returns 404. A saved answer cannot be removed in the Android UI despite a
+backend delete endpoint. Opening a saved item navigates to its conversation,
+not necessarily its exact message.
+Fix: gate the button on server-eligible answer status, support unsave and
+scroll/jump to the bookmarked message/citation. Test failed, no-answer,
+clarification, deleted source and an older message in a long conversation.
+
+P1-22. Release APK build is not exercised by CI.
+Status: OPEN; static.
+Code: .github/workflows/android-ci.yml:1-64;
+      android/app/build.gradle.kts:53-130;
+      android/app/src/main/AndroidManifest.xml:1-25.
+CI builds a debug APK only. The URL/signing preflight is attached to
+assembleRelease/bundleRelease names; another release packaging route may
+not run it. URL checks only a string prefix and one exact placeholder,
+not a valid authority/trailing slash accepted by Retrofit. The release
+application still has demo versionName/versionCode 1, generic system icon,
+and no R8 shrinking; package/applicationId is the same as debug, so
+installing a signed APK over a debug build may require uninstalling.
+Fix: validate URL with a parser and a release lifecycle task, build a
+signed staging/release candidate in a controlled pipeline, inspect the
+actual APK with aapt/apksigner, back up the signing key, and test upgrade
+from the *previous release signed with the same certificate*. Confirm
+minSdk against the device fleet and versionCode increment before wider
+distribution. R8/icon polish is secondary to correctness.
+
+P1-23. Public config and app maintenance affordances are metadata only.
+Status: OPEN; static.
+Code: backend/app/api/routes_config.py:17-84;
+      backend/app/config.py:77-91;
+      android/.../network/ApiService.kt.
+minimum_supported_version, maintenance_mode/message and support_contact are
+returned, but Android never requests them. The backend does not enforce a
+minimum client version. A forced upgrade/maintenance incident cannot reach
+technicians through the current app.
+Fix: fetch config at startup/refresh, display maintenance and support text,
+compare with Android BuildConfig.VERSION_NAME if a minimum is used, and
+define server behavior for old clients. Set a real support contact. Preserve
+an offline recovery path; test outage and stale version with the release APK.
+
+P1-24. The auth rate limit could be bypassed by arbitrary cookies.
+Status: FIXED locally; reproduced before and after fix.
+Code: backend/app/rate_limit.py:13-19;
+      backend/tests/unit/test_release_regressions.py.
+Before: 12 bad logins from the same IP produced 401 x10, then 429 x2;
+12 logins with a different unsigned tma_session each time produced 401
+x12. The key now uses IP unconditionally for login/register. The added
+regression exercises 11 bad requests with rotated cookies and expects
+401 x10, 429. Check proxy client-IP trust and consider a shared limiter
+backend before running multiple processes; current SlowAPI storage is
+process local. Avoid locking out a full office NAT if a pilot generates
+many legitimate logins; monitor actual 429 rates.
+
+P2 — HARDENING, PERFORMANCE AND CODE CLEANUP
+---------------------------------------------
+P2-01. Pagination cursor shape is checked but its types are not.
+Status: OPEN; reproduced decode accepting ['not-a-date','not-an-id'].
+Code: backend/app/api/pagination.py:47-67; route callers under api/.
+decode_cursor permits any string/int/float/bool/null of the correct tuple
+length. A crafted date or integer position can then be passed to PostgreSQL
+as an invalid comparison/cast and surface a 500 rather than 400; very large
+base64 cursors also have no size bound. Validate each route's cursor schema
+and timestamp offset, reject bool in integer positions, and bound input
+length. Test valid round trips and malformed typed values against Postgres.
+
+P2-02. Database reads become very chatty as history grows.
+Status: OPEN; static.
+Code: backend/app/api/routes_chat.py:593-655 and message-list/saved-list
+      handlers; backend/app/api/routes_admin.py:44-80, 112-145;
+      backend/app/db.py:13-31.
+Hydrating a message queries sources, current feedback and save status
+separately; the label and lists add further reads. Hundreds of messages
+cause hundreds to thousands of round trips across the Neon network. Each
+get_conn also opens/closes a DB client connection.
+Fix: batch message IDs and fetch source/feedback/saved sets in three queries,
+batch machine/document displays, bound page sizes, and measure p95 cold/warm
+latency on the selected hosting/database path. Consider a small client pool
+only after measuring; continue using the correct pooled Neon DSN for app
+traffic.
+
+P2-03. OCR and image handling need resource budgets.
+Status: OPEN; static, corpus dependent.
+Code: backend/app/ingestion/extractors.py:65-117, 311-341;
+      backend/app/api/routes_manuals.py:106-137;
+      backend/app/config.py:35-43.
+The 200 MB Drive limit bounds download bytes but does not bound PDF page
+count, decompressed pixels, OCR CPU time, or per-page rendered PNG memory.
+Manual page rendering at 150 dpi can allocate a large buffer, and a
+process-local lru_cache stores rendered responses. Keep the owner's small
+corpus assumptions but add per-page pixel/time/total-run caps and
+unsupported-page reporting; test an intentionally huge synthetic page and
+show an actionable error instead of killing the app container.
+
+P2-04. Admin and README copy contains stale or absolute claims.
+Status: PARTLY FIXED in documentation; code comments and historical notes
+remain. Code: backend/app/main.py:112-121;
+      backend/app/providers/base.py:97-101, 140-149, 270-283;
+      backend/app/providers/anthropic_provider.py:1-9;
+      backend/app/retrieval/search.py:1-15;
+      docs/PRODUCTION_READINESS.md; android/README.md.
+Main says the admin UI has no inline styles/scripts, contrary to admin.js.
+Retrieval calls its current PostgreSQL ranking "FTS5", and Anthropic docs
+still say to uncomment a package that is already installed. The validator
+claims every fact/warning is mechanically verified, despite P0-01. Long
+historical "P0 fixed" comments obscure current invariants. Keep brief why/
+security comments; move dated chronology to a changelog/ADR and state
+current behavior in module docstrings. Historical readiness document now
+has a front warning; review each checked item before any release claim.
+
+P2-05. Several runtime settings and dependencies have no current use.
+Status: OPEN; static, cleanup candidates after tests.
+Code: backend/app/config.py:16;
+      backend/requirements.txt:1-55;
+      backend/app/ingestion/dedup.py:46-84;
+      backend/scripts/reindex_metadata.py:54;
+      android/.../network/ApiModels.kt:99.
+storage_backend is configuration theater until a second driver exists.
+rank-bm25 is not imported by live retrieval (Postgres ts_rank is used);
+python-multipart appears unused with JSON-only APIs; pydantic and
+pydantic[email] pin the same version twice; pytest tooling lives in the
+production requirements/image. OVERRIDABLE_FIELDS is unused,
+ApiErrorBody is defined but never parsed, and some imports (e.g. struct in
+embeddings.py, io in routes_manuals.py) appear unused. Delete confirmed
+unused dependencies/imports and stale constants after a full CI test;
+keep FakeDirectorySource and tested dedup utilities that serve meaningful
+regressions rather than deleting code by name alone. Separate dev/test
+requirements from runtime and avoid changing the deployed image blindly.
+
+P2-06. Postgres migration runner assumes semicolons never appear in strings.
+Status: OPEN; static.
+Code: backend/app/db.py:38-85;
+      backend/tests/unit/test_migrations.py.
+split_sql_statements uses script.split(';') and the comment relies on every
+future migration avoiding semicolons in SQL strings, comments and functions.
+It works for the current simple schema, but a future trigger/function or
+data backfill can silently split wrong. Use psycopg execution of an entire
+trusted migration where supported, or a SQL-aware splitter; keep migration
+transaction/rollback tests including an embedded semicolon case. Serialize
+deploy-time migration ownership when running multiple instances.
+
+P2-07. Manual/health endpoints need deployment observability.
+Status: OPEN; static.
+Code: backend/app/main.py:158-165;
+      backend/app/api/routes_manuals.py:58-140;
+      backend/app/api/routes_admin.py:610-665.
+GET /healthz returns {"ok":true} without checking PostgreSQL, Drive
+configuration, stored originals or ingestion freshness. That is useful as
+a liveness endpoint but cannot prove readiness for serving a citation.
+Add a separate, bounded readiness/ops check with DB connectivity, storage
+readability and last valid sync (without exposing proprietary filenames
+publicly). Define logs/alerts for 5xx, lock recovery, stale corpus,
+missing evidence, negative feedback and disconnected users. Correlation
+IDs are already in the error envelope; show them in Android/admin errors.
+
+P2-08. Prompt/retrieval privacy and answer traceability deserve review.
+Status: OPEN; static.
+Code: backend/app/providers/anthropic_provider.py:99-140;
+      backend/app/providers/base.py:372-394;
+      backend/app/api/routes_chat.py:324-433.
+A rejected provider response is logged raw; prompts contain excerpts and
+prior questions, potentially including proprietary manual content. The
+flattened citation list loses the relationship between each rendered step
+and its supporting excerpt. Define log access/retention/redaction,
+document the provider data flow to pilot stakeholders, and store claim-level
+citation mapping or inline [n] references. Do not delete audit/source rows
+needed to explain an answer. Test multiple claims from different pages and
+reloaded history.
+
+P2-09. Phone usability and accessible controls require real device passes.
+Status: OPEN; not verified on supplied APK.
+Code: android/.../ui/login/LoginScreen.kt;
+      android/.../ui/chat/ChatScreen.kt:437-557;
+      android/.../ui/nav/AppNav.kt:230-290;
+      android/app/src/androidTest/.
+Login/composer layouts may be squeezed by a soft keyboard, landscape phone
+or large font; evidence page images fit a full sheet without zoom and can be
+too small for electrical labels. A failed image currently offers retry, not
+a readable text excerpt in the image error branch. Add pan/zoom for cited
+pages and retain the extracted text fallback. Check 320dp phone, phone
+landscape, split screen, 200% font, IME covering send/login, long machine
+names, large citations and gloves/touch targets. The owner waived a spoken
+TalkBack listening session: do not turn that waiver into an undocumented
+blocker or programmatically enable a screen reader.
+
+P2-10. Adaptive navigation selection and draft state deserve rechecking.
+Status: OPEN; conditional device behavior.
+Code: android/.../ui/nav/AppNav.kt:101-160, 233-319;
+      android/.../ui/chat/ChatViewModel.kt:39-80.
+HomeContent's DisposableEffect clears Activity-scoped selection whenever
+Home leaves composition, including lifecycle transitions; the comments
+claim selection survives rotation/single-vs-two-pane and cite prior tablet
+tests. Verify that current code still preserves/clears selection correctly
+on rotation, activity recreation, logout and user switch. A single-pane
+NavHost starting directly at chat with no list beneath it may let the system
+Back gesture exit rather than return to Machines, unlike the toolbar back.
+Drafts and pending attempts are not restored after process death. Preserve
+the confirmed tablet behavior and add the two missing phone/system-back
+cases before changing navigation architecture.
+
+P2-11. Source reconciliation and revision rollback should be operational.
+Status: OPEN; intentional owner scope, not a request to auto-delete.
+Code: backend/app/ingestion/sources.py:280-416;
+      backend/app/ingestion/pipeline.py:285-340;
+      docs/OWNER_DECISION_GATE.md.
+A missing Drive file does not automatically revoke its indexed document;
+that is an explicit owner decision. Add a report of Drive items missing
+from the last complete listing, ownership/revision decisions and a
+human-approved emergency withdrawal/rollback runbook. Ensure a newly
+uploaded revision cannot silently change an approved old manual before
+review. Test a Drive rename/delete, a failed replacement, approval and
+rollback; retain audit history.
+
+P2-12. Release signing and dependency reproducibility need a maintained
+record.
+Status: OPEN; conditional on the actual distribution.
+Code: android/gradle/wrapper/gradle-wrapper.properties;
+      android/app/build.gradle.kts;
+      backend/Dockerfile; backend/requirements.txt.
+Gradle and most direct Python dependencies are pinned, but the effective
+transitive environment is not locked with hashes; Docker's base tag can
+change; external embedding model bytes are pinned by revision. The signed
+APK's key, URL and version live outside Git and were not inspectable here.
+Record exact artifact checksum/signing certificate/backend URL and build
+parameters for each pilot drop. Store release keystore and credentials
+securely with tested restore; keep a release tag/changelog and one canonical
+way to reproduce the build. Verify packages against your selected Android
+SDK rather than trusting dated SDK anecdotes.
+
+P2-13. Historical/demo and dead-path references can be trimmed.
+Status: PARTLY FIXED in current docs.
+Code: data/manuals_incoming/.gitkeep; backend/.env.example;
+      android/README.md: earlier "one-day demo" sections;
+      backend/scripts/seed_dev_technician.py; docs/PRODUCTION_READINESS.md.
+The ignored manuals_incoming folder is no longer a production ingestion
+source; keep its empty marker only if a documented local testing workflow
+needs it. The demo account seed script remains development-only; make its
+docstring clearly refer to Postgres rather than a SQLite file and prefer an
+interactive password over --password to avoid shell-history disclosure.
+Old readiness counts, PWA advice, SQLite backups and DB_PATH instructions
+should never be copied into deployment notes. Current README/.env example/
+architecture have been corrected; the long historical Android/readiness
+chronicle is marked as such and may be moved to an archive later.
+
+DOCUMENTATION CHANGES AND REMAINING EDITS
+-----------------------------------------
+Locally updated:
+  README.md                Current quickstart, account/approval, testing and
+                           storage/backups; removed stale SQLite/PWA/eval claims.
+  android/README.md        Current pilot status at top and corrected CLI SDK
+                           platform name. Prior dated narratives kept as
+                           historical notes.
+  docs/ARCHITECTURE.md     Replaced obsolete SQLite/PWA diagram and descriptions
+                           with a concise PostgreSQL/Android architecture.
+  docs/PRODUCTION_READINESS.md
+                           Explicit historical warning above old checked boxes.
+  backend/.env.example     Required Postgres URLs, invalid secret placeholder,
+                           correct invitation wording and support/config keys.
+Further edits after implementing fixes: make Android's current README a concise
+source of truth (move the >1,000-line dated review log to HISTORY.md); explain
+new invitation flow, feedback, per-answer source status, crash recovery,
+object storage, release signing and the actual test database instructions.
+Update code docstrings at the cited sites alongside behavior. Keep owner
+decisions: Android first; ~20 company devices; email/password and FastAPI;
+Google Drive source; no forced OIDC/Hilt/Next.js redesign; no automatic
+Drive-delete withdrawal; indefinite conversation retention as approved;
+TalkBack listening waiver. Do not replace the accepted qualitative confidence
+approach with an arbitrary global relevance cutoff. These decisions do not
+waive evidence accuracy or source withdrawal visibility.
+
+VERIFICATION PERFORMED DURING THIS REVIEW
+-----------------------------------------
+- Repo clone at revision above; 151 tracked paths inventoried, including all
+  production Python/Kotlin/JS, migration SQL, build/CI and the test tree.
+- Initial stock backend pytest on the unconfigured fresh checkout stopped at
+  the first DB-dependent test because backend/.env.test did not exist.
+- An offline selection that excludes 185 DB/live-Drive-dependent tests now
+  reports: 110 passed, 185 deselected, 2 warnings (after local code/test
+  fixes). It uses a scratch-only pytest collection plugin; it is not a
+  substitute for the real Postgres suite. The six config tests' missing
+  URL inputs were repaired locally.
+- Python compileall, Node syntax check for admin.js and git diff --check
+  returned clean. No local Android SDK, device, Docker service or dedicated
+  PostgreSQL test server was available for full integration or APK tests.
+- Offline synthetic TestClient/probes before fixes confirmed: 401 x10 then
+  429 x2 without a cookie vs 401 x12 with rotating invalid cookies;
+  Query Tester machine URL returned 422; invitation landing URL returned
+  404; a failed extraction reported a completed ingestion run; legacy OLE
+  .doc resolved as "ole" and unsupported; eval_retrieval.py crashed at
+  db_path_resolved. Synthetic claim/no-answer/warning probes above passed
+  the validator when they should have been rejected. The new auth and
+  status tests passed after their fixes. No production secrets or live data
+  were used, and no claim is made that the supplied APK was tested.
+- The full Android JVM/instrumented suites, live PostgreSQL concurrency
+  tests, live corpus evaluation, image rendering on a phone and the deployed
+  backend remain outstanding. Do not report historical old pass counts as
+  a fresh verification.
+
+SUGGESTED ACCEPTANCE RUN BEFORE SHARING THE APK
+------------------------------------------------
+A. Isolated backend: provision a disposable Postgres instance, apply every
+   migration twice, run the full pytest suite with separate test URLs and
+   no live Drive credentials, then build an integration job for optional
+   Drive/source behavior. Ensure no test table wipe can reach production.
+B. Corpus: from the actual service account/folder, inspect every failed,
+   partial, unsupported, mismatched and needs_reprocessing event. Manually
+   compare a sampled source page with chunks, machine link, revision, retrieved
+   passage and page image. Confirm each model testers will use has current,
+   approved document + machine link; simulate approval-first cutover and
+   emergency withdrawal.
+C. Retrieval: repair eval_retrieval.py on a disposable corpus snapshot.
+   Have technicians supply held-out questions for the exact model/manual
+   versions, including "I don't know", wrong-model, 5/50 psi, 24/240 V,
+   negative/positive warnings, unsupported compatibility and long error
+   tables. Score the answer claim with its own source page, not just presence
+   of a keyword anywhere in the answer or excerpt.
+D. Android/backend interaction: on a small phone and Galaxy Tab A9+,
+   cold start, login, machine selection, no-match clarification, ask, follow
+   up, evidence page, save/unsave, history and feedback. Interrupt a send
+   before and after the server accepts it; refresh while POST is pending;
+   rotate/background/kill/relaunch; switch machines; retry failed answers;
+   tap A then B evidence with delayed A, dismiss before reply. Confirm no
+   duplicate IDs, wrong page, stale machine header, silent lost question or
+   indefinite 409.
+E. Deployment/security: verify that APK's actual applicationId, versionCode,
+   signature, SHA-256, HTTPS base URL and TLS certificate; test install over
+   the prior signed version. Confirm production secret is unique, server
+   APP_ENV is correct, cookie is Secure, rate limiting works behind the
+   actual proxy, file storage survives restart/replica, old manuals are
+   withdrawn visibly, backups can be restored, and real support/feedback
+   channels exist. Check /admin in a CSP-enforcing browser and smoke all
+   tabs, especially login, review approval, edit, invitations and Query
+   Tester.
+F. Pilot operations: give each tester an attributed account or a reliable
+   assigned tester ID; explain that AI advice is manual-supported assistance
+   and requires page verification; capture exact message/source IDs for
+   incorrect instructions; define a human owner who can pause/withdraw a
+   manual or disable access promptly. Track tested APK build and corpus
+   revision together. A shared test account can establish first connectivity,
+   but should not be the only source of attributable feedback.
+
+RECOMMENDED ORDER OF WORK
+-------------------------
+1. Address P0-01 through P0-08 and P0-13; the main risk is incorrect,
+   mismatched, missing or stale instructions shown to technicians.
+2. Confirm actual deployment storage/key settings (P0-09/P0-12), restore a
+   real full test gate and evaluation (P0-10/P0-11).
+3. Give testers a working onboarding/feedback path (P1-01/P1-02), fix corpus
+   reporting/reindex and admin safety (P1-05 through P1-10), then cover the
+   focused phone/network acceptance matrix.
+4. Ship a traceable signed pilot artifact after the above checks. Schedule
+   performance, cleanup and historical-doc pruning after pilot evidence.
+
+End of report.
