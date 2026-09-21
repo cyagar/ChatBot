@@ -20,12 +20,23 @@ from app.config import Settings
 
 
 def _settings(**overrides) -> Settings:
+    # External review, 2026-09-21: these tests previously left database_url/
+    # database_url_unpooled unset, which only ever "worked" locally because
+    # this developer's ambient backend/.env supplies real Neon credentials --
+    # on a fresh checkout with no .env, validate_for_startup() raises its
+    # "DATABASE_URL / DATABASE_URL_UNPOOLED are not set" error before ever
+    # reaching the credential-file checks these tests exist to exercise.
+    # Harmless, non-connecting placeholders (never actually dialed --
+    # validate_for_startup only checks truthiness) so these tests are
+    # self-contained regardless of ambient environment.
     base = dict(
         app_env="production",
         secret_key="x" * 48,
         ai_provider="local_extractive",
         allowed_registration_domains="example.com",
         google_drive_folder_id="folder123",
+        database_url="postgresql://user:pass@localhost/nonconnecting-test-placeholder",
+        database_url_unpooled="postgresql://user:pass@localhost/nonconnecting-test-placeholder",
     )
     base.update(overrides)
     return Settings(**base)
