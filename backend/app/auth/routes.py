@@ -16,7 +16,7 @@ from app.auth.security import (
 )
 from app.config import get_settings
 from app.db import get_conn
-from app.rate_limit import AUTH_RATE_LIMIT, limiter
+from app.rate_limit import AUTH_RATE_LIMIT, auth_key_func, limiter
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -97,7 +97,7 @@ def _set_session_cookie(response: Response, user_id: int, role: str, token_versi
 
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-@limiter.limit(AUTH_RATE_LIMIT)
+@limiter.limit(AUTH_RATE_LIMIT, key_func=auth_key_func)
 def register(payload: RegisterRequest, request: Request, response: Response):
     """Independent follow-up review P0-5: public self-registration used to let
     anyone become administrator by winning a race to register first, and any
@@ -194,7 +194,7 @@ def register(payload: RegisterRequest, request: Request, response: Response):
 
 
 @router.post("/login", response_model=UserOut)
-@limiter.limit(AUTH_RATE_LIMIT)
+@limiter.limit(AUTH_RATE_LIMIT, key_func=auth_key_func)
 def login(payload: LoginRequest, request: Request, response: Response):
     with get_conn() as conn:
         row = conn.execute(
