@@ -71,6 +71,18 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
     // LazyColumn keys list items on MessageOut.id (see ChatScreen).
     private var nextLocalMessageId = -1
 
+    // P0-07 fix, take 2 (external review, 2026-09-21): the general `sending`
+    // flag is not precise enough to guard `messages` in loadMessages() below
+    // -- selectClarifyingMachine() also sets sending=true and then calls
+    // loadMessages() itself as its OWN update mechanism (not a concurrent
+    // unrelated refresh), and guarding on `sending` there blocked that
+    // legitimate path from ever seeing its reload's messages (broke
+    // "confirming a clarifying machine keeps the composer locked..."). This
+    // flag is scoped specifically to performSend()'s own askQuestion() call
+    // being in flight, which is the one and only scenario an UNRELATED
+    // refresh() (e.g. pull-to-refresh) can race against.
+    private var askQuestionInFlight = false
+
     init {
         refresh()
     }
@@ -138,7 +150,30 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                 // the saved_answers row server-side (found via live tablet
                 // testing 2026-08-25).
                 _state.value = current.copy(
-                    messages = displayMessages,
+                    // External review P0-07 (2026-09-21): this assignment used
+                    // to run unconditionally, even while performSend()'s own
+                    // POST was still awaiting its response -- so a
+                    // pull-to-refresh landing in that window could load the
+                    // server's already-persisted user+assistant turns into
+                    // `messages` here, and when the original POST's response
+                    // then arrived, performSend's success handler
+                    // unconditionally appended its own synthetic user turn +
+                    // the same (already-present) assistant answer on top --
+                    // the server-assigned answer id ended up in `messages`
+                    // twice, which LazyColumn(items, key={it.id}) treats as a
+                    // duplicate-key error. Deliberately guarded on the
+                    // narrower askQuestionInFlight, not the general
+                    // `sendInFlight`/`current.sending` used below --
+                    // selectClarifyingMachine() also sets `sending=true` and
+                    // then calls loadMessages() itself as its OWN update
+                    // mechanism (not a concurrent unrelated refresh), so
+                    // guarding this on `sending` broke that path entirely
+                    // (first attempt at this fix; caught by the existing
+                    // "confirming a clarifying machine..." test).
+                    // askQuestionInFlight is true only while performSend()'s
+                    // own network call is in flight, which is the one
+                    // scenario an unrelated refresh() can actually race.
+                    messages = if (askQuestionInFlight) current.messages else displayMessages,
                     loadingHistory = false,
                     pendingEcho = if (sendInFlight) current.pendingEcho else if (stillUnanswered) pending else null,
                     pendingEchoUncertain = if (sendInFlight) current.pendingEchoUncertain else stillUnanswered && !acceptedAndProcessing,
@@ -207,8 +242,17 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
             // echo.id doubles as the Idempotency-Key -- it's already a UUID
             // generated once per composed question and held steady across
             // retries (see LocalEcho/retryPendingSend), which is exactly what
-            // the key needs to be.
-            val resp = ApiClient.service.askQuestion(conversationId, MessageIn(echo.content), idempotencyKey = echo.id)
+            // the key needs to be. askQuestionInFlight brackets ONLY this
+            // call (finally clears it before any of the branches below run,
+            // including the 409 branch's own loadMessages() call), so a
+            // concurrent refresh() is only ever blocked from touching
+            // `messages` for the actual duration this response is pending.
+            val resp = try {
+                askQuestionInFlight = true
+                ApiClient.service.askQuestion(conversationId, MessageIn(echo.content), idempotencyKey = echo.id)
+            } finally {
+                askQuestionInFlight = false
+            }
             when {
                 resp.isSuccessful -> {
                     val answer = resp.body()!!
@@ -252,13 +296,30 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                     loadMessages()
                 }
                 else -> {
+                    // External review P0-06 (2026-09-21): this used to restore
+                    // echo.content into the composer unconditionally -- but
+                    // composerText was cleared to "" only at the START of this
+                    // same send() call; if the technician typed a NEW question
+                    // while this one was still failing server-side, that draft
+                    // is what's sitting in composerText right now, and
+                    // restoring the OLD failed question over it silently threw
+                    // the newer draft away. Only restore when the composer is
+                    // still empty (nothing newer has been typed); otherwise
+                    // leave the newer draft alone and adjust the message
+                    // accordingly, since "your draft wasn't lost" would be
+                    // false in that case.
+                    val newerDraftTyped = _state.value.composerText.isNotEmpty()
                     _state.value = _state.value.copy(
                         sending = false,
                         pendingEcho = null,
                         pendingEchoUncertain = false,
                         pendingEchoStillProcessing = false,
-                        error = "Couldn't send that question (code ${resp.code()}). Your draft wasn't lost -- retype it.",
-                        composerText = echo.content,
+                        error = if (newerDraftTyped) {
+                            "Couldn't send that question (code ${resp.code()})."
+                        } else {
+                            "Couldn't send that question (code ${resp.code()}). Your draft wasn't lost -- retype it."
+                        },
+                        composerText = if (newerDraftTyped) _state.value.composerText else echo.content,
                     )
                 }
             }
@@ -338,6 +399,21 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
         }
     }
 
+    // External review P0-08 (2026-09-21): each citation tap used to start an
+    // uncancelled coroutine, with no cancellation on dismiss and no check
+    // that a response still belonged to the citation currently open. Tapping
+    // citation B while A was still loading let A's response land last and
+    // overwrite B's evidence/page under B's still-displayed citation header
+    // -- a direct safety risk, since technicians use citations to verify
+    // manual instructions. Fixed with the two guards below: cancelling the
+    // previous load's Job before starting a new one (covers both a new tap
+    // and dismissal), and comparing a monotonically increasing request token
+    // before applying any success/error, so even a response that slips past
+    // cancellation (already in flight when cancel() was called) is ignored
+    // if it's not for the request that's still current.
+    private var evidenceJob: kotlinx.coroutines.Job? = null
+    private var evidenceRequestToken = 0
+
     fun openCitation(citation: CitationOut) {
         _state.value = _state.value.copy(
             evidenceCitation = citation,
@@ -357,9 +433,12 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
     }
 
     private fun loadEvidence(citation: CitationOut) {
-        viewModelScope.launch {
+        evidenceJob?.cancel()
+        val token = ++evidenceRequestToken
+        evidenceJob = viewModelScope.launch {
             try {
                 val resp = ApiClient.service.getEvidence(citation.document_id, citation.chunk_id)
+                if (token != evidenceRequestToken) return@launch
                 if (resp.isSuccessful) {
                     _state.value = _state.value.copy(evidenceLoading = false, evidence = resp.body())
                 } else {
@@ -368,7 +447,18 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                         evidenceError = "Couldn't load this evidence (code ${resp.code()}).",
                     )
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // A newer citation tap (or dismiss) cancelled THIS job via
+                // evidenceJob?.cancel() above -- that's expected, cooperative
+                // cancellation, not a failure. Rethrowing (rather than
+                // falling into the generic catch below, which used to treat
+                // this identically to a real network error and apply a
+                // stale error state on top of whatever the newer
+                // request/dismiss had already set) is required for
+                // structured concurrency regardless.
+                throw e
             } catch (_: Exception) {
+                if (token != evidenceRequestToken) return@launch
                 _state.value = _state.value.copy(
                     evidenceLoading = false,
                     evidenceError = "Can't reach the server. Check your connection.",
@@ -378,11 +468,18 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
     }
 
     fun dismissEvidence() {
+        evidenceJob?.cancel()
+        evidenceRequestToken++
         _state.value = _state.value.copy(
             evidence = null,
             evidenceDocumentId = null,
             evidenceError = null,
             evidenceCitation = null,
+            // Also reset here (pre-existing gap, not previously reachable
+            // without the token/cancellation fix above): dismissing while a
+            // load was still in flight used to leave evidenceLoading=true
+            // forever, since only openCitation/loadEvidence ever set it.
+            evidenceLoading = false,
         )
     }
 

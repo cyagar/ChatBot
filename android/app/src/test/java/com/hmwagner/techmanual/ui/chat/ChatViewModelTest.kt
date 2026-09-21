@@ -159,6 +159,84 @@ class ChatViewModelTest {
     }
 
     @Test
+    fun `a refresh landing while send is in flight cannot cause a duplicate message once send completes`() {
+        // P0-07 (external review, 2026-09-21): loadMessages() used to
+        // overwrite `messages` from a concurrent GET even while sendInFlight
+        // was true (only pendingEcho/its status flags were guarded, not
+        // `messages` itself). If that GET already showed the server's
+        // persisted answer to the question the client's own POST was still
+        // awaiting a response for, performSend's success handler then
+        // unconditionally appended its own synthetic user turn + the SAME
+        // answer object on top -- the server-assigned answer id ended up in
+        // `messages` twice, which LazyColumn(items, key={it.id}) treats as a
+        // duplicate-key error. The POST is blocked behind a latch here so a
+        // refresh() can land first with the answer already "persisted".
+        val releaseSend = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path?.endsWith("/messages") == true && request.method == "POST" -> {
+                    releaseSend.await(2, TimeUnit.SECONDS)
+                    jsonResponse("""{"id": 21, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}""")
+                }
+                request.path?.endsWith("/messages") == true && request.method == "GET" -> jsonResponse(
+                    """[{"id": 20, "role": "user", "content": "Why won't it start?", "created_at": "2026-08-24T00:00:00Z"},
+                        {"id": 21, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}]"""
+                )
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        vm.onComposerChange("Why won't it start?")
+        vm.send()
+        assertTrue("send() must still be in flight for this race to apply", vm.state.value.sending)
+
+        vm.refresh()
+        awaitState { !it.loadingHistory }
+
+        releaseSend.countDown()
+        awaitState { !it.sending }
+
+        val ids = vm.state.value.messages.map { it.id }
+        assertEquals("answer id 21 must appear exactly once, not duplicated", listOf(21), ids.filter { it == 21 })
+        assertEquals("no duplicate ids anywhere in the list", ids.size, ids.toSet().size)
+    }
+
+    @Test
+    fun `a failed send does not overwrite a newer draft typed while it was still in flight`() {
+        // P0-06 (external review, 2026-09-21): the failure handler used to
+        // restore the failed question's text into the composer
+        // unconditionally. composerText is cleared to "" only at the START
+        // of send() -- if the technician started typing their NEXT question
+        // while this one was still failing server-side, that newer draft is
+        // what's sitting in composerText when the failure arrives, and
+        // overwriting it with the old failed text silently threw the newer
+        // draft away.
+        val releaseSend = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                releaseSend.await(2, TimeUnit.SECONDS)
+                return MockResponse().setResponseCode(422)
+            }
+        }
+
+        vm.onComposerChange("Why won't it start?")
+        vm.send()
+        assertTrue(vm.state.value.sending)
+
+        // A newer draft, typed while the first question is still failing.
+        vm.onComposerChange("Actually, a different question")
+
+        releaseSend.countDown()
+        awaitState { !it.sending }
+
+        assertEquals(
+            "the newer draft must survive the older request's failure callback",
+            "Actually, a different question",
+            vm.state.value.composerText,
+        )
+    }
+
+    @Test
     fun `a successful save call is reflected in state`() {
         server.enqueue(jsonResponse(
             """{"id": 5, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
@@ -478,5 +556,74 @@ class ChatViewModelTest {
         assertNull(state.evidenceError)
         assertNull(state.evidence)
         assertNull(state.evidenceDocumentId)
+    }
+
+    @Test
+    fun `tapping citation B while A is still loading shows B's evidence, never A's stale response`() {
+        // P0-08 (external review, 2026-09-21): each citation tap used to
+        // start an uncancelled coroutine with no check that a response still
+        // belonged to the currently-open citation. A (chunk 1) is delayed
+        // behind a latch; B (chunk 2) is tapped and resolves first; A is then
+        // released and must NOT be allowed to overwrite B's already-displayed
+        // evidence -- a direct safety risk, since technicians use citations
+        // to verify manual instructions.
+        val citationA = testCitation.copy(chunk_id = 1, document_id = 1)
+        val citationB = testCitation.copy(chunk_id = 2, document_id = 2)
+        val releaseA = CountDownLatch(1)
+
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path?.contains("/1/chunks/1/") == true -> {
+                    releaseA.await(2, TimeUnit.SECONDS)
+                    jsonResponse("""{"chunk_id": 1, "content": "A's content", "filename": "a.pdf"}""")
+                }
+                request.path?.contains("/2/chunks/2/") == true ->
+                    jsonResponse("""{"chunk_id": 2, "content": "B's content", "filename": "b.pdf"}""")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        vm.openCitation(citationA)
+        vm.openCitation(citationB)
+        awaitState { !it.evidenceLoading }
+
+        assertEquals("B's content", vm.state.value.evidence?.content)
+        assertEquals(2, vm.state.value.evidenceDocumentId)
+
+        // A's delayed response now lands -- it must be ignored, not clobber B.
+        releaseA.countDown()
+        Thread.sleep(100)
+
+        assertEquals("A's stale response overwrote B's evidence", "B's content", vm.state.value.evidence?.content)
+        assertEquals(2, vm.state.value.evidenceDocumentId)
+    }
+
+    @Test
+    fun `dismissing the sheet while a load is still in flight prevents it from reopening`() {
+        // P0-08: dismissEvidence used to only clear state -- a response that
+        // arrived after dismissal still ran its success handler and set
+        // evidence/evidenceLoading again, which the sheet's own visibility
+        // condition (evidenceLoading || evidence != null) would read as
+        // "reopen".
+        val release = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                release.await(2, TimeUnit.SECONDS)
+                return jsonResponse("""{"chunk_id": 9, "content": "late content", "filename": "manual.pdf"}""")
+            }
+        }
+
+        vm.openCitation(testCitation)
+        assertTrue(vm.state.value.evidenceLoading)
+
+        vm.dismissEvidence()
+        assertNull(vm.state.value.evidence)
+        assertFalse(vm.state.value.evidenceLoading)
+
+        release.countDown()
+        Thread.sleep(100)
+
+        assertNull("a stale response reopened the dismissed sheet", vm.state.value.evidence)
+        assertFalse(vm.state.value.evidenceLoading)
     }
 }
