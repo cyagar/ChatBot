@@ -58,6 +58,11 @@ data class CitationOut(
     val section_heading: String? = null,
     val revision: String? = null,
     val excerpt: String,
+    // P0-13 (external review, 2026-09-21): the source document's CURRENT
+    // review/withdrawal status, computed fresh by the backend on every
+    // hydration -- an emergency withdrawal retroactively flags every
+    // historical citation that pointed at it.
+    val source_withdrawn: Boolean = false,
 )
 
 @Serializable
@@ -78,6 +83,11 @@ data class MessageOut(
     val retry_count: Int = 0,
     val created_at: String,
     val is_saved: Boolean = false,
+    // P0-13: true when any citation's source has been withdrawn or lost
+    // approval since this answer was generated -- the UI must suppress
+    // action-oriented styling and show a clear warning instead of presenting
+    // this as current, trustworthy advice.
+    val has_withdrawn_source: Boolean = false,
 )
 
 @Serializable

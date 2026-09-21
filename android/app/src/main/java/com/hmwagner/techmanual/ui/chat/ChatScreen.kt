@@ -148,7 +148,21 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                             MessageBubble(msg, onCitationClick = vm::openCitation, onRetry = { vm.retry(msg.id) },
                                 onClarifyingSelect = vm::selectClarifyingMachine,
                                 onSave = { vm.saveAnswer(msg.id) },
-                                saved = state.savedMessageIds.contains(msg.id))
+                                saved = state.savedMessageIds.contains(msg.id),
+                                // P0-05 (external review, 2026-09-21): a
+                                // clarifying-question message's chips used to
+                                // stay live forever, in every loaded message,
+                                // not just the one still awaiting resolution
+                                // -- resuming a pending clarification appends
+                                // a NEW assistant message rather than
+                                // mutating the old one, so an older
+                                // clarifying message's options remain in
+                                // state.messages unchanged after being
+                                // resolved. Only the LAST message in the
+                                // conversation can possibly still be the
+                                // pending one; a chip on any earlier message
+                                // is stale by construction.
+                                isLatestMessage = msg.id == state.messages.last().id)
                         }
                         state.pendingEcho?.let { echo ->
                             item(key = "pending-${echo.id}") {
@@ -311,6 +325,7 @@ private fun MessageBubble(
     onClarifyingSelect: (Int) -> Unit,
     onSave: () -> Unit,
     saved: Boolean,
+    isLatestMessage: Boolean,
 ) {
     val isUser = msg.role == "user"
     // A no-answer response is the honest, by-design outcome when retrieval
@@ -331,6 +346,28 @@ private fun MessageBubble(
             ),
         ) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+
+                if (msg.has_withdrawn_source) {
+                    // P0-13 (external review, 2026-09-21): a source cited by
+                    // this answer has since been withdrawn (emergency
+                    // deactivation) or lost approval -- shown first, above
+                    // even safety_warnings, so it can't be missed in a
+                    // history reload or a saved answer opened later. The
+                    // answer content below stays visible (audit trail, and
+                    // this same flag/content pair is what the saved-answers
+                    // list renders too) but must never read as current,
+                    // trustworthy advice once this is true.
+                    Row(verticalAlignment = Alignment.Top) {
+                        Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                        Text(
+                            "A source for this answer has been withdrawn. Do not rely on this -- " +
+                                "ask again to get current guidance.",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(start = 6.dp),
+                        )
+                    }
+                }
 
                 if (msg.safety_warnings.isNotEmpty()) {
                     msg.safety_warnings.forEach { warning ->
@@ -387,8 +424,19 @@ private fun MessageBubble(
                     // jammed together with no gap between them.
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         msg.clarifying_options.forEach { option ->
-                            AssistChip(onClick = { onClarifyingSelect(option.id) }, label = { Text(option.label) })
+                            AssistChip(
+                                onClick = { onClarifyingSelect(option.id) },
+                                label = { Text(option.label) },
+                                enabled = isLatestMessage,
+                            )
                         }
+                    }
+                    if (!isLatestMessage) {
+                        Text(
+                            "Resolved",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
 

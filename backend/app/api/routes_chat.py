@@ -61,6 +61,12 @@ class CitationOut(BaseModel):
     section_heading: str | None
     revision: str | None
     excerpt: str
+    # P0-13 (external review, 2026-09-21): computed fresh at hydration time
+    # from the source document's CURRENT status, not stored on the message --
+    # an emergency withdrawal or re-review must retroactively flag every
+    # historical answer/saved answer that cited this document, not just
+    # future ones.
+    source_withdrawn: bool = False
 
 
 class MessageOut(BaseModel):
@@ -85,6 +91,15 @@ class MessageOut(BaseModel):
     # the MOST RECENT rating, not "whether any feedback exists".
     feedback_rating: str | None = None
     is_saved: bool = False
+    # P0-13 (external review, 2026-09-21): true when ANY citation's source
+    # document has since been withdrawn (deactivated) or lost its approval --
+    # an emergency withdrawal must retroactively flag every historical answer
+    # and saved answer built on that document, in the technician's live
+    # history and bookmarks alike, not just block new retrieval. The client
+    # is expected to suppress the answer's action-oriented styling (e.g. "do
+    # this") and show a clear warning instead when this is true; the raw
+    # content and citations stay intact underneath for admin investigation.
+    has_withdrawn_source: bool = False
 
     @field_serializer("created_at")
     def _ser_ts(self, v: datetime) -> str:
@@ -247,7 +262,7 @@ def list_conversations(
 
 def _require_own_conversation(conn, conversation_id: int, user_id: int):
     row = conn.execute(
-        "SELECT id, user_id, machine_id, pending_message_id FROM conversations WHERE id = %s",
+        "SELECT id, user_id, machine_id, pending_message_id, is_processing FROM conversations WHERE id = %s",
         (conversation_id,),
     ).fetchone()
     if not row or row["user_id"] != user_id:
@@ -518,12 +533,38 @@ def set_conversation_machine(
         machine = conn.execute("SELECT id FROM machines WHERE id = %s", (payload.machine_id,)).fetchone()
         if not machine:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Machine not found.")
-        conn.execute(
-            "UPDATE conversations SET machine_id = %s, updated_at = now() WHERE id = %s",
-            (payload.machine_id, conversation_id),
-        )
 
         pending_id = conv["pending_message_id"]
+
+        if pending_id is None:
+            # P0-05 (external review, 2026-09-21): this used to update
+            # machine_id unconditionally, even for a deliberate "Change
+            # machine" switch with no pending clarification -- an answer
+            # already in flight for the OLD machine would finish and persist
+            # under a conversation now pointed at a DIFFERENT machine,
+            # producing cross-machine context/mismatched headers on the next
+            # question. When there IS a pending clarification the switch is
+            # exactly what resumes that stored question below and must
+            # proceed; only the "already answering, now switch anyway" case
+            # is illegal. Same claim-UPDATE pattern as everywhere else in
+            # this file: rowcount 0 means a concurrent ask_question/retry
+            # claimed is_processing between the read above and this write.
+            claim = conn.execute(
+                "UPDATE conversations SET machine_id = %s, updated_at = now() "
+                "WHERE id = %s AND is_processing = false",
+                (payload.machine_id, conversation_id),
+            )
+            if claim.rowcount == 0:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail="An answer is still being generated in this conversation. Wait for it to "
+                           "finish, or start a new conversation, before switching machines.",
+                )
+        else:
+            conn.execute(
+                "UPDATE conversations SET machine_id = %s, updated_at = now() WHERE id = %s",
+                (payload.machine_id, conversation_id),
+            )
         pending_question = None
         pending_history: list[HistoryTurn] | None = None
         if pending_id is not None:
@@ -597,7 +638,7 @@ def _hydrate_message(conn, row, user_id: int) -> MessageOut:
     citations = []
     src_rows = conn.execute(
         "SELECT ms.chunk_id, ms.excerpt, c.document_id, d.original_filename, d.title, "
-        "c.page_number, c.section_heading, d.revision "
+        "c.page_number, c.section_heading, d.revision, d.deactivated_at, d.review_status "
         "FROM message_sources ms "
         "JOIN chunks c ON c.id = ms.chunk_id "
         "JOIN documents d ON d.id = c.document_id "
@@ -611,10 +652,13 @@ def _hydrate_message(conn, row, user_id: int) -> MessageOut:
         (row["id"],),
     ).fetchall()
     for s in src_rows:
+        # P0-13: the document's CURRENT state, evaluated fresh on every
+        # hydration -- not what it was when this answer was generated.
+        withdrawn = s["deactivated_at"] is not None or s["review_status"] != "approved"
         citations.append(CitationOut(
             chunk_id=s["chunk_id"], document_id=s["document_id"], filename=s["original_filename"],
             title=s["title"], page_number=s["page_number"], section_heading=s["section_heading"],
-            revision=s["revision"], excerpt=s["excerpt"] or "",
+            revision=s["revision"], excerpt=s["excerpt"] or "", source_withdrawn=withdrawn,
         ))
 
     try:
@@ -652,6 +696,7 @@ def _hydrate_message(conn, row, user_id: int) -> MessageOut:
         created_at=row["created_at"],
         feedback_rating=feedback_row["rating"] if feedback_row else None,
         is_saved=is_saved,
+        has_withdrawn_source=any(c.source_withdrawn for c in citations),
     )
 
 
@@ -890,7 +935,7 @@ def retry_answer(
     with get_conn() as conn:
         conv = _require_own_conversation(conn, conversation_id, user.id)
         row = conn.execute(
-            "SELECT id, role, answer_status FROM messages WHERE id = %s AND conversation_id = %s",
+            "SELECT id, role, answer_status, machine_id FROM messages WHERE id = %s AND conversation_id = %s",
             (message_id, conversation_id),
         ).fetchone()
         if not row or row["role"] != "assistant":
@@ -922,7 +967,19 @@ def retry_answer(
             "ORDER BY id DESC LIMIT 1",
             (conversation_id, message_id),
         ).fetchone()
-        machine_id = conv["machine_id"]
+        # P0-05 (external review, 2026-09-21): this used to read
+        # conv["machine_id"] -- the conversation's CURRENT machine -- rather
+        # than the machine this failed answer was actually generated against.
+        # If the technician switches machines (a legal action now that a
+        # switch is blocked only while an answer is in flight, not
+        # afterward) and then retries an OLDER failed answer, retrying under
+        # the new machine would silently apply wrong-model advice to a
+        # question that was about the old one. Every assistant message
+        # already stores its own machine_id at generation time (see
+        # _generate_and_persist_answer below); retry must use THAT, falling
+        # back to the conversation's machine only for pre-existing rows from
+        # before this column was populated.
+        machine_id = row["machine_id"] if row["machine_id"] is not None else conv["machine_id"]
         if user_row is None or machine_id is None:
             # Restore rather than leave the claim stuck at 'retrying' forever
             # -- this should not happen in practice (a failed answer always

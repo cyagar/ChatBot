@@ -259,3 +259,197 @@ def test_p0_02_approving_an_unready_replacement_does_not_retire_the_working_manu
     with get_conn() as conn:
         old_row2 = conn.execute("SELECT deactivated_at FROM documents WHERE id = %s", (old_doc_id,)).fetchone()
     assert old_row2["deactivated_at"] is not None, "once the replacement is actually ready, the old revision should be retired"
+
+
+def test_p0_05_a_switching_machine_while_an_answer_is_in_flight_is_rejected(test_env):
+    """P0-05 (part A): set_conversation_machine used to update
+    conversations.machine_id unconditionally, even with no pending
+    clarification to resume -- an answer still generating for the OLD
+    machine would finish and persist into a conversation now pointed at a
+    DIFFERENT machine, producing cross-machine context on the next question.
+    Fixed by rejecting the switch with 409 whenever is_processing is true
+    and there is no pending clarification (the one case that's supposed to
+    change the machine while processing)."""
+    from app.db import get_conn
+    from app.main import app as fastapi_app
+    from fastapi.testclient import TestClient
+    from tests.conftest import register_test_user
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "tech-p005a@example.com")
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Imix')")
+        user_id = conn.execute("SELECT id FROM users WHERE email = 'tech-p005a@example.com'").fetchone()["id"]
+        conv_cur = conn.execute(
+            "INSERT INTO conversations (user_id, machine_id, is_processing) VALUES (%s, 1, true) RETURNING id",
+            (user_id,),
+        )
+        conv_id = conv_cur.fetchone()["id"]
+
+    resp = local_client.post(f"/api/conversations/{conv_id}/machine", json={"machine_id": 2})
+    assert resp.status_code == 409, (
+        f"switching machine mid-answer with no pending clarification must be rejected -- "
+        f"got {resp.status_code}: {resp.text}"
+    )
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT machine_id FROM conversations WHERE id = %s", (conv_id,)).fetchone()
+    assert row["machine_id"] == 1, "a rejected switch must not have changed the conversation's machine"
+
+
+def test_p0_05_b_retry_uses_the_failed_answers_own_machine_not_the_conversations_current_one(monkeypatch, test_env):
+    """P0-05 (part B): retry_failed_answer used to read conv["machine_id"]
+    -- the conversation's CURRENT machine -- rather than the machine this
+    particular failed answer was actually generated against. If the
+    technician legally switches machines afterward (allowed once
+    is_processing is back to false) and then retries this OLDER failed
+    answer, it must still regenerate against the ORIGINAL machine, not
+    silently apply a different machine's advice to it. Fixed by reading
+    machine_id off the failed message row itself instead of the
+    conversation."""
+    import app.api.routes_chat as routes_chat
+    from app.db import get_conn
+    from app.main import app as fastapi_app
+    from app.providers.base import AIProvider, GeneratedAnswer
+    from fastapi.testclient import TestClient
+    from tests.conftest import register_test_user
+
+    calls = []
+
+    def _fake_hybrid_search(query, machine_id, top_k=6):
+        calls.append(machine_id)
+        return []
+
+    class _NoAnswerProvider(AIProvider):
+        name = "test_no_answer"
+
+        def generate(self, question, machine_label, passages, history=None):
+            return GeneratedAnswer(answer="No answer.", citations=[], provider=self.name, is_no_answer=True)
+
+    monkeypatch.setattr(routes_chat, "hybrid_search", _fake_hybrid_search)
+    monkeypatch.setattr(routes_chat, "get_provider", lambda: _NoAnswerProvider())
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "tech-p005b@example.com")
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Imix')")
+        user_id = conn.execute("SELECT id FROM users WHERE email = 'tech-p005b@example.com'").fetchone()["id"]
+        # machine_id=1 originally -- the failed answer below was generated
+        # against machine 1.
+        conv_cur = conn.execute(
+            "INSERT INTO conversations (user_id, machine_id, is_processing) VALUES (%s, 1, false) RETURNING id",
+            (user_id,),
+        )
+        conv_id = conv_cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, machine_id) VALUES (%s, 'user', 'brew temp?', 1)",
+            (conv_id,),
+        )
+        msg_cur = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, machine_id, answer_status) "
+            "VALUES (%s, 'assistant', '', 1, 'failed') RETURNING id",
+            (conv_id,),
+        )
+        failed_msg_id = msg_cur.fetchone()["id"]
+        # Technician legally switches machines afterward (processing already
+        # finished) -- exactly the state that used to fool retry.
+        conn.execute("UPDATE conversations SET machine_id = 2 WHERE id = %s", (conv_id,))
+
+    resp = local_client.post(f"/api/conversations/{conv_id}/messages/{failed_msg_id}/retry")
+    assert resp.status_code == 200, resp.text
+    assert calls == [1], (
+        f"retry must regenerate against the failed answer's OWN machine (1), not the conversation's "
+        f"current one (2) -- hybrid_search was called with machine_id={calls}"
+    )
+
+
+def test_p0_13_withdrawing_a_source_document_retroactively_flags_history_and_saved_answers(test_env):
+    """P0-13: message hydration used to return historical answer text and
+    citations with no indication that the cited document had since been
+    withdrawn (emergency deactivation) or lost approval (re-rejected) --
+    both the live conversation history and the saved-answers list kept
+    showing withdrawn content with no warning at all. Fixed by computing
+    each citation's source_withdrawn (and the message-level
+    has_withdrawn_source) fresh on every hydration, from the document's
+    CURRENT state, not what it was when the answer was generated."""
+    from app.auth.security import hash_password
+    from app.db import get_conn
+    from app.main import app as fastapi_app
+    from fastapi.testclient import TestClient
+    from tests.conftest import register_test_user
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "tech-p013@example.com")
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        doc_cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, manufacturer_id, doc_type, title, is_current_revision, "
+            "review_status) VALUES ('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', "
+            "'hash-p013', 100, 'indexed', 1, 'service_repair', 'Axiom Manual', true, 'approved') RETURNING id"
+        )
+        doc_id = doc_cur.fetchone()["id"]
+        chunk_cur = conn.execute(
+            "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
+            "VALUES (%s, 'text', 'brew temperature is 200F', 25, 0) RETURNING id",
+            (doc_id,),
+        )
+        chunk_id = chunk_cur.fetchone()["id"]
+
+        user_id = conn.execute("SELECT id FROM users WHERE email = 'tech-p013@example.com'").fetchone()["id"]
+        conv_cur = conn.execute(
+            "INSERT INTO conversations (user_id, machine_id) VALUES (%s, 1) RETURNING id", (user_id,)
+        )
+        conv_id = conv_cur.fetchone()["id"]
+        msg_cur = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, machine_id) "
+            "VALUES (%s, 'assistant', 'Brew at 200F.', 1) RETURNING id",
+            (conv_id,),
+        )
+        msg_id = msg_cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO message_sources (message_id, chunk_id, rank, is_citation, citation_ordinal, excerpt) "
+            "VALUES (%s, %s, 1, true, 1, 'brew temperature is 200F')",
+            (msg_id, chunk_id),
+        )
+        conn.execute(
+            "INSERT INTO saved_answers (user_id, message_id) VALUES (%s, %s)", (user_id, msg_id)
+        )
+
+    # Before withdrawal: neither the live history nor the saved-answers list
+    # should flag anything.
+    before = local_client.get(f"/api/conversations/{conv_id}/messages")
+    assert before.status_code == 200
+    before_msg = next(m for m in before.json() if m["id"] == msg_id)
+    assert before_msg["has_withdrawn_source"] is False
+    assert before_msg["citations"][0]["source_withdrawn"] is False
+
+    saved_before = local_client.get("/api/saved-answers")
+    assert saved_before.status_code == 200
+    assert saved_before.json()[0]["answer"]["has_withdrawn_source"] is False
+
+    # Emergency withdrawal: deactivate the document.
+    with get_conn() as conn:
+        conn.execute("UPDATE documents SET deactivated_at = now() WHERE id = %s", (doc_id,))
+
+    after = local_client.get(f"/api/conversations/{conv_id}/messages")
+    assert after.status_code == 200
+    after_msg = next(m for m in after.json() if m["id"] == msg_id)
+    assert after_msg["has_withdrawn_source"] is True, (
+        "a deactivated source must retroactively flag every historical answer that cited it"
+    )
+    assert after_msg["citations"][0]["source_withdrawn"] is True
+
+    saved_after = local_client.get("/api/saved-answers")
+    assert saved_after.status_code == 200
+    assert saved_after.json()[0]["answer"]["has_withdrawn_source"] is True, (
+        "a saved answer (technician bookmark) must also be retroactively flagged, not just live history"
+    )
