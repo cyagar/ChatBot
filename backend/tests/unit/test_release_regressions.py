@@ -3,6 +3,7 @@ tracked one test per finding ID so each fix stays independently verifiable.
 """
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -595,4 +596,40 @@ def test_p0_04_b_a_zombie_attempts_late_write_never_overwrites_the_reclaiming_at
     assert contents == ["B's real answer"], (
         f"a zombie attempt's late write must never overwrite or duplicate the reclaiming attempt's "
         f"real answer -- got {contents}"
+    )
+
+
+def test_p0_10_test_fixture_refuses_a_database_url_identical_to_production(tmp_path, monkeypatch):
+    """P0-10: the test_env fixture runs migrations and an unconditional
+    TRUNCATE ... CASCADE against whatever DATABASE_URL/DATABASE_URL_UNPOOLED
+    it finds in backend/.env.test -- pointing that file at the real
+    production connection string, even by accident (a copy-pasted .env, a
+    misconfigured secret), would destroy live data. _refuse_if_production_database
+    compares each test DB URL against backend/.env's own value and raises
+    before any migration or TRUNCATE runs if they're identical; this test
+    exercises that comparison directly, against temporary fake .env files,
+    without touching the real backend/.env or running any actual query."""
+    import tests.conftest as conftest_module
+
+    prod_env = tmp_path / "prod.env"
+    prod_env.write_text("DATABASE_URL=postgresql://prod-host/prod_db\n")
+    monkeypatch.setattr(conftest_module, "PROD_ENV_FILE", prod_env)
+
+    # Identical to the "production" value -- must raise, and must name which
+    # variable collided.
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+        conftest_module._refuse_if_production_database(
+            "postgresql://prod-host/prod_db", "DATABASE_URL"
+        )
+
+    # A genuinely different test database -- must not raise.
+    conftest_module._refuse_if_production_database(
+        "postgresql://test-host/test_db", "DATABASE_URL"
+    )
+
+    # No backend/.env at all (every CI run) -- nothing to compare against,
+    # must not raise regardless of the test URL's value.
+    monkeypatch.setattr(conftest_module, "PROD_ENV_FILE", tmp_path / "does-not-exist.env")
+    conftest_module._refuse_if_production_database(
+        "postgresql://prod-host/prod_db", "DATABASE_URL"
     )

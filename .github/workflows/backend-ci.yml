@@ -25,6 +25,32 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    # P0-10 (external review, 2026-09-21): this job invoked pytest with no
+    # database at all -- the first test needing one aborted immediately with
+    # "backend/.env.test is missing" (tests/conftest.py's test_env fixture
+    # refuses to run against nothing, or worse, to silently fall back to a
+    # developer's real backend/.env). An ephemeral Postgres service
+    # container, torn down with the job, is what test_env's own TRUNCATE
+    # ... CASCADE runs against below -- never a Neon branch or any other
+    # persistent database, so there is nothing here a bad run could damage
+    # beyond this one job. Only one job today, so "isolated databases per
+    # parallel job" (the review's other ask) doesn't yet apply -- there's no
+    # parallelism to isolate; add a per-job database name if/when a matrix
+    # is introduced.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tma_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +98,17 @@ jobs:
         run: |
           pip install --no-cache-dir torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
           pip install --no-cache-dir -r requirements.txt
+
+      - name: Write backend/.env.test for the ephemeral Postgres service
+        # P0-10: a plain postgres:// DSN, not a Neon one -- tests/conftest.py's
+        # production-DSN guard (test_env fixture) compares this against
+        # backend/.env's real DATABASE_URL and refuses to run if they ever
+        # match; CI has no backend/.env at all, so that guard is a no-op
+        # here, and this service container is never reachable from outside
+        # this job in any case.
+        run: |
+          echo "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/tma_test" >> .env.test
+          echo "DATABASE_URL_UNPOOLED=postgresql://postgres:postgres@localhost:5432/tma_test" >> .env.test
 
       - name: Run backend test suite
         run: pytest -q

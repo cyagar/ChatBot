@@ -12,6 +12,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Loaded explicitly and monkeypatched below so tests NEVER inherit
 # backend/.env's production DATABASE_URL, no matter what's ambient.
 TEST_ENV_FILE = Path(__file__).resolve().parent.parent / ".env.test"
+PROD_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
+def _refuse_if_production_database(url: str, var_name: str) -> None:
+    """P0-10 (external review, 2026-09-21): this fixture runs migrations and
+    an unconditional TRUNCATE ... CASCADE against whatever DATABASE_URL/
+    DATABASE_URL_UNPOOLED end up set -- pointing either at the real
+    production connection string, even by accident (a copy-pasted .env.test,
+    a misconfigured secret), would destroy live data. Compares against
+    backend/.env's own values -- the one production connection string this
+    checkout actually knows about -- rather than guessing at hostname
+    patterns, which would be both fragile (breaks the moment infra changes)
+    and pointless to try to keep in sync with what "looks like production."
+    A no-op when backend/.env doesn't exist (every CI run: see
+    .github/workflows/backend-ci.yml, which writes only .env.test)."""
+    if not PROD_ENV_FILE.is_file():
+        return
+    prod_value = dotenv_values(PROD_ENV_FILE).get(var_name)
+    if prod_value and url == prod_value:
+        raise RuntimeError(
+            f"Refusing to run tests: {TEST_ENV_FILE}'s {var_name} is IDENTICAL to "
+            f"backend/.env's production value. Tests run migrations and an unconditional "
+            f"TRUNCATE ... CASCADE against this database -- pointing it at production would "
+            f"destroy live data. Point {var_name} in {TEST_ENV_FILE} at a genuinely separate "
+            f"database (a dedicated Neon test branch, or a local/CI Postgres instance)."
+        )
 
 
 @pytest.fixture
@@ -32,6 +58,7 @@ def test_env(tmp_path, monkeypatch):
         value = test_db_vars.get(key)
         if not value:
             raise RuntimeError(f"{TEST_ENV_FILE} is missing {key}.")
+        _refuse_if_production_database(value, key)
         monkeypatch.setenv(key, value)
 
     storage_dir = tmp_path / "storage"
