@@ -272,14 +272,26 @@ function renderDocuments() {
                 <label>Revision <input name="revision" value="${esc(d.revision || "")}" /></label>
                 <label><input type="checkbox" name="is_current_revision" ${d.is_current_revision ? "checked" : ""} /> Current revision (preferred in search)</label>
                 <label>Machine association(s) — retrieval only ever returns a document for a machine linked here
+                  <!-- P0-03 (external review, 2026-09-21): this picker used to pre-check every existing
+                       link (approved, pending, AND rejected) with no visual distinction, and every Save
+                       sent the full checked set regardless of whether the admin touched it at all -- a
+                       pure title/revision correction silently re-approved a previously-rejected link. The
+                       review-status badge below makes a rejected link visible before an admin decides to
+                       touch it; the "machine-picker-touched" flag set by the change listener further down
+                       is what actually gates whether machine_ids is sent in the PATCH payload at all. -->
                   <input type="text" class="machine-filter" data-doc="${d.id}" placeholder="Filter machines…" />
                   <div class="machine-picker" data-doc="${d.id}">
-                    ${state.allMachines.map((m) => `
+                    ${state.allMachines.map((m) => {
+                      const linkStatus = d.machine_link_review_status[m.id];
+                      const badge = linkStatus && linkStatus !== "approved"
+                        ? ` <span class="status-badge ${linkStatus}" style="font-size:0.7rem;">${esc(linkStatus)}</span>`
+                        : "";
+                      return `
                       <label class="machine-option" data-search="${esc(`${m.manufacturer} ${m.model_name} ${m.family || ""}`).toLowerCase()}">
                         <input type="checkbox" name="machine_ids" value="${m.id}" ${d.machine_ids.includes(m.id) ? "checked" : ""} />
-                        ${esc(m.manufacturer)} — ${esc(m.model_name)}${m.family ? ` <span style="color:var(--text-dim);">(${esc(m.family)})</span>` : ""}
+                        ${esc(m.manufacturer)} — ${esc(m.model_name)}${m.family ? ` <span style="color:var(--text-dim);">(${esc(m.family)})</span>` : ""}${badge}
                       </label>
-                    `).join("")}
+                    `;}).join("")}
                   </div>
                 </label>
                 <label>Reason for change (required) <textarea name="reason" required rows="2"></textarea></label>
@@ -502,6 +514,13 @@ function wireTabEvents() {
     });
   });
   root.querySelectorAll(".edit-form[data-id]").forEach((form) => {
+    // P0-03: only a genuine interaction with the machine picker marks it
+    // touched -- programmatic pre-checking on render (see renderDocuments)
+    // never fires a "change" event, so this stays false for an edit that
+    // never went near the machine list at all.
+    const picker = form.querySelector(".machine-picker");
+    picker?.addEventListener("change", () => { form.dataset.machinesTouched = "true"; }, { once: true });
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const fd = new FormData(form);
@@ -511,7 +530,20 @@ function wireTabEvents() {
         title: fd.get("title") || null,
         revision: fd.get("revision") || null,
         is_current_revision: fd.get("is_current_revision") === "on",
-        machine_ids: fd.getAll("machine_ids").map((v) => parseInt(v, 10)),
+        // P0-03 (external review, 2026-09-21): omit machine_ids entirely
+        // unless the admin actually touched the picker this session --
+        // sending it unconditionally turned every metadata-only correction
+        // (title, revision, doc type) into an implicit re-approval of
+        // whatever happened to be checked, including previously-rejected
+        // links (the picker pre-checks every existing link, rejected ones
+        // included). The backend's PATCH handler already treats a present
+        // machine_ids as "this IS the admin's deliberate human review" --
+        // that's correct when the admin actually meant it, so the fix
+        // belongs here, in when this field is sent, not in the backend's
+        // handling of it.
+        machine_ids: form.dataset.machinesTouched === "true"
+          ? fd.getAll("machine_ids").map((v) => parseInt(v, 10))
+          : null,
         reason: fd.get("reason"),
       };
       await api(`/api/admin/documents/${form.dataset.id}`, { method: "PATCH", body: JSON.stringify(payload) });

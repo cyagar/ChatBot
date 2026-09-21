@@ -39,6 +39,15 @@ class DocumentOut(BaseModel):
     is_current_revision: bool
     machines: list[str]
     machine_ids: list[int]
+    # P0-03 (external review, 2026-09-21): the admin editor's machine picker
+    # pre-checks every existing link regardless of review_status, with no
+    # visual distinction between approved/pending/rejected -- an admin had no
+    # way to tell a rejected link apart from an approved one before deciding
+    # whether to touch it. Keyed by machine_id (Pydantic serializes int dict
+    # keys as JSON strings automatically) so the editor can show each link's
+    # actual state and an admin re-affirming a rejected link is an informed
+    # choice, not an accident.
+    machine_link_review_status: dict[int, str] = {}
     # Postgres TIMESTAMPTZ columns come back from psycopg as real datetimes,
     # not strings -- iso_utc() (app/api/common.py) accepts either.
     ingested_at: datetime | None
@@ -53,7 +62,7 @@ class DocumentOut(BaseModel):
 
 def _row_to_document(conn, row) -> DocumentOut:
     machines = conn.execute(
-        "SELECT m.id, m.model_name, dm.confidence FROM document_machines dm "
+        "SELECT m.id, m.model_name, dm.confidence, dm.review_status FROM document_machines dm "
         "JOIN machines m ON m.id = dm.machine_id WHERE dm.document_id = %s ORDER BY m.model_name",
         (row["id"],),
     ).fetchall()
@@ -65,6 +74,7 @@ def _row_to_document(conn, row) -> DocumentOut:
         is_current_revision=bool(row["is_current_revision"]),
         machines=[f"{m['model_name']} ({m['confidence']:.2f})" for m in machines],
         machine_ids=[m["id"] for m in machines],
+        machine_link_review_status={m["id"]: m["review_status"] for m in machines},
         ingested_at=row["ingested_at"],
         review_status=row["review_status"],
         reviewed_at=row["reviewed_at"],

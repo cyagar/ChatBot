@@ -42,6 +42,85 @@ def test_p1_24_login_rate_limit_cannot_be_bypassed_by_rotating_cookies(test_env,
     )
 
 
+def test_p0_03_a_metadata_only_correction_does_not_touch_machine_links(test_env):
+    """P0-03: the admin editor's machine picker sends machine_ids on every
+    Save, even for a pure title/revision correction, because the checkbox
+    group is pre-checked from ALL existing links (approved, pending, AND
+    rejected) with no way to tell them apart -- so a title-only fix silently
+    re-approved a previously-rejected link (PATCH /documents/{id} treats a
+    present machine_ids as the admin's deliberate human review, inserting
+    every sent id as review_status='approved', confidence=1.0, after
+    deleting every existing document_machines row first). Reproduced before
+    the fix: PATCH-ing only `title` with `machine_ids` unconditionally
+    included (the old frontend behavior, reproduced directly against the
+    API here since the JS itself isn't exercised by pytest) flipped a
+    rejected link back to approved. Fixed on the frontend (admin.js) by
+    omitting machine_ids from the payload entirely unless the admin actually
+    interacted with the picker -- this test proves the API-level contract
+    that fix relies on: omitting machine_ids (sending it as JSON null, which
+    Pydantic treats identically to the field being absent) must leave
+    existing links, rejected ones included, completely untouched."""
+    from app.auth.security import hash_password
+    from app.db import get_conn
+    from app.main import app as fastapi_app
+    from fastapi.testclient import TestClient
+    from tests.conftest import register_test_user
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "admin-p003@example.com", role="administrator", admin_email="admin-p003@example.com")
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, manufacturer_id, doc_type, title, is_current_revision) "
+            "VALUES ('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
+            "'indexed', 1, 'service_repair', 'Old Title', true) RETURNING id"
+        )
+        doc_id = cur.fetchone()["id"]
+        conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (%s, 1)", (doc_id,))
+
+    reject = local_client.post(f"/api/admin/documents/{doc_id}/machines/1/review", json={"decision": "rejected"})
+    assert reject.status_code == 200
+
+    # A title-only correction -- machine_ids explicitly omitted (JSON null),
+    # exactly what the fixed frontend now sends when the picker was never
+    # touched.
+    patch = local_client.patch(
+        f"/api/admin/documents/{doc_id}",
+        json={"title": "New Title", "machine_ids": None, "reason": "Fixing a typo in the title"},
+    )
+    assert patch.status_code == 200
+    assert patch.json()["title"] == "New Title"
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT review_status FROM document_machines WHERE document_id = %s AND machine_id = 1", (doc_id,)
+        ).fetchone()
+    assert row["review_status"] == "rejected", (
+        "a title-only correction must not touch machine link review state -- "
+        f"got {row['review_status']!r}"
+    )
+
+    # Control case, proving this is a real danger and not just an unused code
+    # path: this is exactly what the OLD frontend sent on every save
+    # (machine_ids always present, pre-checked from every existing link
+    # including rejected ones) -- confirms the backend really does silently
+    # re-approve on a present machine_ids, which is why the frontend fix
+    # (omitting it) is the correct place to have fixed this.
+    patch2 = local_client.patch(
+        f"/api/admin/documents/{doc_id}",
+        json={"title": "New Title 2", "machine_ids": [1], "reason": "Old frontend behavior, for contrast"},
+    )
+    assert patch2.status_code == 200
+    with get_conn() as conn:
+        row2 = conn.execute(
+            "SELECT review_status FROM document_machines WHERE document_id = %s AND machine_id = 1", (doc_id,)
+        ).fetchone()
+    assert row2["review_status"] == "approved", "sanity check: a present machine_ids really does re-approve"
+
+
 def test_p1_04_stale_corpus_status_accepts_a_real_psycopg_datetime(test_env, monkeypatch):
     """P1-04: _corpus_status's stale-corpus check called
     datetime.fromisoformat() on ingestion_runs.finished_at, a TIMESTAMPTZ
