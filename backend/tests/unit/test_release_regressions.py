@@ -269,7 +269,13 @@ def test_p0_05_a_switching_machine_while_an_answer_is_in_flight_is_rejected(test
     DIFFERENT machine, producing cross-machine context on the next question.
     Fixed by rejecting the switch with 409 whenever is_processing is true
     and there is no pending clarification (the one case that's supposed to
-    change the machine while processing)."""
+    change the machine while processing).
+
+    processing_claimed_at is set to now() (a fresh, unexpired lease) --
+    under P0-04's lease model, is_processing=true with NO claimed_at is
+    treated as an abandoned pre-lease-migration row and is immediately
+    reclaimable (see test_p0_04_a), so a genuinely in-flight claim must
+    look like a real one to exercise this specific 409 path."""
     from app.db import get_conn
     from app.main import app as fastapi_app
     from fastapi.testclient import TestClient
@@ -284,7 +290,8 @@ def test_p0_05_a_switching_machine_while_an_answer_is_in_flight_is_rejected(test
         conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Imix')")
         user_id = conn.execute("SELECT id FROM users WHERE email = 'tech-p005a@example.com'").fetchone()["id"]
         conv_cur = conn.execute(
-            "INSERT INTO conversations (user_id, machine_id, is_processing) VALUES (%s, 1, true) RETURNING id",
+            "INSERT INTO conversations (user_id, machine_id, is_processing, processing_attempt_id, "
+            "processing_claimed_at) VALUES (%s, 1, true, 'live-attempt', now()) RETURNING id",
             (user_id,),
         )
         conv_id = conv_cur.fetchone()["id"]
@@ -452,4 +459,140 @@ def test_p0_13_withdrawing_a_source_document_retroactively_flags_history_and_sav
     assert saved_after.status_code == 200
     assert saved_after.json()[0]["answer"]["has_withdrawn_source"] is True, (
         "a saved answer (technician bookmark) must also be retroactively flagged, not just live history"
+    )
+
+
+def test_p0_04_a_an_expired_processing_lease_can_be_reclaimed_instead_of_blocking_forever(monkeypatch, test_env):
+    """P0-04 (part A): the old plain is_processing boolean was cleared only
+    in a Python `finally` -- a killed worker, a lost DB connection during
+    release, or a shutdown between claim and `finally` left it true forever,
+    rejecting every future question/retry with 409 with no way out. Fixed by
+    turning the claim into a lease: a claim older than
+    PROCESSING_LEASE_SECONDS is now reclaimable by a later request instead
+    of blocking indefinitely. Reproduces the stuck state directly (no actual
+    process kill needed -- the lease's age is what matters, not how it got
+    old)."""
+    import app.api.routes_chat as routes_chat
+    from app.db import get_conn
+    from app.main import app as fastapi_app
+    from app.providers.base import AIProvider, GeneratedAnswer
+    from fastapi.testclient import TestClient
+    from tests.conftest import register_test_user
+
+    monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: [])
+
+    class _NoAnswerProvider(AIProvider):
+        name = "test_no_answer"
+
+        def generate(self, question, machine_label, passages, history=None):
+            return GeneratedAnswer(answer="No answer.", citations=[], provider=self.name, is_no_answer=True)
+
+    monkeypatch.setattr(routes_chat, "get_provider", lambda: _NoAnswerProvider())
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "tech-p004a@example.com")
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        user_id = conn.execute("SELECT id FROM users WHERE email = 'tech-p004a@example.com'").fetchone()["id"]
+        conv_cur = conn.execute(
+            "INSERT INTO conversations (user_id, machine_id, is_processing, processing_attempt_id, "
+            "processing_claimed_at) VALUES (%s, 1, true, 'dead-attempt', now() - interval '10 minutes') "
+            "RETURNING id",
+            (user_id,),
+        )
+        conv_id = conv_cur.fetchone()["id"]
+
+    resp = local_client.post(
+        f"/api/conversations/{conv_id}/messages", json={"content": "what is the brew temperature?"}
+    )
+    assert resp.status_code != 409, (
+        f"a processing claim older than the lease duration must be reclaimable, not block every future "
+        f"question forever -- got {resp.status_code}: {resp.text}"
+    )
+
+
+def test_p0_04_b_a_zombie_attempts_late_write_never_overwrites_the_reclaiming_attempts_answer(monkeypatch, test_env):
+    """P0-04 (part B): the property fencing actually exists for. Attempt A
+    claims the lease; its lease then expires (its provider call is still
+    running -- slow, not dead) and attempt B reclaims the SAME conversation
+    and successfully persists a real answer; THEN A's slow provider call
+    finally returns and tries to persist too. Without a fencing token on the
+    write itself, A's late write would silently overwrite or duplicate B's
+    already-persisted answer -- exactly the hazard a naive
+    reclaim-without-fencing implementation would pass by accident (only one
+    attempt ever runs in most tests) but fail for real."""
+    import app.api.routes_chat as routes_chat
+    from app.db import get_conn
+    from app.main import app as fastapi_app
+    from app.providers.base import AIProvider, GeneratedAnswer
+    from fastapi.testclient import TestClient
+    from tests.conftest import register_test_user
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "tech-p004b@example.com")
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        user_id = conn.execute("SELECT id FROM users WHERE email = 'tech-p004b@example.com'").fetchone()["id"]
+        conv_cur = conn.execute(
+            "INSERT INTO conversations (user_id, machine_id) VALUES (%s, 1) RETURNING id", (user_id,)
+        )
+        conv_id = conv_cur.fetchone()["id"]
+        user_msg_cur = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES (%s, 'user', 'brew temp?') "
+            "RETURNING id",
+            (conv_id,),
+        )
+        user_message_id = user_msg_cur.fetchone()["id"]
+
+    with get_conn() as conn:
+        attempt_a = routes_chat._claim_conversation_processing(conn, conv_id)
+    assert attempt_a is not None
+
+    # A's lease expires while its provider call is still running (slow, not
+    # dead) -- B reclaims the same conversation with a fresh attempt_id.
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE conversations SET processing_claimed_at = now() - interval '10 minutes' WHERE id = %s",
+            (conv_id,),
+        )
+        attempt_b = routes_chat._claim_conversation_processing(conn, conv_id)
+    assert attempt_b is not None
+    assert attempt_b != attempt_a
+
+    class _FixedAnswerProvider(AIProvider):
+        name = "test_fixed"
+
+        def __init__(self, text):
+            self.text = text
+
+        def generate(self, question, machine_label, passages, history=None):
+            return GeneratedAnswer(answer=self.text, citations=[], provider=self.name, is_no_answer=True)
+
+    monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: [])
+
+    # B's attempt actually completes and writes the real answer.
+    monkeypatch.setattr(routes_chat, "get_provider", lambda: _FixedAnswerProvider("B's real answer"))
+    routes_chat._generate_and_persist_answer(
+        conv_id, user_message_id, "brew temp?", 1, [], user_id=user_id, attempt_id=attempt_b,
+    )
+
+    # A's slow provider call finally returns AFTER B already won.
+    monkeypatch.setattr(routes_chat, "get_provider", lambda: _FixedAnswerProvider("A's stale answer"))
+    routes_chat._generate_and_persist_answer(
+        conv_id, user_message_id, "brew temp?", 1, [], user_id=user_id, attempt_id=attempt_a,
+    )
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT content FROM messages WHERE conversation_id = %s AND role = 'assistant' ORDER BY id",
+            (conv_id,),
+        ).fetchall()
+    contents = [r["content"] for r in rows]
+    assert contents == ["B's real answer"], (
+        f"a zombie attempt's late write must never overwrite or duplicate the reclaiming attempt's "
+        f"real answer -- got {contents}"
     )
