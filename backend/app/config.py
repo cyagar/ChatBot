@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import ClassVar
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -87,16 +88,43 @@ class Settings(BaseSettings):
     # use.
     support_contact: str = "support@hmwagner.com"
 
+    # P0-12 (external review, 2026-09-21): backend/.env.example's own SECRET_KEY
+    # placeholder ("change-me-to-a-random-64-char-string") is 36 characters --
+    # long enough to slip past a bare `len(secret_key) < 32` check, and isn't
+    # equal to "dev-only-insecure-key" either, so a deployment that copied
+    # .env.example into .env without replacing this line would boot in
+    # APP_ENV=production with a session-signing key that's public knowledge
+    # (this file is committed to the repo) -- anyone who reads it can mint
+    # valid signed session tokens for any user ID/token_version they can
+    # observe or guess. A maintained list catches known placeholders by
+    # value, independent of length; the example file's own placeholder was
+    # also shortened below so it fails the length check too, in case this
+    # list is ever incomplete.
+    _KNOWN_INSECURE_SECRET_KEYS: ClassVar[frozenset[str]] = frozenset({
+        "dev-only-insecure-key",
+        "change-me-to-a-random-64-char-string",
+        "REPLACE_ME",
+        "changeme",
+        "change-me",
+        "secret",
+        "your-secret-key-here",
+    })
+
     def validate_for_startup(self) -> None:
         """Refuse to boot with an insecure or inconsistent configuration once we're
         outside local development. A blank/default/short SECRET_KEY means session
         cookies can be forged; a provider selected without its key means every
         chat request will fail at call time instead of at startup."""
         if self.app_env != "development":
-            if not self.secret_key or self.secret_key == "dev-only-insecure-key" or len(self.secret_key) < 32:
+            if (
+                not self.secret_key
+                or self.secret_key.lower() in {v.lower() for v in self._KNOWN_INSECURE_SECRET_KEYS}
+                or len(self.secret_key) < 32
+            ):
                 raise RuntimeError(
-                    "SECRET_KEY is missing, default, or too short for APP_ENV="
-                    f"{self.app_env!r}. Generate a unique random secret per environment."
+                    "SECRET_KEY is missing, a known placeholder, or too short for APP_ENV="
+                    f"{self.app_env!r}. Generate a unique random secret per environment -- "
+                    "never copy the example value from .env.example."
                 )
             if self.ai_provider == "anthropic" and not self.anthropic_api_key:
                 raise RuntimeError("AI_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set.")
