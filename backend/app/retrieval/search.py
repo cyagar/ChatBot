@@ -223,7 +223,23 @@ def _hydrate(chunk_ids: list[int]) -> dict[int, RetrievedChunk]:
 def _rerank_boost(chunk: RetrievedChunk, query: str) -> float:
     """Light, explainable reranking signals. Deliberately not a neural reranker:
     these boosts are auditable in the admin retrieval inspector, which matters more
-    here than a marginal ranking gain."""
+    here than a marginal ranking gain.
+
+    Magnitudes were originally 0.20-0.35 -- found live 2026-09-21 that this
+    silently broke retrieval instead of merely nudging it: reciprocal_rank_fusion's
+    fused scores live in a tiny range (RRF_K=60, CANDIDATE_POOL=50, so a chunk
+    ranked #1 in both lists scores ~0.033 and one ranked #50 in a single list
+    scores ~0.009), so a flat +0.25 for e.g. any "temperature"-mentioning query
+    matched against ANY table/spec-typed chunk -- whether or not that chunk was
+    actually about temperature -- outweighed real relevance by 10-25x. Repro:
+    "What temperature range does this machine need for installation?" against
+    machine_id 24 ranked the actual installation-temperature chunk (text-typed,
+    #1 in vector search, #3 in lexical) below several off-topic table/procedure
+    chunks that only happened to share the chunk_type + keyword match, producing
+    a false "no answer in the excerpts" for a question the corpus fully answered.
+    Rescaled by ~20x so these act as genuine tie-breakers among already-close
+    RRF candidates instead of a ranking override.
+    """
     boost = 0.0
     q = query.lower()
 
@@ -233,20 +249,20 @@ def _rerank_boost(chunk: RetrievedChunk, query: str) -> float:
 
     # Question-type affinity: route to the chunk type that actually answers it.
     if re.search(r"error|code|fault|e-?\d{1,3}\b", q) and chunk.chunk_type == "error_code":
-        boost += 0.35
+        boost += 0.018
     if re.search(r"part|number|p/n|replace|kit", q) and chunk.chunk_type == "table":
-        boost += 0.25
+        boost += 0.012
     if re.search(r"how do i|how to|step|procedure|install|replace|adjust", q) and chunk.chunk_type == "procedure":
-        boost += 0.25
+        boost += 0.012
     if re.search(r"volt|amp|psi|temperature|degrees|spec|rating|dimension", q) and chunk.chunk_type in ("table", "spec"):
-        boost += 0.25
+        boost += 0.012
     if re.search(r"safe|warning|caution|danger|lockout|shock", q) and chunk.chunk_type == "warning":
-        boost += 0.30
+        boost += 0.015
 
     # Prefer service/repair docs for troubleshooting language.
     if re.search(r"not (heating|working|brewing)|won'?t|fail|troubleshoot|diagnos", q):
         if chunk.doc_type == "service_repair":
-            boost += 0.20
+            boost += 0.010
 
     return boost
 
