@@ -8,6 +8,7 @@ Status vocabulary matches the ingestion report requirement in the plan:
 from __future__ import annotations
 
 import re
+import zipfile
 from pathlib import Path
 
 import fitz  # pymupdf
@@ -365,6 +366,43 @@ _MAGIC_SIGNATURES: list[tuple[bytes, str]] = [
 ]
 
 
+def _is_word_ole(path: Path) -> bool:
+    """P1-09 (external review, 2026-09-21): the OLE compound-file signature
+    alone doesn't distinguish a real .doc from a legacy .xls/.ppt (same
+    container format, different internal streams) -- only a genuine Word
+    document has a top-level "WordDocument" stream. Mirrors the same check
+    extract_legacy_doc already does before parsing."""
+    try:
+        if not olefile.isOleFile(str(path)):
+            return False
+        ole = olefile.OleFileIO(str(path))
+        try:
+            return any("WordDocument" in s for s in ole.listdir())
+        finally:
+            ole.close()
+    except Exception:
+        return False
+
+
+def _sniff_ooxml_kind(path: Path) -> str:
+    """P1-09: .docx/.xlsx/.pptx are all ZIP containers sharing the same magic
+    bytes (PK\\x03\\x04) -- every one of them used to be labeled 'docx'
+    regardless of actual content. Distinguished by the one member file each
+    format's own spec guarantees it has."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = set(zf.namelist())
+    except Exception:
+        return "zip_ooxml"
+    if "word/document.xml" in names:
+        return "docx"
+    if "xl/workbook.xml" in names:
+        return "xlsx"
+    if "ppt/presentation.xml" in names:
+        return "pptx"
+    return "zip_ooxml"
+
+
 def sniff_file_type(path: Path) -> str | None:
     """Detect actual file type from magic bytes, independent of extension.
     Several files in the source corpus have extensions that don't match their
@@ -378,7 +416,15 @@ def sniff_file_type(path: Path) -> str | None:
     for sig, kind in _MAGIC_SIGNATURES:
         if head.startswith(sig):
             if kind == "zip_ooxml":
-                return "docx"  # only .docx is a supported OOXML type here
+                return _sniff_ooxml_kind(path)
+            if kind == "ole":
+                # P1-09: an actual binary .doc previously sniffed as the
+                # generic "ole" kind, which extract() never dispatches on
+                # (only "doc" reaches extract_legacy_doc) -- resolve_file_type
+                # trusts this sniff over the .doc extension, so every real
+                # legacy .doc silently took the "Unrecognized file extension"
+                # unsupported branch instead of being parsed.
+                return "doc" if _is_word_ole(path) else "ole"
             return kind
     return None
 
