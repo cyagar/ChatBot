@@ -23,7 +23,26 @@ from app.providers.base import (
 )
 
 MODEL = "claude-sonnet-5"
-REQUEST_TIMEOUT_SECONDS = 30
+# P1-19 (external review, 2026-09-21): the SDK's own default max_retries is
+# 2, layered UNDER generate()'s own application-level "repair" retry (a
+# second full _call() when the first response fails parse_and_validate --
+# not a substitute for this, since a transport-level exception from _call()
+# propagates straight out of generate() with no repair attempt). Worst case
+# was 2 calls x 3 attempts (1 original + 2 SDK retries) x 30s = up to 180s
+# against Android's 90-second read timeout (ApiClient.kt) -- the technician
+# could see "connection lost" while the server was still working, or the
+# app's own timeout could fire mid-provider-call. Tightened so the true
+# worst case fits with margin: 2 calls x 2 attempts (1 original + 1 SDK
+# retry) x 20s = 80s. Kept at 1 retry, not 0 -- a single transient
+# blip (the common case a retry actually helps with) still self-heals
+# instead of failing the whole request on the first hiccup. These exact
+# numbers are a reasoned bound, not measured against live traffic (the
+# review flagged this item as "conditional, verify with actual
+# model/network" -- no live Anthropic call was exercised here either);
+# revisit under real latency data before assuming 20s is generous rather
+# than tight.
+REQUEST_TIMEOUT_SECONDS = 20
+MAX_RETRIES = 1
 
 _JSON_SHAPE_INSTRUCTION = (
     "Respond in this exact JSON shape (no markdown fence): "
@@ -63,7 +82,9 @@ class AnthropicProvider(AIProvider):
                 "AI_PROVIDER=anthropic but the 'anthropic' package is not installed. "
                 "Uncomment it in requirements.txt and reinstall."
             ) from e
-        self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=REQUEST_TIMEOUT_SECONDS)
+        self._client = anthropic.Anthropic(
+            api_key=settings.anthropic_api_key, timeout=REQUEST_TIMEOUT_SECONDS, max_retries=MAX_RETRIES,
+        )
 
     def generate(self, question, machine_label, passages, history=None) -> GeneratedAnswer:
         if not passages:

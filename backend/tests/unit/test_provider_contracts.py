@@ -281,6 +281,32 @@ def test_anthropic_request_sets_a_bounded_max_tokens(anthropic_provider, monkeyp
     assert 0 < captured["max_tokens"] <= 4096
 
 
+def test_p1_19_worst_case_provider_latency_fits_under_the_android_read_timeout(anthropic_provider):
+    """P1-19 (external review, 2026-09-21): the SDK's own default max_retries
+    is 2, so worst case was 2 _call()s (the original attempt plus
+    generate()'s own JSON-repair retry) x 3 attempts each (1 original + 2 SDK
+    retries) x the 30s request timeout = up to 180s against Android's
+    90-second read timeout (ApiClient.kt) -- a technician could see
+    "connection lost" while the server was still working. Pins the actual
+    worst-case bound, not just the individual settings, so a future change
+    to either number is caught if it pushes the total back over budget."""
+    ANDROID_READ_TIMEOUT_SECONDS = 90
+    CALLS_PER_GENERATE = 2  # original attempt + generate()'s own repair retry
+
+    client = anthropic_provider._client
+    attempts_per_call = 1 + client.max_retries
+    worst_case_seconds = CALLS_PER_GENERATE * attempts_per_call * client.timeout
+
+    assert worst_case_seconds <= ANDROID_READ_TIMEOUT_SECONDS, (
+        f"worst-case provider latency ({worst_case_seconds}s: {CALLS_PER_GENERATE} calls x "
+        f"{attempts_per_call} attempts x {client.timeout}s) must fit under the Android client's "
+        f"{ANDROID_READ_TIMEOUT_SECONDS}s read timeout"
+    )
+    # A single transient blip (the common case) must still self-heal -- not
+    # reduced all the way to zero SDK retries.
+    assert client.max_retries >= 1
+
+
 def test_anthropic_no_passages_short_circuits_without_calling_the_provider(anthropic_provider, monkeypatch):
     called = []
     monkeypatch.setattr(anthropic_provider._client.messages, "create",
