@@ -173,3 +173,19 @@ def healthz():
 @app.get("/admin")
 def admin_page(request: Request):
     return templates.TemplateResponse(request, "admin.html")
+
+
+@app.get("/invite")
+def invite_page(request: Request):
+    """P1-01 (external review, 2026-09-21): admin.js generated invitation
+    links pointing at "/?invite=..." -- left over from a removed technician
+    PWA that used to handle that query param client-side. There was no
+    route at "/" at all, so every invitation link 404'd; an admin could
+    create a token and the JSON API could redeem it, but a recipient had no
+    supported way to actually do that. This is the minimal HTML redemption
+    page the fix calls for (not a full PWA): reads token/email from the
+    query string and lets the recipient choose a password by calling the
+    existing POST /api/auth/register directly -- see invite.html. After
+    account creation, the technician signs in from the Android app; this
+    page does nothing beyond registration itself."""
+    return templates.TemplateResponse(request, "invite.html")

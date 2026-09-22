@@ -482,7 +482,13 @@ function wireTabEvents() {
           expires_in_hours: parseInt(fd.get("expires_in_hours"), 10) || 72,
         }),
       });
-      const link = `${window.location.origin}/?invite=${encodeURIComponent(invite.token)}&email=${encodeURIComponent(invite.email)}`;
+      // P1-01 (external review, 2026-09-21): this used to link to
+      // "/?invite=..." -- leftover from a removed technician PWA that
+      // handled that query param client-side. There was no route there at
+      // all, so every invitation link 404'd. /invite is a real route
+      // (app/main.py) serving a minimal HTML redemption page
+      // (invite.html) that calls POST /api/auth/register directly.
+      const link = `${window.location.origin}/invite?token=${encodeURIComponent(invite.token)}&email=${encodeURIComponent(invite.email)}`;
       state.lastInvite = { email: invite.email, link };
       state.invitations = await api("/api/admin/invitations");
       render();

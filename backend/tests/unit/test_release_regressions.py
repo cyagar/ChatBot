@@ -687,3 +687,27 @@ def test_p0_11_eval_script_refuses_without_a_disposable_clone(tmp_path):
     assert result.returncode != 0
     assert "must both be set" not in result.stderr
     assert "IDENTICAL to backend/.env's production" not in result.stderr
+
+
+def test_p1_01_invitation_link_resolves_to_a_real_redemption_page(test_env):
+    """P1-01: admin.js generated invitation links pointing at "/?invite=..."
+    -- leftover from a removed technician PWA that used to handle that query
+    param client-side. There was no route at "/" at all (reproduced by the
+    review: GET /?invite=synthetic returned 404), so an admin could create a
+    token and the JSON API could redeem it, but a recipient had no supported
+    way to actually do that. Fixed with a real /invite route serving a
+    minimal HTML redemption page that calls POST /api/auth/register
+    directly (already covered end-to-end by test_admin.py's invitation
+    tests) -- this proves the route itself exists and that admin.js was
+    updated to link there instead of the dead "/?invite=" path."""
+    resp = client.get("/invite")
+    assert resp.status_code == 200, f"GET /invite must serve the redemption page, not 404 -- got {resp.status_code}"
+    assert "text/html" in resp.headers["content-type"]
+
+    resp_with_params = client.get("/invite", params={"token": "abc123", "email": "tech@example.com"})
+    assert resp_with_params.status_code == 200
+
+    admin_js = Path(__file__).resolve().parent.parent.parent / "app" / "web" / "static" / "js" / "admin.js"
+    source = admin_js.read_text(encoding="utf-8")
+    assert "/invite?token=" in source, "admin.js must link invitations to the real /invite route"
+    assert "/?invite=$" not in source, "admin.js must not still generate the dead /?invite= link"
