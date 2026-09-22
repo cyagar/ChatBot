@@ -261,6 +261,33 @@ def list_conversations(
     return out
 
 
+@router.get("/conversations/{conversation_id}", response_model=ConversationOut)
+def get_conversation(conversation_id: int, user: CurrentUser = Depends(get_current_user)):
+    """P1-13 (external review, 2026-09-21): the Android client had no way to
+    re-fetch a single conversation's authoritative, current state -- only
+    the list endpoint above (a full reload of every conversation, wrong
+    tool for "did this one's machine change") and the machine-selection
+    endpoint's response (only reachable via that one action). ChatScreen's
+    toolbar used the label passed through navigation instead, which never
+    updates when the server resolves a machine mention in an answer or a
+    clarification is answered through a path other than
+    selectClarifyingMachine -- it could keep saying "No machine selected"
+    indefinitely. This is the single-resource fetch the client polls after
+    every reload to keep the toolbar honest."""
+    with get_conn() as conn:
+        _require_own_conversation(conn, conversation_id, user.id)
+        row = conn.execute(
+            "SELECT id, machine_id, title, started_at, updated_at FROM conversations WHERE id = %s",
+            (conversation_id,),
+        ).fetchone()
+        label = _machine_label(conn, row["machine_id"])
+        title = _conversation_title(conn, conversation_id, row["title"])
+    return ConversationOut(
+        id=row["id"], machine_id=row["machine_id"], machine_label=label,
+        title=title, started_at=row["started_at"], updated_at=row["updated_at"],
+    )
+
+
 def _require_own_conversation(conn, conversation_id: int, user_id: int):
     row = conn.execute(
         "SELECT id, user_id, machine_id, pending_message_id, is_processing FROM conversations WHERE id = %s",

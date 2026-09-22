@@ -2876,6 +2876,65 @@
         ]
       }
     },
+    "/api/conversations/{conversation_id}": {
+      "get": {
+        "description": "P1-13 (external review, 2026-09-21): the Android client had no way to\nre-fetch a single conversation's authoritative, current state -- only\nthe list endpoint above (a full reload of every conversation, wrong\ntool for \"did this one's machine change\") and the machine-selection\nendpoint's response (only reachable via that one action). ChatScreen's\ntoolbar used the label passed through navigation instead, which never\nupdates when the server resolves a machine mention in an answer or a\nclarification is answered through a path other than\nselectClarifyingMachine -- it could keep saying \"No machine selected\"\nindefinitely. This is the single-resource fetch the client polls after\nevery reload to keep the toolbar honest.",
+        "operationId": "get_conversation_api_conversations__conversation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Conversation",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
     "/api/conversations/{conversation_id}/machine": {
       "post": {
         "description": "The ONLY way a conversation's machine is set once clarification is\nneeded, or changed later (\"Change machine\"). This is always an explicit,\nconfirmed technician action -- never inferred from a later message body,\nwhich is what let a conversation's machine silently drift in the reviewed\nversion (concern #5/#6).\n\nIf a clarifying question is pending (the technician asked something\nbefore the machine was known), confirming the machine here resumes and\nanswers that ORIGINAL stored question -- it does not require the caller\nto resubmit it as a new user turn (P1-8). The resumed answer is\ngenerated and persisted as usual; this endpoint's own response stays\nConversationOut either way, so the caller reloads\nGET /conversations/{id}/messages to see it, the same as after any other\nanswer.",

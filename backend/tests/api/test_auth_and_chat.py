@@ -336,6 +336,40 @@ def test_cannot_access_another_users_conversation(test_env):
     assert resp.status_code == 404
 
 
+def test_p1_13_get_conversation_reports_the_current_machine_label(test_env):
+    """P1-13 (external review, 2026-09-21): the Android client had no way to
+    re-fetch a single conversation's authoritative state -- ChatScreen's
+    toolbar used the label passed through navigation instead, which never
+    updated when the server resolved a machine for the conversation. This
+    pins the new GET /api/conversations/{id} contract: starts with no
+    machine, then reports the real label once one is set."""
+    _register("labeltech@example.com")
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+
+    fresh = client.get(f"/api/conversations/{conv['id']}")
+    assert fresh.status_code == 200
+    assert fresh.json()["machine_label"] is None
+
+    client.post(f"/api/conversations/{conv['id']}/machine", json={"machine_id": 1})
+
+    updated = client.get(f"/api/conversations/{conv['id']}")
+    assert updated.status_code == 200
+    assert updated.json()["machine_label"] == "Bunn-O-Matic Corporation Axiom"
+
+
+def test_p1_13_get_conversation_rejects_another_users_conversation(test_env):
+    _register("owner2@example.com", "password123")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+    client.post("/api/auth/logout")
+
+    _register("intruder2@example.com", "password123")
+    resp = client.get(f"/api/conversations/{conv['id']}")
+    assert resp.status_code == 404
+
+
 def test_admin_endpoint_forbidden_for_technician(test_env):
     _register("plaintech@example.com")
     resp = client.get("/api/admin/documents")

@@ -12,6 +12,7 @@ import com.hmwagner.techmanual.network.MessageIn
 import com.hmwagner.techmanual.network.MessageOut
 import com.hmwagner.techmanual.network.SetMachineRequest
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -104,6 +105,24 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
     private suspend fun loadMessages() {
         _state.value = _state.value.copy(loadingHistory = true, error = null)
         try {
+            // P1-13 (external review, 2026-09-21): fetched every reload, not
+            // just after selectClarifyingMachine() -- otherwise state.conversation
+            // stays null (and the toolbar falls back to the stale label
+            // passed through navigation) whenever the server resolves a
+            // machine for this conversation through any other path (a
+            // mention in the question). Best-effort: a failure here must
+            // never block the messages themselves from loading.
+            val convResp = try {
+                ApiClient.service.getConversation(conversationId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            if (convResp?.isSuccessful == true) {
+                _state.value = _state.value.copy(conversation = convResp.body())
+            }
+
             val msgs = ApiClient.service.getMessages(conversationId)
             if (msgs.isSuccessful) {
                 val loaded = msgs.body().orEmpty()

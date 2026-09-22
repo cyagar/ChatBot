@@ -55,6 +55,7 @@ class ChatViewModelTest {
         ApiClient.overrideServiceForTest(retrofit.create(ApiService::class.java))
 
         // Consumed by ChatViewModel's init { refresh() }.
+        server.enqueue(conversationJsonResponse())
         server.enqueue(jsonResponse("[]"))
         vm = ChatViewModel(conversationId = 1)
         awaitState { !it.loadingHistory }
@@ -68,6 +69,16 @@ class ChatViewModelTest {
 
     private fun jsonResponse(body: String) =
         MockResponse().setResponseCode(200).setBody(body).addHeader("Content-Type", "application/json")
+
+    // P1-13 (external review, 2026-09-21): loadMessages() now issues a
+    // GET .../conversations/{id} (see ChatViewModel) before its GET
+    // .../messages -- every plain server.enqueue()-based (not Dispatcher
+    // -based, which routes by path and needs no change) refresh()/init
+    // trigger needs one more enqueued response ahead of the messages one.
+    private fun conversationJsonResponse(machineLabel: String? = null) = jsonResponse(
+        """{"id": 1, "machine_id": null, "machine_label": ${machineLabel?.let { "\"$it\"" } ?: "null"},
+            "started_at": "2026-08-24T00:00:00Z", "updated_at": "2026-08-24T00:00:00Z"}"""
+    )
 
     private fun awaitState(timeoutMs: Long = 2000, predicate: (ChatUiState) -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -402,6 +413,44 @@ class ChatViewModelTest {
     }
 
     @Test
+    fun `refresh picks up a machine the server resolved for this conversation`() {
+        // P1-13 (external review, 2026-09-21): ChatScreen's toolbar used to
+        // read only the label passed through navigation -- a snapshot from
+        // whenever the screen was opened, never updated when the server
+        // resolved a machine for the conversation through some other path
+        // (a mention in the question). state.conversation is now refreshed
+        // on every loadMessages() call, not just after
+        // selectClarifyingMachine(); this pins that it actually reaches the
+        // ViewModel's state.
+        assertNull("no machine resolved yet at setUp()", vm.state.value.conversation?.machine_label)
+
+        server.enqueue(conversationJsonResponse(machineLabel = "Bunn-O-Matic Corporation Axiom"))
+        server.enqueue(jsonResponse("[]"))
+        vm.refresh()
+        awaitState { !it.loadingHistory }
+
+        assertEquals("Bunn-O-Matic Corporation Axiom", vm.state.value.conversation?.machine_label)
+    }
+
+    @Test
+    fun `a failed conversation refresh does not block the messages themselves from loading`() {
+        // Best-effort by design: the messages list is the primary content --
+        // losing the machine-label refresh must never take that down with it,
+        // and must not surface as a visible error either (setUp()'s own
+        // initial fetch already left state.conversation non-null with a
+        // null label -- this failure just means that goes unrefreshed).
+        server.enqueue(MockResponse().setResponseCode(500))
+        server.enqueue(jsonResponse(
+            """[{"id": 30, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}]"""
+        ))
+        vm.refresh()
+        awaitState { !it.loadingHistory }
+
+        assertEquals(1, vm.state.value.messages.size)
+        assertNull(vm.state.value.error)
+    }
+
+    @Test
     fun `refresh cannot clear an in-flight pending echo when nothing has been persisted yet`() {
         // P0A-2: a pull-to-refresh (ChatScreen's PullToRefreshBox calls the
         // same refresh() -> loadMessages() this test drives directly) must
@@ -414,6 +463,7 @@ class ChatViewModelTest {
         awaitState { !it.sending }
         assertTrue(vm.state.value.pendingEchoUncertain)
 
+        server.enqueue(conversationJsonResponse())
         server.enqueue(jsonResponse("[]"))
         vm.refresh()
         awaitState { !it.loadingHistory }

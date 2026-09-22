@@ -105,7 +105,21 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                     Column {
                         Text("Chat")
                         Text(
-                            machineLabel ?: "No machine selected",
+                            // P1-13 (external review, 2026-09-21): this used
+                            // to read the `machineLabel` nav argument only --
+                            // a snapshot from whenever this screen was
+                            // opened, never updated. state.conversation is
+                            // refreshed on every load/refresh (see
+                            // ChatViewModel.loadMessages) and is the
+                            // authoritative source once it has loaded --
+                            // including a genuinely null machine_label,
+                            // which must win over a stale non-null nav
+                            // argument, not fall back to it. The nav
+                            // argument is only a first-paint fallback before
+                            // that first load completes (state.conversation
+                            // still null).
+                            state.conversation?.let { it.machine_label ?: "No machine selected" }
+                                ?: machineLabel ?: "No machine selected",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
