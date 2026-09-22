@@ -41,10 +41,19 @@ class SkippedFile:
     P1-3: "apply file count/size/type limits and report every skipped item."
     Skips used to only reach a server log, invisible to an admin; pipeline.py
     now records one of these as a normal ingestion_events row per skip, the
-    same visibility every other outcome (indexed/duplicate/failed/...) gets."""
+    same visibility every other outcome (indexed/duplicate/failed/...) gets.
+
+    is_error (P1-05, external review 2026-09-21) distinguishes a genuine
+    failure (a download that errored out -- the file may well be a manual
+    the corpus is now silently missing) from an intentional, by-design skip
+    (a subfolder, a shortcut, a Workspace-native file with no binary, an
+    oversized file, a permissions gap) that isn't evidence of anything
+    broken. Only the former should make a run's overall health reflect a
+    problem -- see pipeline.py's had_error handling."""
 
     filename: str
     reason: str
+    is_error: bool = False
 
 
 class DocumentSource(abc.ABC):
@@ -381,7 +390,7 @@ class GoogleDriveSource(DocumentSource):
                                         expected_md5=md5, max_bytes=self.max_file_size_bytes)
                     except Exception as e:
                         logger.warning("Skipping Drive file %s (%r): download failed: %s", file_id, name, e)
-                        self._pending_skips.append(SkippedFile(name, f"Download failed: {e}"))
+                        self._pending_skips.append(SkippedFile(name, f"Download failed: {e}", is_error=True))
                         continue
                     # A rename changes the cache filename (it embeds the name);
                     # drop any other cached copy left behind under this file ID

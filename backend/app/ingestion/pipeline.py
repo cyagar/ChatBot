@@ -180,6 +180,14 @@ def _ingest_all_locked(
         # -- an ingestion_events row and a FileOutcome -- instead of only ever
         # reaching a server log.
         for skipped in source.pop_skipped():
+            # P1-05 (external review, 2026-09-21): a genuine failure reported
+            # via pop_skipped() (e.g. a download that errored out) used to be
+            # visually indistinguishable from an intentional skip (subfolder,
+            # shortcut, oversized file) AND didn't affect the run's overall
+            # status -- an all-failed-download run still finished
+            # status='completed'. See SkippedFile.is_error.
+            if skipped.is_error:
+                had_error = True
             with get_conn() as conn:
                 _record_event(conn, run_id, skipped.filename, "skipped", skipped.reason, None)
             report.outcomes.append(FileOutcome(skipped.filename, "skipped", skipped.reason))
@@ -200,6 +208,17 @@ def _ingest_all_locked(
                 with get_conn() as conn:
                     _record_event(conn, run_id, sf.filename, "failed", f"Unhandled error: {e}", None)
                 outcome = FileOutcome(sf.filename, "failed", f"Unhandled error: {e}")
+            # P1-05 (external review, 2026-09-21): a HANDLED extraction
+            # failure (extract() returning status="failed" rather than
+            # raising) never flipped had_error -- only an unhandled
+            # exception did. An all-failed synthetic run (every file a
+            # corrupt/unreadable PDF, none of them raising) finished
+            # status='completed', identical to a clean run. "unsupported" is
+            # deliberately NOT included here: it's an intentional, expected
+            # classification (a file type this pipeline will never parse),
+            # not a failure -- see test_unsupported_file_retried_after_....
+            if outcome.status == "failed":
+                had_error = True
             report.outcomes.append(outcome)
 
         report.near_duplicate_scores = list(_NEAR_DUP_SCORES)

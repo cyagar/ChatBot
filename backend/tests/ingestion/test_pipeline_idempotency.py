@@ -373,3 +373,69 @@ def test_unsupported_file_retried_after_capability_change_updates_in_place(test_
         total_rows = conn.execute("SELECT COUNT(*) c FROM documents").fetchone()["c"]
     assert rows == 1
     assert total_rows == 1, "an unchanged outcome must update the row in place, not churn new rows every run"
+
+
+def test_p1_05_an_all_failed_run_is_marked_completed_with_errors_not_completed(test_env, manuals_dir):
+    """P1-05 (external review, 2026-09-21): had_error only flipped on a
+    raised exception -- a HANDLED extraction failure (extract() returning
+    status="failed" rather than raising, e.g. a corrupt/unreadable PDF) left
+    had_error False, so a run where every file failed still finished
+    status='completed', identical to a clean run. Reproduced before the fix:
+    this exact scenario asserted status == 'completed' and passed."""
+    (manuals_dir / "corrupt.pdf").write_bytes(b"not a real pdf, just garbage bytes")
+
+    report = ingest_all(source=FakeDirectorySource(manuals_dir), embed=False)
+    assert report.counts() == {"failed": 1}
+
+    with get_conn() as conn:
+        run = conn.execute("SELECT status FROM ingestion_runs WHERE id = %s", (report.run_id,)).fetchone()
+    assert run["status"] == "completed_with_errors", (
+        f"a run where every file failed extraction must not report status='completed' -- got {run['status']!r}"
+    )
+
+
+def test_p1_05_an_unsupported_only_run_is_still_completed_not_completed_with_errors(test_env, manuals_dir):
+    """Companion to the test above: 'unsupported' (a file type this pipeline
+    deliberately does not parse, e.g. a scanned PDF with no OCR configured)
+    is an intentional, expected classification, not a failure -- it must NOT
+    flip had_error, or every corpus with a single not-yet-supported file
+    type would permanently show as an unhealthy sync."""
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page()  # no text layer -> unsupported without OCR
+    doc.save(manuals_dir / "scanned.pdf")
+    doc.close()
+
+    report = ingest_all(source=FakeDirectorySource(manuals_dir), embed=False)
+    assert report.counts() == {"unsupported": 1}
+
+    with get_conn() as conn:
+        run = conn.execute("SELECT status FROM ingestion_runs WHERE id = %s", (report.run_id,)).fetchone()
+    assert run["status"] == "completed", f"an unsupported-only run is not a failure -- got {run['status']!r}"
+
+
+def test_p1_05_a_source_level_download_failure_is_a_real_error_not_an_intentional_skip(test_env, manuals_dir):
+    """Companion to the two tests above, for the other half of P1-05: a
+    source-level skip reported via pop_skipped() with a download failure
+    (SkippedFile.is_error=True) used to be indistinguishable from an
+    intentional, by-design skip (a subfolder, a Workspace file, an oversized
+    file) and never affected the run's overall status -- a folder where
+    every download failed still finished status='completed'. An intentional
+    skip (is_error=False, the default -- see
+    test_source_level_skips_are_recorded_as_visible_ingestion_events) must
+    keep NOT flipping it."""
+    from app.ingestion.sources import SkippedFile
+
+    class SourceWithFailedDownload(FakeDirectorySource):
+        def pop_skipped(self):
+            return [SkippedFile("broken.pdf", "Download failed: connection reset", is_error=True)]
+
+    report = ingest_all(source=SourceWithFailedDownload(manuals_dir), embed=False)
+    assert report.counts() == {"skipped": 1}
+
+    with get_conn() as conn:
+        run = conn.execute("SELECT status FROM ingestion_runs WHERE id = %s", (report.run_id,)).fetchone()
+    assert run["status"] == "completed_with_errors", (
+        f"a source-reported download failure must mark the run unhealthy -- got {run['status']!r}"
+    )
