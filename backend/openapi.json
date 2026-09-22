@@ -1728,6 +1728,7 @@
     },
     "/api/admin/feedback": {
       "get": {
+        "description": "P1-02 (external review, 2026-09-21): this used to return only\nrating/comment/user/conversation_id -- an admin triaging an \"incorrect\"\nreport had no machine, model, or citation context and had to separately\nopen the conversation (if they could even find it) to see what the\ntechnician was actually asking about. Now also reports message_id\n(feedback is per-answer, not per-conversation -- P1-11 already scoped\nsubmission that way), the machine the answer was generated for, and\nevery citation the answer actually used, batched in one extra query\nrather than N+1 per row.",
         "operationId": "list_feedback_api_admin_feedback_get",
         "parameters": [
           {
@@ -3888,6 +3889,23 @@
           }
         },
         "summary": "Healthz"
+      }
+    },
+    "/invite": {
+      "get": {
+        "description": "P1-01 (external review, 2026-09-21): admin.js generated invitation\nlinks pointing at \"/?invite=...\" -- left over from a removed technician\nPWA that used to handle that query param client-side. There was no\nroute at \"/\" at all, so every invitation link 404'd; an admin could\ncreate a token and the JSON API could redeem it, but a recipient had no\nsupported way to actually do that. This is the minimal HTML redemption\npage the fix calls for (not a full PWA): reads token/email from the\nquery string and lets the recipient choose a password by calling the\nexisting POST /api/auth/register directly -- see invite.html. After\naccount creation, the technician signs in from the Android app; this\npage does nothing beyond registration itself.",
+        "operationId": "invite_page_invite_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Invite Page"
       }
     }
   }
