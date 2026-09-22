@@ -11,11 +11,67 @@ async function api(path, options = {}) {
   });
   if (!resp.ok) {
     let detail = `Request failed (${resp.status})`;
-    try { detail = (await resp.json()).detail || detail; } catch (_) {}
-    throw new Error(detail);
+    let correlationId = null;
+    try {
+      const body = await resp.json();
+      detail = body.detail || detail;
+      correlationId = body.correlation_id || null;
+    } catch (_) {}
+    // P1-08 (external review, 2026-09-21): an expired/revoked admin session
+    // used to just 401 on whatever action was in flight, with no visible
+    // error and no path back to a usable state -- the only recovery was a
+    // manual page reload. state.user !== null means this wasn't boot()'s
+    // own initial, expected-to-401-when-signed-out /api/auth/me probe.
+    if (resp.status === 401 && state.user !== null) {
+      state.user = null;
+      renderLogin();
+    }
+    const err = new Error(correlationId ? `${detail} (ref: ${correlationId})` : detail);
+    err.status = resp.status;
+    throw err;
   }
   if (resp.status === 202 || resp.status === 204) return null;
   return resp.json();
+}
+
+// P1-08: every admin action reachable from here shows its own error instead
+// of failing silently -- see guardedClick/guardedSubmit below, which route
+// every thrown api() error here.
+function showError(message) {
+  const banner = document.getElementById("admin-error-banner");
+  if (!banner) return;
+  banner.textContent = message;
+  banner.classList.remove("hidden");
+}
+
+function guardedClick(btn, handler) {
+  btn.addEventListener("click", async (...args) => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try {
+      await handler(...args);
+    } catch (err) {
+      showError(err.message || "Something went wrong. Please try again.");
+    } finally {
+      if (btn.isConnected) btn.disabled = false;
+    }
+  });
+}
+
+function guardedSubmit(form, handler) {
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (submitBtn?.disabled) return;
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      await handler(e);
+    } catch (err) {
+      showError(err.message || "Something went wrong. Please try again.");
+    } finally {
+      if (submitBtn?.isConnected) submitBtn.disabled = false;
+    }
+  });
 }
 
 async function boot() {
@@ -118,11 +174,14 @@ function render() {
         ${TABS.map((t) => `<button data-tab="${t.id}" class="${state.tab === t.id ? "active" : ""}">${t.label}</button>`).join("")}
         <div class="admin-nav-footer"><button id="logout-btn" class="ghost">Sign out</button></div>
       </nav>
-      <main class="admin-main">${renderTab()}</main>
+      <main class="admin-main">
+        <div id="admin-error-banner" class="banner error hidden"></div>
+        ${renderTab()}
+      </main>
     </div>
   `;
   root.querySelectorAll(".admin-nav button[data-tab]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       state.tab = btn.dataset.tab;
       await loadTab();
       render();
@@ -459,14 +518,14 @@ function wireTabEvents() {
   if (inviteLinkInput) inviteLinkInput.addEventListener("click", () => inviteLinkInput.select());
 
   root.querySelectorAll(".approve-doc-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       await api(`/api/admin/documents/${btn.dataset.doc}/review`, { method: "POST", body: JSON.stringify({ decision: "approved" }) });
       state.reviewQueue = await api("/api/admin/review-queue");
       render();
     });
   });
   root.querySelectorAll(".reject-doc-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       if (!confirm("Reject this document? It will never be used to answer technician questions.")) return;
       await api(`/api/admin/documents/${btn.dataset.doc}/review`, { method: "POST", body: JSON.stringify({ decision: "rejected" }) });
       state.reviewQueue = await api("/api/admin/review-queue");
@@ -474,7 +533,7 @@ function wireTabEvents() {
     });
   });
   root.querySelectorAll(".approve-link-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       await api(`/api/admin/documents/${btn.dataset.doc}/machines/${btn.dataset.machine}/review`,
         { method: "POST", body: JSON.stringify({ decision: "approved" }) });
       state.reviewQueue = await api("/api/admin/review-queue");
@@ -482,7 +541,7 @@ function wireTabEvents() {
     });
   });
   root.querySelectorAll(".reject-link-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       await api(`/api/admin/documents/${btn.dataset.doc}/machines/${btn.dataset.machine}/review`,
         { method: "POST", body: JSON.stringify({ decision: "rejected" }) });
       state.reviewQueue = await api("/api/admin/review-queue");
@@ -491,34 +550,29 @@ function wireTabEvents() {
   });
 
   const inviteForm = document.getElementById("invite-form");
-  if (inviteForm) inviteForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
+  if (inviteForm) guardedSubmit(inviteForm, async () => {
     const fd = new FormData(inviteForm);
-    try {
-      const invite = await api("/api/admin/invitations", {
-        method: "POST",
-        body: JSON.stringify({
-          email: fd.get("email"),
-          role: fd.get("role"),
-          expires_in_hours: parseInt(fd.get("expires_in_hours"), 10) || 72,
-        }),
-      });
-      // P1-01 (external review, 2026-09-21): this used to link to
-      // "/?invite=..." -- leftover from a removed technician PWA that
-      // handled that query param client-side. There was no route there at
-      // all, so every invitation link 404'd. /invite is a real route
-      // (app/main.py) serving a minimal HTML redemption page
-      // (invite.html) that calls POST /api/auth/register directly.
-      const link = `${window.location.origin}/invite?token=${encodeURIComponent(invite.token)}&email=${encodeURIComponent(invite.email)}`;
-      state.lastInvite = { email: invite.email, link };
-      state.invitations = await api("/api/admin/invitations");
-      render();
-    } catch (err) {
-      alert(err.message);
-    }
+    const invite = await api("/api/admin/invitations", {
+      method: "POST",
+      body: JSON.stringify({
+        email: fd.get("email"),
+        role: fd.get("role"),
+        expires_in_hours: parseInt(fd.get("expires_in_hours"), 10) || 72,
+      }),
+    });
+    // P1-01 (external review, 2026-09-21): this used to link to
+    // "/?invite=..." -- leftover from a removed technician PWA that
+    // handled that query param client-side. There was no route there at
+    // all, so every invitation link 404'd. /invite is a real route
+    // (app/main.py) serving a minimal HTML redemption page
+    // (invite.html) that calls POST /api/auth/register directly.
+    const link = `${window.location.origin}/invite?token=${encodeURIComponent(invite.token)}&email=${encodeURIComponent(invite.email)}`;
+    state.lastInvite = { email: invite.email, link };
+    state.invitations = await api("/api/admin/invitations");
+    render();
   });
   root.querySelectorAll(".revoke-invite-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       if (!confirm("Revoke this invitation? The link will stop working.")) return;
       await api(`/api/admin/invitations/${btn.dataset.id}/revoke`, { method: "POST" });
       state.invitations = await api("/api/admin/invitations");
@@ -533,7 +587,7 @@ function wireTabEvents() {
     });
   });
   root.querySelectorAll(".deactivate-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       if (!confirm("Deactivate this manual? It will be removed from search but kept for audit.")) return;
       await api(`/api/admin/documents/${btn.dataset.id}/deactivate`, { method: "POST" });
       state.documents = await api("/api/admin/documents");
@@ -548,8 +602,7 @@ function wireTabEvents() {
     const picker = form.querySelector(".machine-picker");
     picker?.addEventListener("change", () => { form.dataset.machinesTouched = "true"; }, { once: true });
 
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
+    guardedSubmit(form, async () => {
       const fd = new FormData(form);
       const payload = {
         manufacturer_name: fd.get("manufacturer_name") || null,
@@ -589,12 +642,12 @@ function wireTabEvents() {
   });
 
   const reindexBtn = document.getElementById("reindex-btn");
-  if (reindexBtn) reindexBtn.addEventListener("click", async () => {
+  if (reindexBtn) guardedClick(reindexBtn, async () => {
     await api("/api/admin/ingestion/reindex", { method: "POST" });
     alert("Re-index started in the background.");
   });
   root.querySelectorAll(".view-report-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    guardedClick(btn, async () => {
       const row = root.querySelector(`.report-row[data-report-for="${btn.dataset.run}"]`);
       const cell = row.querySelector("td");
       if (!row.classList.contains("hidden")) { row.classList.add("hidden"); return; }
@@ -607,8 +660,7 @@ function wireTabEvents() {
   });
 
   const queryForm = document.getElementById("query-form");
-  if (queryForm) queryForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
+  if (queryForm) guardedSubmit(queryForm, async () => {
     const fd = new FormData(queryForm);
     state.queryResult = await api("/api/admin/query-test", {
       method: "POST",

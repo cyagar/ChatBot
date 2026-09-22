@@ -835,3 +835,45 @@ def test_p1_07_admin_js_attribute_interpolation_uses_a_quote_safe_encoder(test_e
         "expected escAttr() at every attribute-interpolation site the review named "
         "(invite link, manufacturer/title/revision values, machine data-search)"
     )
+
+
+def test_p1_08_admin_actions_centrally_disable_show_errors_and_recover_from_401(test_env):
+    """P1-08: loading tabs and approving documents/links, deactivating,
+    reindexing, saving metadata, and running the query test used to await
+    api() with no try/catch and no disabled/loading state at all -- an
+    expired admin cookie, 409, 422, source timeout, or deployment restart
+    left the action apparently unresponsive (the click's promise just
+    rejected, silently, with the button still enabled for a compounding
+    double-tap) with no visible error and no path back to a usable state.
+
+    Fixed with two central wrappers (guardedClick/guardedSubmit) instead of
+    hand-adding try/catch to each of the ~15 call sites individually:
+    disable the triggering control for the duration of the call, route any
+    thrown error to a single visible banner, and -- inside api() itself, so
+    every call site gets it for free -- treat a 401 on an action (not
+    boot()'s own initial, expected-to-401-when-signed-out probe) as an
+    expired session and return to the login form. Static source check,
+    matching the review's own verification depth for this finding."""
+    source = _admin_js_source()
+    assert "function guardedClick(" in source
+    assert "function guardedSubmit(" in source
+    assert "function showError(" in source
+    assert 'id="admin-error-banner"' in source, "a single visible place to show the error a guarded action threw"
+
+    # api() itself must route an in-session 401 back to the login form,
+    # not just throw -- guarded by state.user !== null so boot()'s own
+    # initial /api/auth/me probe (which legitimately 401s for a signed-out
+    # visitor) isn't affected.
+    assert "state.user !== null" in source and "renderLogin();" in source
+
+    # A representative sample of previously-unguarded, network-calling
+    # handlers must now go through the wrapper, not a bare addEventListener.
+    for needle in (
+        'guardedClick(btn, async () => {\n      await api(`/api/admin/documents/${btn.dataset.doc}/review`',
+        'guardedClick(btn, async () => {\n      if (!confirm("Deactivate this manual?',
+        "if (reindexBtn) guardedClick(reindexBtn,",
+    ):
+        assert needle in source, f"expected a guarded handler at: {needle!r}"
+    assert source.count("guardedClick(") + source.count("guardedSubmit(") >= 12, (
+        "expected most of admin.js's ~15 network-calling handlers to be wrapped"
+    )
