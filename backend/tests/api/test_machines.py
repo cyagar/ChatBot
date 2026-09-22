@@ -208,3 +208,47 @@ def test_recent_machines_drops_a_favorite_whose_only_manual_went_away(test_env):
         "nothing retrievable -- it must not surface in recents at all, not "
         "with document_count: 0"
     )
+
+
+def test_p1_12_search_reports_is_favorite_for_a_favorited_machine(test_env):
+    """P1-12 (external review, 2026-09-21): search_machines()'s SQL had no
+    join to recent_machines at all, so _row_to_machine's "is_favorite" key
+    was always absent and silently defaulted to False -- a favorited
+    machine always drew an empty star in search results (only
+    /api/machines/recent, which does join recent_machines, ever reported
+    the real value). The Android client's optimistic toggle flips
+    !machine.is_favorite, so acting on this wrong initial state sent the
+    wrong direction on first tap."""
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        _insert_document(conn, 1)
+        _link(conn, 1, 1)
+
+    register_test_user(client, "picker8@example.com", role="technician")
+    client.post("/api/machines/1/favorite", params={"favorite": True})
+
+    search_result = client.get("/api/machines", params={"q": "Axiom"}).json()
+
+    assert len(search_result) == 1
+    assert search_result[0]["is_favorite"] is True, (
+        f"a favorited machine must report is_favorite: true from search too, got {search_result[0]}"
+    )
+
+
+def test_p1_12_search_does_not_leak_another_users_favorite(test_env):
+    """Companion to the test above: is_favorite in search results must be
+    scoped to the requesting user, not any technician who favorited it."""
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        _insert_document(conn, 1)
+        _link(conn, 1, 1)
+
+    register_test_user(client, "picker9-favoriter@example.com", role="technician")
+    client.post("/api/machines/1/favorite", params={"favorite": True})
+
+    register_test_user(client, "picker9-other@example.com", role="technician")
+    search_result = client.get("/api/machines", params={"q": "Axiom"}).json()
+
+    assert search_result[0]["is_favorite"] is False

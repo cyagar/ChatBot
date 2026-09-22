@@ -69,13 +69,25 @@ def search_machines(
     before_mf, before_model, before_id = decode_cursor(cursor, 3) if cursor else (None, None, None)
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
-               COUNT(DISTINCT d.id) AS document_count
+               COUNT(DISTINCT d.id) AS document_count,
+               -- P1-12 (external review, 2026-09-21): this query had no join
+               -- to recent_machines at all, so _row_to_machine's
+               -- "is_favorite" key was always absent and defaulted to False
+               -- -- a favorited machine always drew an empty star in search
+               -- results, and the Android client's optimistic toggle (which
+               -- flips !machine.is_favorite) would then send the WRONG
+               -- direction on first tap. bool_or (not a plain column) so no
+               -- new GROUP BY column is needed -- the r.user_id join
+               -- condition already guarantees at most one recent_machines
+               -- row per machine.
+               COALESCE(bool_or(r.is_favorite), false) AS is_favorite
         FROM machines m
         JOIN manufacturers mf ON mf.id = m.manufacturer_id
         LEFT JOIN document_machines dm ON dm.machine_id = m.id AND dm.review_status = 'approved'
         LEFT JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial')
             AND d.deactivated_at IS NULL AND d.review_status = 'approved'
             AND d.is_current_revision = true
+        LEFT JOIN recent_machines r ON r.machine_id = m.id AND r.user_id = %s
         WHERE (%s = '' OR m.model_name ILIKE %s OR m.family ILIKE %s OR mf.name ILIKE %s)
         -- mf.name has to be in GROUP BY too -- Postgres's functional
         -- -dependency exception (grouping by a table's PK lets you select
@@ -102,6 +114,7 @@ def search_machines(
     like = f"%{q}%"
     with get_conn() as conn:
         rows = conn.execute(sql, [
+            user.id,
             q, like, like, like,
             before_mf, before_mf, before_mf, before_model, before_mf, before_model, before_id,
             limit + 1,
