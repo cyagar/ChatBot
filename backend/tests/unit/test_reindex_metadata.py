@@ -60,7 +60,7 @@ def _override(conn, doc_id, field_name, corrected_value="whatever"):
 
 def _patch_extraction(monkeypatch, meta_by_filename: dict[str, DocMetadata]):
     def fake_extract(path, ocr_available):
-        return "pdf", SimpleNamespace(pages=[]), None
+        return "pdf", SimpleNamespace(pages=[], status="ok", reason=None), None
 
     def fake_extract_metadata(filename, extracted):
         return meta_by_filename[filename]
@@ -352,7 +352,7 @@ def test_extraction_failure_is_recorded_and_does_not_abort_the_run(test_env, mon
         def fake_extract(path, ocr_available):
             if path.name == "broken.pdf":
                 raise ValueError("corrupt PDF")
-            return "pdf", SimpleNamespace(pages=[]), None
+            return "pdf", SimpleNamespace(pages=[], status="ok", reason=None), None
 
         monkeypatch.setattr(rm, "extract", fake_extract)
         monkeypatch.setattr(rm, "extract_metadata", lambda filename, extracted: _meta(doc_type="service_repair"))
@@ -363,3 +363,116 @@ def test_extraction_failure_is_recorded_and_does_not_abort_the_run(test_env, mon
     assert report.errors[0][0] == "broken.pdf"
     assert len(report.changed) == 1
     assert report.changed[0].filename == "fine.pdf", "one document's extraction failure must not block another's update"
+
+
+def test_p1_10_extraction_returning_failed_status_does_not_overwrite_good_metadata(test_env, monkeypatch):
+    """P1-10 (external review, 2026-09-21): extract() returning NORMALLY
+    with status='failed'/'unsupported' (no exception -- a corrupt or
+    now-unreadable stored file, an extractor regression) used to fall
+    straight through to extract_metadata() on that near-empty
+    ExtractedDocument. The resulting near-empty metadata then looked like a
+    genuine change from the document's real, good existing values and got
+    written over them. Only a raised exception was ever treated as
+    "not safely reindexable" -- reproduced before the fix: this exact
+    scenario reported report.changed with title overwritten to None."""
+    with get_conn() as conn:
+        from app.config import get_settings
+        storage_dir = get_settings().local_storage_dir_resolved
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        _seed_document(conn, storage_dir, doc_id=1, filename="now_corrupt.pdf",
+                       manufacturer_name="Bunn-O-Matic Corporation", title="Axiom Service Manual")
+
+        def fake_extract(path, ocr_available):
+            return "pdf", SimpleNamespace(pages=[], status="failed", reason="Could not open PDF: truncated file"), None
+
+        monkeypatch.setattr(rm, "extract", fake_extract)
+        # Would report doc_type/title/etc. as None if extract_metadata() were
+        # ever called here -- proves the status check short-circuits BEFORE
+        # that call, not just before writing its result.
+        monkeypatch.setattr(rm, "extract_metadata", lambda filename, extracted: _meta())
+
+        report = rm.reindex_documents(conn, storage_dir, ocr_available=False, apply=True)
+
+        doc = _read_document(conn, 1)
+
+    assert len(report.errors) == 1
+    assert report.errors[0][0] == "now_corrupt.pdf"
+    assert "failed" in report.errors[0][1]
+    assert report.changed == [], "a failed extraction must not be treated as a metadata change"
+    assert doc["title"] == "Axiom Service Manual", "existing good metadata must survive a failed re-extraction untouched"
+    assert doc["manufacturer_name"] == "Bunn-O-Matic Corporation"
+
+
+def test_p1_10_machine_links_distinguish_manufacturer_not_just_model_name(test_env, monkeypatch):
+    """P1-10: old links were identified by model_name ALONE, ignoring
+    manufacturer -- two different manufacturers sharing a model name (a
+    real, expected catalog collision, e.g. two brands both selling an
+    "Axiom") compared as identical, so a genuinely different machine link
+    the new extraction proposes was silently never added whenever an
+    unrelated same-named model happened to already be linked."""
+    with get_conn() as conn:
+        from app.config import get_settings
+        storage_dir = get_settings().local_storage_dir_resolved
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Manufacturer A'), ('Manufacturer B')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        _seed_document(conn, storage_dir)
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, confidence, review_status) "
+            "VALUES (1, 1, 0.7, 'pending')"
+        )
+        _patch_extraction(monkeypatch, {"axiom.pdf": _meta(machine_matches=[
+            MachineMatch(manufacturer="Manufacturer B", model_name="Axiom",
+                         family=None, machine_type=None, confidence=0.8),
+        ])})
+
+        rm.reindex_documents(conn, storage_dir, ocr_available=False, apply=True)
+
+        links = conn.execute(
+            "SELECT mf.name AS manufacturer, m.model_name FROM document_machines dm "
+            "JOIN machines m ON m.id = dm.machine_id JOIN manufacturers mf ON mf.id = m.manufacturer_id "
+            "WHERE dm.document_id = 1"
+        ).fetchall()
+    assert [(r["manufacturer"], r["model_name"]) for r in links] == [("Manufacturer B", "Axiom")], (
+        "Manufacturer A's stale pending Axiom link must be replaced by Manufacturer B's, "
+        "not treated as already satisfied by same-named model from the wrong manufacturer"
+    )
+
+
+def test_p1_10_an_approved_link_below_confidence_1_survives_a_reindex_without_an_override(test_env, monkeypatch):
+    """P1-10: EVERY confidence<1.0 row used to be deleted on any machine_links
+    change, including an admin-approved or -rejected link --
+    review_document_machine_link (routes_admin.py) only ever updates
+    review_status, never confidence, so an approved link (the normal,
+    common case -- confidence is whatever the auto-detector originally
+    scored it) is routinely still <1.0 with no metadata_overrides row at
+    all (overrides only come from the separate PATCH metadata-correction
+    endpoint). A reindex could silently take an approved manual out of a
+    machine's retrieval and replace it with a fresh, unreviewed pending
+    proposal. Only a still-pending link may be added or removed; an
+    approved/rejected link is a human decision and survives regardless of
+    what the current extraction proposes."""
+    with get_conn() as conn:
+        from app.config import get_settings
+        storage_dir = get_settings().local_storage_dir_resolved
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        _seed_document(conn, storage_dir)
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, confidence, review_status) "
+            "VALUES (1, 1, 0.85, 'approved')"
+        )
+        # Extraction now proposes nothing at all for this document (a
+        # plausible heuristic regression/drift) -- the approved link must
+        # not depend on the extraction continuing to agree with it.
+        _patch_extraction(monkeypatch, {"axiom.pdf": _meta(machine_matches=[])})
+
+        rm.reindex_documents(conn, storage_dir, ocr_available=False, apply=True)
+
+        link = conn.execute(
+            "SELECT machine_id, review_status, confidence FROM document_machines WHERE document_id = 1"
+        ).fetchall()
+    assert len(link) == 1 and link[0]["machine_id"] == 1 and link[0]["review_status"] == "approved", (
+        f"an approved link with confidence < 1.0 and no override must survive a reindex, got {link}"
+    )

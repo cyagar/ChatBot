@@ -134,6 +134,28 @@ def reindex_documents(conn, storage_dir: Path, ocr_available: bool, apply: bool)
 
         try:
             _file_type, extracted, _mismatch_note = extract(path, ocr_available=ocr_available)
+        except Exception as e:  # noqa: BLE001 - report and continue, one bad file shouldn't abort the run
+            report.errors.append((doc["original_filename"], repr(e)))
+            continue
+
+        # P1-10 (external review, 2026-09-21): extract() returning normally
+        # with status="failed"/"unsupported" (a corrupt or now-unreadable
+        # stored file, an extractor regression) used to fall straight
+        # through to extract_metadata() on that near-empty ExtractedDocument
+        # -- the resulting metadata (manufacturer/title/etc. all None or
+        # filename-derived only) then looked like a genuine change from the
+        # document's real, good existing values and got written over them.
+        # Only a raised exception was ever treated as "this document isn't
+        # safely reindexable right now" -- this is the same thing by a
+        # different route and must be handled the same way: skip the
+        # document entirely, write nothing for it.
+        if extracted.status in ("failed", "unsupported"):
+            report.errors.append(
+                (doc["original_filename"], f"extraction status={extracted.status!r}: {extracted.reason}")
+            )
+            continue
+
+        try:
             meta = extract_metadata(doc["original_filename"], extracted)
         except Exception as e:  # noqa: BLE001 - report and continue, one bad file shouldn't abort the run
             report.errors.append((doc["original_filename"], repr(e)))
@@ -169,24 +191,56 @@ def reindex_documents(conn, storage_dir: Path, ocr_available: bool, apply: bool)
                 conn.execute("UPDATE documents SET doc_number = %s WHERE id = %s", (meta.doc_number, doc["id"]))
 
         # --- machine_links ---
+        # P1-10 (external review, 2026-09-21): two bugs here. (1) Old links
+        # were identified by model_name ALONE, ignoring manufacturer -- the
+        # same model name from two different manufacturers (a real, expected
+        # catalog collision) compared as identical. (2) EVERY confidence<1.0
+        # row was deleted on any change, including an admin-approved or
+        # -rejected link: review_document_machine_link (routes_admin.py)
+        # only ever updates review_status, never confidence, so an approved
+        # link is routinely still <1.0 -- a reindex could silently take an
+        # approved manual out of a machine's retrieval and replace it with a
+        # fresh, unreviewed pending proposal. Only a still-pending (never
+        # human-reviewed) link may be added or removed by this script; an
+        # approved/rejected link is a human decision and survives
+        # regardless of what the current extraction proposes.
         if "machine_links" in overridden:
             result.skipped_overridden_fields.append("machine_links")
         else:
             old_rows = conn.execute(
-                "SELECT m.model_name FROM document_machines dm JOIN machines m ON m.id = dm.machine_id "
-                "WHERE dm.document_id = %s AND dm.confidence < 1.0",
+                "SELECT dm.machine_id, mf.name AS manufacturer, m.model_name, dm.review_status "
+                "FROM document_machines dm JOIN machines m ON m.id = dm.machine_id "
+                "LEFT JOIN manufacturers mf ON mf.id = m.manufacturer_id "
+                "WHERE dm.document_id = %s",
                 (doc["id"],),
             ).fetchall()
-            old_names = sorted(r["model_name"] for r in old_rows)
-            new_names = sorted(m.model_name for m in meta.machine_matches)
-            if old_names != new_names:
-                result.field_changes.append(FieldChange("machine_links", old_names, new_names))
+            old_by_key = {(r["manufacturer"], r["model_name"]): r for r in old_rows}
+            old_pending_keys = {k for k, r in old_by_key.items() if r["review_status"] == "pending"}
+            reviewed_keys = set(old_by_key) - old_pending_keys
+
+            new_by_key = {(m.manufacturer, m.model_name): m for m in meta.machine_matches}
+            new_keys = set(new_by_key)
+
+            to_remove = old_pending_keys - new_keys
+            # Never re-propose a link an admin already approved or rejected,
+            # even if this run's extraction still finds it.
+            to_add = new_keys - old_pending_keys - reviewed_keys
+
+            if to_remove or to_add:
+                result.field_changes.append(FieldChange(
+                    "machine_links",
+                    sorted(f"{manu} {model}" for manu, model in old_pending_keys),
+                    sorted(f"{manu} {model}" for manu, model in new_keys),
+                ))
                 if apply:
-                    conn.execute(
-                        "DELETE FROM document_machines WHERE document_id = %s AND confidence < 1.0",
-                        (doc["id"],),
-                    )
-                    for match in meta.machine_matches:
+                    for key in to_remove:
+                        conn.execute(
+                            "DELETE FROM document_machines WHERE document_id = %s AND machine_id = %s "
+                            "AND review_status = 'pending'",
+                            (doc["id"], old_by_key[key]["machine_id"]),
+                        )
+                    for key in to_add:
+                        match = new_by_key[key]
                         mid = _get_or_create_machine(conn, match)
                         conn.execute(
                             "INSERT INTO document_machines (document_id, machine_id, confidence) "
