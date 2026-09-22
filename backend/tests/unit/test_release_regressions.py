@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.db import get_conn
 from app.main import app
+from tests.conftest import register_test_user
 
 client = TestClient(app)
 
@@ -711,3 +713,63 @@ def test_p1_01_invitation_link_resolves_to_a_real_redemption_page(test_env):
     source = admin_js.read_text(encoding="utf-8")
     assert "/invite?token=" in source, "admin.js must link invitations to the real /invite route"
     assert "/?invite=$" not in source, "admin.js must not still generate the dead /?invite= link"
+
+
+def _seed_p1_02_answerable_machine():
+    """Mirrors test_auth_and_chat.py's _seed_answerable_machine: a real chunk
+    plus a code-token question (app/providers/extractive.py's
+    _code_token_rescue) gets a genuine, citation-bearing completed answer
+    with no embeddings needed."""
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES "
+            "('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
+            "'indexed', 'approved') RETURNING id"
+        )
+        doc_id = cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'approved')",
+            (doc_id,),
+        )
+        conn.execute(
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (%s, 4, 'text', "
+            "'ERROR CODE E9: indicates a tank heater fault. Check the thermistor circuit.', 90, 0)",
+            (doc_id,),
+        )
+
+
+def test_p1_02_admin_feedback_listing_includes_machine_label_message_id_and_citations(test_env):
+    """P1-02: GET /api/admin/feedback used to return only
+    rating/comment/user/conversation_id -- an admin triaging an "incorrect"
+    report had no machine, model, or citation context and no way to jump to
+    the specific answer (only a conversation_id) without separately opening
+    the conversation. Now also reports message_id, the machine the answer
+    was generated for, and every citation the answer actually used."""
+    _seed_p1_02_answerable_machine()
+    register_test_user(client, "tech-p102@example.com", admin_email="admin-p102@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(
+        f"/api/conversations/{conv['id']}/messages", json={"content": "what does error E9 mean"}
+    ).json()
+    feedback_resp = client.post(
+        f"/api/messages/{msg['id']}/feedback", json={"rating": "incorrect", "comment": "wrong fault cause"}
+    )
+    assert feedback_resp.status_code == 201, feedback_resp.text
+
+    register_test_user(client, "admin-p102@example.com", role="administrator", admin_email="admin-p102@example.com")
+    resp = client.get("/api/admin/feedback")
+    assert resp.status_code == 200, resp.text
+    row = next(r for r in resp.json() if r["message_id"] == msg["id"])
+
+    assert row["rating"] == "incorrect"
+    assert row["comment"] == "wrong fault cause"
+    assert row["machine_label"] == "Bunn-O-Matic Corporation Axiom", (
+        f"admin feedback listing must report which machine the answer was generated for, got {row}"
+    )
+    assert "axiom.pdf" in row["citations"], (
+        f"admin feedback listing must report the citations the answer actually used, got {row}"
+    )

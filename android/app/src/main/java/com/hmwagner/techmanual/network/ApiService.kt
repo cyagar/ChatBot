@@ -68,6 +68,12 @@ interface ApiService {
     @POST("api/messages/{messageId}/save")
     suspend fun saveAnswer(@Path("messageId") messageId: Int): Response<Unit>
 
+    @POST("api/messages/{messageId}/feedback")
+    suspend fun submitFeedback(
+        @Path("messageId") messageId: Int,
+        @Body body: FeedbackRequest,
+    ): Response<Unit>
+
     @GET("api/saved-answers")
     suspend fun listSavedAnswers(@Query("limit") limit: Int = 50): Response<List<SavedAnswerOut>>
 

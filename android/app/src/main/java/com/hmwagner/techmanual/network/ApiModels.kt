@@ -88,7 +88,16 @@ data class MessageOut(
     // action-oriented styling and show a clear warning instead of presenting
     // this as current, trustworthy advice.
     val has_withdrawn_source: Boolean = false,
+    // P1-02 (external review, 2026-09-21): the requesting user's own most
+    // recent rating for this answer ("helpful" | "incorrect" |
+    // "missing_info"), or null if never rated -- lets a reload show "already
+    // rated" instead of resetting to blank buttons, the same reason
+    // is_saved exists.
+    val feedback_rating: String? = null,
 )
+
+@Serializable
+data class FeedbackRequest(val rating: String, val comment: String? = null)
 
 @Serializable
 data class EvidenceOut(

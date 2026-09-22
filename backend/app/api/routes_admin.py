@@ -815,15 +815,49 @@ def query_test(payload: QueryTestRequest, admin: CurrentUser = Depends(require_a
 
 @router.get("/feedback")
 def list_feedback(admin: CurrentUser = Depends(require_admin), limit: int = Query(default=100, ge=1, le=500)):
+    """P1-02 (external review, 2026-09-21): this used to return only
+    rating/comment/user/conversation_id -- an admin triaging an "incorrect"
+    report had no machine, model, or citation context and had to separately
+    open the conversation (if they could even find it) to see what the
+    technician was actually asking about. Now also reports message_id
+    (feedback is per-answer, not per-conversation -- P1-11 already scoped
+    submission that way), the machine the answer was generated for, and
+    every citation the answer actually used, batched in one extra query
+    rather than N+1 per row."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT f.id, f.rating, f.comment, f.created_at, u.email AS user_email, "
-            "m.content AS question_or_answer, m.conversation_id "
-            "FROM feedback f JOIN users u ON u.id = f.user_id JOIN messages m ON m.id = f.message_id "
+            "SELECT f.id, f.message_id, f.rating, f.comment, f.created_at, u.email AS user_email, "
+            "m.content AS answer_content, m.conversation_id, m.provider, "
+            "mf.name AS manufacturer, mach.model_name "
+            "FROM feedback f "
+            "JOIN users u ON u.id = f.user_id "
+            "JOIN messages m ON m.id = f.message_id "
+            "JOIN conversations c ON c.id = m.conversation_id "
+            "LEFT JOIN machines mach ON mach.id = c.machine_id "
+            "LEFT JOIN manufacturers mf ON mf.id = mach.manufacturer_id "
             "ORDER BY f.created_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
-    return [dict(r) for r in rows]
+        message_ids = [r["message_id"] for r in rows]
+        citations_by_message: dict[int, list[str]] = {mid: [] for mid in message_ids}
+        if message_ids:
+            citation_rows = conn.execute(
+                "SELECT ms.message_id, d.original_filename FROM message_sources ms "
+                "JOIN chunks c ON c.id = ms.chunk_id JOIN documents d ON d.id = c.document_id "
+                "WHERE ms.message_id = ANY(%s) AND ms.is_citation = true "
+                "ORDER BY COALESCE(ms.citation_ordinal, ms.rank)",
+                (message_ids,),
+            ).fetchall()
+            for cr in citation_rows:
+                citations_by_message[cr["message_id"]].append(cr["original_filename"])
+    return [
+        {
+            **dict(r),
+            "machine_label": f"{r['manufacturer']} {r['model_name']}" if r["manufacturer"] else None,
+            "citations": citations_by_message.get(r["message_id"], []),
+        }
+        for r in rows
+    ]
 
 
 @router.get("/unanswered")

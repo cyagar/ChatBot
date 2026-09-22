@@ -419,10 +419,24 @@ function renderFeedback() {
     <h1>Feedback &amp; unanswered questions</h1>
     <h2 style="font-size:1.05rem;">Technician feedback</h2>
     <table class="admin-table">
-      <thead><tr><th>When</th><th>User</th><th>Rating</th><th>Comment</th></tr></thead>
+      <!-- P1-02 (external review, 2026-09-21): machine, provider, citations,
+           and the message/conversation ids used to be missing here entirely
+           -- an admin triaging an "incorrect" report had no way to see what
+           the technician was actually asking about without separately
+           hunting down the conversation. -->
+      <thead><tr><th>When</th><th>User</th><th>Machine</th><th>Rating</th><th>Comment</th><th>Answer</th><th>Citations</th><th>IDs</th></tr></thead>
       <tbody>${state.feedback.map((f) => `
-        <tr><td>${esc(f.created_at)}</td><td>${esc(f.user_email)}</td><td>${esc(f.rating)}</td><td>${esc(f.comment || "—")}</td></tr>
-      `).join("") || `<tr><td colspan="4">No feedback yet.</td></tr>`}</tbody>
+        <tr>
+          <td>${esc(f.created_at)}</td>
+          <td>${esc(f.user_email)}</td>
+          <td>${esc(f.machine_label || "—")}</td>
+          <td>${esc(f.rating)}</td>
+          <td>${esc(f.comment || "—")}</td>
+          <td style="max-width:280px;">${esc((f.answer_content || "").slice(0, 200))}${(f.answer_content || "").length > 200 ? "…" : ""}</td>
+          <td>${f.citations && f.citations.length ? f.citations.map((c) => esc(c)).join(", ") : "—"}</td>
+          <td style="color:var(--text-dim); font-size:0.8rem;">msg ${f.message_id} · conv ${f.conversation_id}${f.provider ? " · " + esc(f.provider) : ""}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="8">No feedback yet.</td></tr>`}</tbody>
     </table>
     <h2 style="font-size:1.05rem; margin-top:24px;">Frequently unanswered questions</h2>
     <table class="admin-table">

@@ -7,6 +7,7 @@ import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.CitationOut
 import com.hmwagner.techmanual.network.ConversationOut
 import com.hmwagner.techmanual.network.EvidenceOut
+import com.hmwagner.techmanual.network.FeedbackRequest
 import com.hmwagner.techmanual.network.MessageIn
 import com.hmwagner.techmanual.network.MessageOut
 import com.hmwagner.techmanual.network.SetMachineRequest
@@ -59,6 +60,10 @@ data class ChatUiState(
     val evidenceError: String? = null,
     val evidenceCitation: CitationOut? = null,
     val savedMessageIds: Set<Int> = emptySet(),
+    // P1-02 (external review, 2026-09-21): each rated message's own rating,
+    // keyed by message id -- mirrors savedMessageIds so a reload shows
+    // "already rated" instead of resetting the buttons to blank.
+    val feedbackByMessageId: Map<Int, String> = emptyMap(),
 )
 
 class ChatViewModel(private val conversationId: Int) : ViewModel() {
@@ -186,6 +191,7 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                         "Still waiting to hear back on that question. Pull to refresh or tap Retry to check again."
                     } else null,
                     savedMessageIds = loaded.filter { it.is_saved }.map { it.id }.toSet(),
+                    feedbackByMessageId = loaded.mapNotNull { m -> m.feedback_rating?.let { m.id to it } }.toMap(),
                 )
             } else {
                 _state.value = _state.value.copy(loadingHistory = false, error = "Couldn't load this conversation (code ${msgs.code()}).")
@@ -395,6 +401,24 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(error = "Couldn't save that answer -- check your connection and try again.")
+            }
+        }
+    }
+
+    fun submitFeedback(messageId: Int, rating: String, comment: String? = null) {
+        viewModelScope.launch {
+            try {
+                val resp = ApiClient.service.submitFeedback(messageId, FeedbackRequest(rating, comment))
+                if (resp.isSuccessful) {
+                    _state.value = _state.value.copy(
+                        feedbackByMessageId = _state.value.feedbackByMessageId + (messageId to rating),
+                        error = null,
+                    )
+                } else {
+                    _state.value = _state.value.copy(error = "Couldn't record that feedback (code ${resp.code()}). Try again.")
+                }
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(error = "Couldn't record that feedback -- check your connection and try again.")
             }
         }
     }

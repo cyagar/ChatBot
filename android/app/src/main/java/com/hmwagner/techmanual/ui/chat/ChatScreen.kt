@@ -30,6 +30,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -149,6 +150,8 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                                 onClarifyingSelect = vm::selectClarifyingMachine,
                                 onSave = { vm.saveAnswer(msg.id) },
                                 saved = state.savedMessageIds.contains(msg.id),
+                                onFeedback = { rating -> vm.submitFeedback(msg.id, rating) },
+                                feedback = state.feedbackByMessageId[msg.id],
                                 // P0-05 (external review, 2026-09-21): a
                                 // clarifying-question message's chips used to
                                 // stay live forever, in every loaded message,
@@ -325,6 +328,8 @@ private fun MessageBubble(
     onClarifyingSelect: (Int) -> Unit,
     onSave: () -> Unit,
     saved: Boolean,
+    onFeedback: (String) -> Unit,
+    feedback: String?,
     isLatestMessage: Boolean,
 ) {
     val isUser = msg.role == "user"
@@ -474,8 +479,36 @@ private fun MessageBubble(
                     }
                 }
 
-                if (msg.role == "assistant" && !msg.is_clarifying_question) {
+                // Save/feedback are only valid for a completed, substantive
+                // assistant answer -- mirrors the backend's own eligibility
+                // check (_ELIGIBLE_FOR_FEEDBACK_SQL in routes_chat.py),
+                // which 404s a clarifying question, pending/failed attempt,
+                // or no-answer response. Showing these buttons there would
+                // just produce a silent, confusing error on tap.
+                if (msg.role == "assistant" && !msg.is_clarifying_question && !isNoAnswer && msg.answer_status == "completed") {
                     TextButton(onClick = onSave, enabled = !saved) { Text(if (saved) "Saved" else "Save") }
+                    // P1-02 (external review, 2026-09-21): the app had no way
+                    // to submit answer feedback at all -- these three chips
+                    // are a lightweight per-answer rating, kept re-tappable
+                    // (not disabled once set) so a technician can correct a
+                    // mis-tap.
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = feedback == "helpful",
+                            onClick = { onFeedback("helpful") },
+                            label = { Text("Helpful") },
+                        )
+                        FilterChip(
+                            selected = feedback == "incorrect",
+                            onClick = { onFeedback("incorrect") },
+                            label = { Text("Incorrect") },
+                        )
+                        FilterChip(
+                            selected = feedback == "missing_info",
+                            onClick = { onFeedback("missing_info") },
+                            label = { Text("Missing info") },
+                        )
+                    }
                 }
             }
         }
