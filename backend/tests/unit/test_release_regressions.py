@@ -773,3 +773,65 @@ def test_p1_02_admin_feedback_listing_includes_machine_label_message_id_and_cita
     assert "axiom.pdf" in row["citations"], (
         f"admin feedback listing must report the citations the answer actually used, got {row}"
     )
+
+
+def _admin_js_source() -> str:
+    return (Path(__file__).resolve().parent.parent.parent / "app" / "web" / "static" / "js" / "admin.js").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_p1_06_admin_js_has_no_inline_style_or_event_handler_attributes(test_env):
+    """P1-06: app/main.py's CSP is style-src 'self'/script-src 'self' with no
+    unsafe-inline (P1-18), but admin.js built up markup with dozens of
+    inline style="..." attributes and one onclick="..." handler -- a
+    CSP-enforcing browser silently drops every one of them. Worst case: the
+    edit-row/report-row toggle rows relied on an inline style="display:none"
+    ever having applied at all, so under real CSP enforcement they rendered
+    visible on first load instead of hidden until toggled. Fixed by moving
+    every declaration into admin.css classes (toggled via classList, not
+    .style.display/.style.cssText) and wiring the one handler via
+    addEventListener. This is a static source check, matching the review's
+    own verification depth for this finding ("Status: OPEN; static")."""
+    source = _admin_js_source()
+    assert 'style="' not in source, "admin.js must not build any inline style=\"...\" attribute"
+    assert "onclick=" not in source, "admin.js must not build any inline onclick=\"...\" attribute"
+
+    # The two rows that actually depend on starting hidden must use the CSS
+    # class (toggled via classList), not a runtime .style.display check --
+    # proves the fix isn't just cosmetic (removing the attribute) but that
+    # the show/hide logic was actually ported to classList too.
+    assert '"edit-row hidden"' in source
+    assert '"report-row hidden"' in source
+    assert "row.style.display" not in source
+    assert 'classList.toggle("hidden")' in source or 'classList.add("hidden")' in source
+
+    admin_css = (
+        Path(__file__).resolve().parent.parent.parent / "app" / "web" / "static" / "css" / "admin.css"
+    ).read_text(encoding="utf-8")
+    assert ".hidden" in admin_css and "display: none" in admin_css
+
+
+def test_p1_07_admin_js_attribute_interpolation_uses_a_quote_safe_encoder(test_env):
+    """P1-07: esc() escapes text-node content (&, <, >) but not quote
+    characters -- a text node never needs them escaped, but an HTML
+    ATTRIBUTE value does. esc()'s result was interpolated directly inside
+    value="..." and data-search="..." for admin/PDF-derived data (document
+    title, revision, manufacturer, machine family) -- a value containing a
+    double quote truncates the attribute and lets the rest of the string
+    inject new attributes onto that element. Fixed with escAttr() (esc() ->
+    &quot;/&#39; on top), used at every such site. Static source check,
+    matching the review's own verification depth for this finding."""
+    source = _admin_js_source()
+    assert "function escAttr(" in source, "admin.js must define a quote-safe attribute encoder"
+
+    # The vulnerable OLD pattern (esc()'s result placed directly inside a
+    # quoted attribute) must be gone from every site the review named --
+    # and escAttr must be the thing that replaced it, not just some other
+    # attribute going untouched.
+    assert 'value="${esc(' not in source, "esc() (not quote-safe) must not feed a value=\"...\" attribute"
+    assert 'data-search="${esc(' not in source, "esc() (not quote-safe) must not feed a data-search=\"...\" attribute"
+    assert source.count("escAttr(") >= 5, (
+        "expected escAttr() at every attribute-interpolation site the review named "
+        "(invite link, manufacturer/title/revision values, machine data-search)"
+    )

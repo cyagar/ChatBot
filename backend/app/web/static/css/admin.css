@@ -51,3 +51,38 @@
 .machine-picker { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 6px; margin-top: 4px; background: var(--bg); }
 .machine-option { display: flex; align-items: center; gap: 6px; padding: 4px 6px; font-weight: 400; min-height: auto; }
 .machine-option input { width: auto; }
+
+/* P1-06 (external review, 2026-09-21): admin.js used to build up markup
+   with inline style="..." attributes (and one onclick="...") -- CSP here is
+   style-src 'self'/script-src 'self' with no unsafe-inline, so a
+   CSP-enforcing browser silently drops every one of them. Worst case: the
+   edit-row/report-row toggle rows relied on an inline style="display:none"
+   ever having applied, so under real CSP enforcement they rendered visible
+   on every page load instead of hidden until toggled. These utility
+   classes replace every inline style; .hidden replaces every inline
+   display:none (JS toggles it via classList, not .style.display). */
+.hidden { display: none !important; }
+.text-dim { color: var(--text-dim); }
+.text-danger { color: var(--danger); }
+.text-xs { font-size: 0.7rem; }
+.text-sm { font-size: 0.8rem; }
+.h2-inline { font-size: 1.05rem; }
+.mt-0 { margin-top: 0; }
+.mt-sm { margin-top: 8px; }
+.mt-md { margin-top: 14px; }
+.mt-lg { margin-top: 20px; }
+.mt-xl { margin-top: 24px; }
+.mb-sm { margin-bottom: 4px; }
+.mb-md { margin-bottom: 14px; }
+.ml-sm { margin-left: 10px; }
+.w-full { width: 100%; }
+.max-w-xs { max-width: 220px; }
+.max-w-sm { max-width: 280px; }
+.max-w-md { max-width: 360px; }
+.max-w-lg { max-width: 480px; }
+.max-w-xl { max-width: 600px; }
+.row-between { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+
+.login-shell { max-width: 360px; margin: 80px auto; padding: 0 16px; }
+.admin-nav-title { padding: 10px 10px 20px; font-weight: 700; }
+.admin-nav-footer { margin-top: auto; padding-top: 20px; }

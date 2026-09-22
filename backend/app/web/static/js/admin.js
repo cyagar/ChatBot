@@ -22,7 +22,7 @@ async function boot() {
   try {
     state.user = await api("/api/auth/me");
     if (state.user.role !== "administrator") {
-      root.innerHTML = `<div class="empty-state" style="padding:40px;">Administrator access required for this account.</div>`;
+      root.innerHTML = `<div class="empty-state">Administrator access required for this account.</div>`;
       return;
     }
   } catch (_) {
@@ -42,13 +42,13 @@ async function boot() {
 
 function renderLogin() {
   root.innerHTML = `
-    <div style="max-width:360px; margin:80px auto; padding:0 16px;">
-      <h1 style="margin-bottom:4px;">Admin sign in</h1>
-      <p style="color:var(--text-dim); margin-top:0;">Administrator accounts only.</p>
+    <div class="login-shell">
+      <h1 class="mb-sm">Admin sign in</h1>
+      <p class="text-dim mt-0">Administrator accounts only.</p>
       <form id="login-form" class="edit-form">
         <label>Email <input name="email" type="email" required autofocus /></label>
         <label>Password <input name="password" type="password" required /></label>
-        <div id="login-error" style="color:var(--danger); display:none;"></div>
+        <div id="login-error" class="text-danger hidden"></div>
         <div><button type="submit" class="primary">Sign in</button></div>
       </form>
     </div>
@@ -57,7 +57,7 @@ function renderLogin() {
   const errorEl = document.getElementById("login-error");
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    errorEl.style.display = "none";
+    errorEl.classList.add("hidden");
     const fd = new FormData(form);
     try {
       await api("/api/auth/login", {
@@ -67,7 +67,7 @@ function renderLogin() {
       await boot();
     } catch (err) {
       errorEl.textContent = err.message;
-      errorEl.style.display = "block";
+      errorEl.classList.remove("hidden");
     }
   });
 }
@@ -114,9 +114,9 @@ function render() {
   root.innerHTML = `
     <div class="admin-shell">
       <nav class="admin-nav">
-        <div style="padding:10px 10px 20px; font-weight:700;">Admin</div>
+        <div class="admin-nav-title">Admin</div>
         ${TABS.map((t) => `<button data-tab="${t.id}" class="${state.tab === t.id ? "active" : ""}">${t.label}</button>`).join("")}
-        <div style="margin-top:auto; padding-top:20px;"><button id="logout-btn" class="ghost">Sign out</button></div>
+        <div class="admin-nav-footer"><button id="logout-btn" class="ghost">Sign out</button></div>
       </nav>
       <main class="admin-main">${renderTab()}</main>
     </div>
@@ -153,24 +153,24 @@ function renderTab() {
 function renderReviewQueue() {
   return `
     <h1>Review queue</h1>
-    <p style="color:var(--text-dim)">A Drive edit alone never makes a document retrievable to technicians -- every document and every machine link needs an explicit approval here first. ${state.reviewQueue.length} item(s) need attention.</p>
+    <p class="text-dim">A Drive edit alone never makes a document retrievable to technicians -- every document and every machine link needs an explicit approval here first. ${state.reviewQueue.length} item(s) need attention.</p>
     ${state.reviewQueue.length === 0 ? `<p>Nothing pending.</p>` : state.reviewQueue.map((d) => `
-      <div class="card" style="margin-bottom:14px;">
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+      <div class="card mb-md">
+        <div class="row-between">
           <div>
             <strong>${esc(d.original_filename)}</strong>
-            <div style="color:var(--text-dim); font-size:0.85rem;">${esc(d.manufacturer || "—")} · ${esc(d.doc_type || "—")} · ${esc(d.title || "—")}</div>
+            <div class="text-dim text-sm">${esc(d.manufacturer || "—")} · ${esc(d.doc_type || "—")} · ${esc(d.title || "—")}</div>
           </div>
           <span class="status-badge ${d.review_status}">${esc(d.review_status)}</span>
         </div>
         ${d.review_status !== "approved" ? `
-          <div style="margin-top:8px;">
+          <div class="mt-sm">
             <button class="primary approve-doc-btn" data-doc="${d.id}">Approve document</button>
             <button class="ghost reject-doc-btn" data-doc="${d.id}">Reject document</button>
           </div>
         ` : ""}
         ${d.links.length > 0 ? `
-          <table class="admin-table" style="margin-top:10px;">
+          <table class="admin-table mt-md">
             <thead><tr><th>Machine</th><th>Confidence</th><th>Link status</th><th></th></tr></thead>
             <tbody>
               ${d.links.map((l) => `
@@ -186,7 +186,7 @@ function renderReviewQueue() {
               `).join("")}
             </tbody>
           </table>
-        ` : `<p style="color:var(--text-dim); margin-top:8px;">No machine links proposed yet.</p>`}
+        ` : `<p class="text-dim mt-sm">No machine links proposed yet.</p>`}
       </div>
     `).join("")}
   `;
@@ -197,8 +197,8 @@ function renderReviewQueue() {
 function renderAccess() {
   return `
     <h1>Invitations</h1>
-    <p style="color:var(--text-dim)">Registration requires an invitation -- there is no public sign-up. Share the link with the invited technician out of band (e.g. in person, by phone, or via your own messaging tool); it is shown only once.</p>
-    <form id="invite-form" class="edit-form" style="max-width:480px;">
+    <p class="text-dim">Registration requires an invitation -- there is no public sign-up. Share the link with the invited technician out of band (e.g. in person, by phone, or via your own messaging tool); it is shown only once.</p>
+    <form id="invite-form" class="edit-form max-w-lg">
       <label>Email <input name="email" type="email" required /></label>
       <label>Role
         <select name="role">
@@ -210,13 +210,13 @@ function renderAccess() {
       <div><button type="submit" class="primary">Create invitation</button></div>
     </form>
     ${state.lastInvite ? `
-      <div class="card" style="margin-top:14px;">
+      <div class="card mt-md">
         <strong>Invitation created for ${esc(state.lastInvite.email)}</strong>
-        <p style="font-size:0.85rem; color:var(--text-dim);">Copy this link and send it to them directly -- it will not be shown again.</p>
-        <input readonly style="width:100%;" value="${esc(state.lastInvite.link)}" onclick="this.select()" />
+        <p class="text-sm text-dim">Copy this link and send it to them directly -- it will not be shown again.</p>
+        <input id="invite-link-input" readonly class="w-full" value="${escAttr(state.lastInvite.link)}" />
       </div>
     ` : ""}
-    <table class="admin-table" style="margin-top:20px;">
+    <table class="admin-table mt-lg">
       <thead><tr><th>Email</th><th>Role</th><th>Created</th><th>Expires</th><th>Status</th><th></th></tr></thead>
       <tbody>
         ${state.invitations.map((i) => {
@@ -239,14 +239,14 @@ function renderAccess() {
 function renderDocuments() {
   return `
     <h1>Manuals &amp; metadata</h1>
-    <p style="color:var(--text-dim)">${state.documents.length} active document(s). Correct auto-detected metadata below — every edit is logged for audit.</p>
+    <p class="text-dim">${state.documents.length} active document(s). Correct auto-detected metadata below — every edit is logged for audit.</p>
     <table class="admin-table">
       <thead><tr><th>File</th><th>Status</th><th>Review</th><th>Manufacturer</th><th>Doc type</th><th>Title</th><th>Revision</th><th>Machines</th><th></th></tr></thead>
       <tbody>
         ${state.documents.map((d) => `
           <tr>
-            <td>${esc(d.original_filename)}<br><span style="color:var(--text-dim);font-size:0.8rem;">${d.file_type} · ${d.page_count ?? "?"} pages${d.is_current_revision ? "" : " · SUPERSEDED"}</span></td>
-            <td><span class="status-badge ${d.status}">${d.status}</span>${d.status_reason ? `<div style="font-size:0.78rem;color:var(--text-dim);max-width:220px;">${esc(d.status_reason)}</div>` : ""}</td>
+            <td>${esc(d.original_filename)}<br><span class="text-dim text-sm">${d.file_type} · ${d.page_count ?? "?"} pages${d.is_current_revision ? "" : " · SUPERSEDED"}</span></td>
+            <td><span class="status-badge ${d.status}">${d.status}</span>${d.status_reason ? `<div class="text-xs text-dim max-w-xs">${esc(d.status_reason)}</div>` : ""}</td>
             <td><span class="status-badge ${d.review_status}">${esc(d.review_status)}</span></td>
             <td>${esc(d.manufacturer || "—")}</td>
             <td>${esc(d.doc_type || "—")}</td>
@@ -258,18 +258,18 @@ function renderDocuments() {
               <button class="ghost deactivate-btn" data-id="${d.id}">Deactivate</button>
             </td>
           </tr>
-          <tr class="edit-row" data-edit-for="${d.id}" style="display:none;">
+          <tr class="edit-row hidden" data-edit-for="${d.id}">
             <td colspan="9">
               <form class="edit-form" data-id="${d.id}">
-                <label>Manufacturer <input name="manufacturer_name" value="${esc(d.manufacturer || "")}" /></label>
+                <label>Manufacturer <input name="manufacturer_name" value="${escAttr(d.manufacturer || "")}" /></label>
                 <label>Doc type
                   <select name="doc_type">
                     ${["service_repair","parts","installation_operating","programming","use_and_care","spec_sheet","training","brochure","unknown"]
                       .map((t) => `<option value="${t}" ${t === d.doc_type ? "selected" : ""}>${t}</option>`).join("")}
                   </select>
                 </label>
-                <label>Title <input name="title" value="${esc(d.title || "")}" /></label>
-                <label>Revision <input name="revision" value="${esc(d.revision || "")}" /></label>
+                <label>Title <input name="title" value="${escAttr(d.title || "")}" /></label>
+                <label>Revision <input name="revision" value="${escAttr(d.revision || "")}" /></label>
                 <label><input type="checkbox" name="is_current_revision" ${d.is_current_revision ? "checked" : ""} /> Current revision (preferred in search)</label>
                 <label>Machine association(s) — retrieval only ever returns a document for a machine linked here
                   <!-- P0-03 (external review, 2026-09-21): this picker used to pre-check every existing
@@ -284,12 +284,12 @@ function renderDocuments() {
                     ${state.allMachines.map((m) => {
                       const linkStatus = d.machine_link_review_status[m.id];
                       const badge = linkStatus && linkStatus !== "approved"
-                        ? ` <span class="status-badge ${linkStatus}" style="font-size:0.7rem;">${esc(linkStatus)}</span>`
+                        ? ` <span class="status-badge ${linkStatus} text-xs">${esc(linkStatus)}</span>`
                         : "";
                       return `
-                      <label class="machine-option" data-search="${esc(`${m.manufacturer} ${m.model_name} ${m.family || ""}`).toLowerCase()}">
+                      <label class="machine-option" data-search="${escAttr(`${m.manufacturer} ${m.model_name} ${m.family || ""}`).toLowerCase()}">
                         <input type="checkbox" name="machine_ids" value="${m.id}" ${d.machine_ids.includes(m.id) ? "checked" : ""} />
-                        ${esc(m.manufacturer)} — ${esc(m.model_name)}${m.family ? ` <span style="color:var(--text-dim);">(${esc(m.family)})</span>` : ""}${badge}
+                        ${esc(m.manufacturer)} — ${esc(m.model_name)}${m.family ? ` <span class="text-dim">(${esc(m.family)})</span>` : ""}${badge}
                       </label>
                     `;}).join("")}
                   </div>
@@ -310,7 +310,7 @@ function renderDocuments() {
 function renderDuplicates() {
   return `
     <h1>Duplicates</h1>
-    <p style="color:var(--text-dim)">${state.duplicates.length} duplicate match(es) detected during ingestion.</p>
+    <p class="text-dim">${state.duplicates.length} duplicate match(es) detected during ingestion.</p>
     <table class="admin-table">
       <thead><tr><th>Kept (current)</th><th>Duplicate</th><th>Match type</th><th>Similarity</th><th>Detected</th></tr></thead>
       <tbody>
@@ -363,7 +363,7 @@ function renderIngestion() {
     ${renderIngestionStatusBanner()}
     <div class="card">
       <button id="reindex-btn" class="primary">Run re-index now</button>
-      <span style="color:var(--text-dim); margin-left:10px;">Add manuals to the shared Google Drive folder first, then run this. Runs in the background; refresh this tab to see progress.</span>
+      <span class="text-dim ml-sm">Add manuals to the shared Google Drive folder first, then run this. Runs in the background; refresh this tab to see progress.</span>
     </div>
     <table class="admin-table">
       <thead><tr><th>Run</th><th>Started</th><th>Finished</th><th>Trigger</th><th>Status</th><th>Event counts</th><th></th></tr></thead>
@@ -376,7 +376,7 @@ function renderIngestion() {
             <td>${Object.entries(r.counts).map(([k, v]) => `${k}: ${v}`).join(", ")}</td>
             <td><button class="ghost view-report-btn" data-run="${r.id}">View report</button></td>
           </tr>
-          <tr class="report-row" data-report-for="${r.id}" style="display:none;"><td colspan="7"></td></tr>
+          <tr class="report-row hidden" data-report-for="${r.id}"><td colspan="7"></td></tr>
         `).join("")}
       </tbody>
     </table>
@@ -388,8 +388,8 @@ function renderIngestion() {
 function renderQuery() {
   return `
     <h1>Query tester</h1>
-    <p style="color:var(--text-dim)">Run a question through hybrid retrieval and inspect the exact passages, before any answer is generated.</p>
-    <form id="query-form" class="edit-form" style="max-width:600px;">
+    <p class="text-dim">Run a question through hybrid retrieval and inspect the exact passages, before any answer is generated.</p>
+    <form id="query-form" class="edit-form max-w-xl">
       <label>Question <textarea name="question" rows="2" required>Why is this brewer not heating?</textarea></label>
       <label>Machine (optional filter)
         <select name="machine_id">
@@ -399,7 +399,7 @@ function renderQuery() {
       </label>
       <div><button type="submit" class="primary">Run retrieval</button></div>
     </form>
-    <div id="query-results" style="margin-top:16px;">
+    <div id="query-results" class="mt-lg">
       ${state.queryResult ? state.queryResult.passages.map((p) => `
         <div class="passage-card">
           <div class="score">chunk #${p.chunk_id} · ${esc(p.chunk_type)} · doc #${p.document_id} ${esc(p.filename)}${p.page_number ? ", p." + p.page_number : ""}
@@ -417,7 +417,7 @@ function renderQuery() {
 function renderFeedback() {
   return `
     <h1>Feedback &amp; unanswered questions</h1>
-    <h2 style="font-size:1.05rem;">Technician feedback</h2>
+    <h2 class="h2-inline">Technician feedback</h2>
     <table class="admin-table">
       <!-- P1-02 (external review, 2026-09-21): machine, provider, citations,
            and the message/conversation ids used to be missing here entirely
@@ -432,13 +432,13 @@ function renderFeedback() {
           <td>${esc(f.machine_label || "—")}</td>
           <td>${esc(f.rating)}</td>
           <td>${esc(f.comment || "—")}</td>
-          <td style="max-width:280px;">${esc((f.answer_content || "").slice(0, 200))}${(f.answer_content || "").length > 200 ? "…" : ""}</td>
+          <td class="max-w-sm">${esc((f.answer_content || "").slice(0, 200))}${(f.answer_content || "").length > 200 ? "…" : ""}</td>
           <td>${f.citations && f.citations.length ? f.citations.map((c) => esc(c)).join(", ") : "—"}</td>
-          <td style="color:var(--text-dim); font-size:0.8rem;">msg ${f.message_id} · conv ${f.conversation_id}${f.provider ? " · " + esc(f.provider) : ""}</td>
+          <td class="text-dim text-sm">msg ${f.message_id} · conv ${f.conversation_id}${f.provider ? " · " + esc(f.provider) : ""}</td>
         </tr>
       `).join("") || `<tr><td colspan="8">No feedback yet.</td></tr>`}</tbody>
     </table>
-    <h2 style="font-size:1.05rem; margin-top:24px;">Frequently unanswered questions</h2>
+    <h2 class="h2-inline mt-xl">Frequently unanswered questions</h2>
     <table class="admin-table">
       <thead><tr><th>When</th><th>Question</th></tr></thead>
       <tbody>${state.unanswered.map((u) => `
@@ -451,6 +451,13 @@ function renderFeedback() {
 // --- Event wiring ---
 
 function wireTabEvents() {
+  // P1-06/P1-07 (external review, 2026-09-21): the invite-link input used
+  // to carry an inline this.select() event-handler attribute -- CSP's
+  // script-src 'self' (no unsafe-inline) silently drops that kind of
+  // attribute.
+  const inviteLinkInput = document.getElementById("invite-link-input");
+  if (inviteLinkInput) inviteLinkInput.addEventListener("click", () => inviteLinkInput.select());
+
   root.querySelectorAll(".approve-doc-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
       await api(`/api/admin/documents/${btn.dataset.doc}/review`, { method: "POST", body: JSON.stringify({ decision: "approved" }) });
@@ -522,7 +529,7 @@ function wireTabEvents() {
   root.querySelectorAll(".edit-doc-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const row = root.querySelector(`.edit-row[data-edit-for="${btn.dataset.id}"]`);
-      row.style.display = row.style.display === "none" ? "table-row" : "none";
+      row.classList.toggle("hidden");
     });
   });
   root.querySelectorAll(".deactivate-btn").forEach((btn) => {
@@ -590,12 +597,12 @@ function wireTabEvents() {
     btn.addEventListener("click", async () => {
       const row = root.querySelector(`.report-row[data-report-for="${btn.dataset.run}"]`);
       const cell = row.querySelector("td");
-      if (row.style.display !== "none") { row.style.display = "none"; return; }
+      if (!row.classList.contains("hidden")) { row.classList.add("hidden"); return; }
       const report = await api(`/api/admin/ingestion/runs/${btn.dataset.run}/report`);
       cell.innerHTML = `<table class="admin-table"><thead><tr><th>File</th><th>Event</th><th>Detail</th></tr></thead><tbody>
         ${report.files.map((f) => `<tr><td>${esc(f.original_filename)}</td><td><span class="status-badge ${f.event}">${esc(f.event)}</span></td><td>${esc(f.detail || "")}</td></tr>`).join("")}
       </tbody></table>`;
-      row.style.display = "table-row";
+      row.classList.remove("hidden");
     });
   });
 
@@ -618,6 +625,17 @@ function esc(str) {
   const div = document.createElement("div");
   div.textContent = str ?? "";
   return div.innerHTML;
+}
+
+// P1-07 (external review, 2026-09-21): esc() escapes text-node content
+// (&, <, >) but not quote characters, because a text node never needs them
+// escaped -- an ATTRIBUTE value does. Used everywhere esc()'s result is
+// interpolated inside a "..." HTML attribute (value=, data-search=), where
+// an unescaped double quote in admin/PDF-derived data (title, revision,
+// manufacturer, machine family) truncates the attribute and lets the rest
+// of the string inject new attributes onto that element.
+function escAttr(str) {
+  return esc(str).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 boot();
