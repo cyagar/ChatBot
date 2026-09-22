@@ -8,7 +8,7 @@ from pydantic import BaseModel, EmailStr, Field, field_serializer
 from app.api.common import iso_utc
 from app.auth.audit import log_audit_event
 from app.auth.deps import CurrentUser, require_admin
-from app.auth.security import generate_invitation_token
+from app.auth.security import generate_invitation_token, normalize_email
 from app.config import get_settings
 from app.db import get_conn
 from app.ingestion.chunking import CURRENT_CHUNKING_VERSION
@@ -523,23 +523,29 @@ def _check_invite_domain_allowed(email: str) -> None:
 @router.post("/invitations", response_model=InvitationOut, status_code=status.HTTP_201_CREATED)
 def create_invitation(payload: InvitationCreate, admin: CurrentUser = Depends(require_admin)):
     _check_invite_domain_allowed(payload.email)
+    # P1-20 (external review, 2026-09-21): stored/compared as-entered,
+    # unnormalized -- see normalize_email's docstring. Two invitations
+    # differing only in case could each pass the "no existing account" check
+    # below and later mint two separate user rows for what a human would
+    # consider the same address.
+    email = normalize_email(payload.email)
     raw_token, token_hash = generate_invitation_token()
     # A real datetime, not .isoformat() -- psycopg adapts TIMESTAMPTZ params
     # natively, and iso_utc() (app/api/common.py) now accepts either.
     expires_at = datetime.now(timezone.utc) + timedelta(hours=payload.expires_in_hours)
 
     with get_conn() as conn:
-        existing_user = conn.execute("SELECT id FROM users WHERE email = %s", (payload.email,)).fetchone()
+        existing_user = conn.execute("SELECT id FROM users WHERE email = %s", (email,)).fetchone()
         if existing_user:
             raise HTTPException(status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
         cur = conn.execute(
             "INSERT INTO invitations (token_hash, email, role, created_by, expires_at) "
             "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (token_hash, payload.email, payload.role, admin.id, expires_at),
+            (token_hash, email, payload.role, admin.id, expires_at),
         )
         invite_id = cur.fetchone()["id"]
         log_audit_event(conn, "invite_created", actor_user_id=admin.id, target_type="invitation",
-                         target_id=invite_id, detail=f"role={payload.role} email={payload.email}")
+                         target_id=invite_id, detail=f"role={payload.role} email={email}")
         row = conn.execute("SELECT * FROM invitations WHERE id = %s", (invite_id,)).fetchone()
 
     return InvitationOut(

@@ -20,7 +20,7 @@ from __future__ import annotations
 from pydantic import BaseModel, EmailStr, Field, ValidationError
 
 from app.auth.audit import log_audit_event
-from app.auth.security import hash_password
+from app.auth.security import hash_password, normalize_email
 from app.db import get_conn
 
 
@@ -34,7 +34,9 @@ def bootstrap_admin(email: str, password: str, display_name: str | None = None) 
         creds = _BootstrapCredentials(email=email, password=password)
     except ValidationError as exc:
         raise ValueError(f"Invalid administrator credentials: {exc}") from exc
-    email = creds.email
+    # P1-20 (external review, 2026-09-21): stored as-entered, unnormalized --
+    # see normalize_email's docstring.
+    email = normalize_email(creds.email)
     password = creds.password
 
     with get_conn() as conn:

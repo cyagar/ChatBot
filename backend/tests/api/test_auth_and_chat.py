@@ -105,6 +105,101 @@ def test_invite_is_bound_to_its_email_and_single_use(test_env):
     assert reuse.status_code == 403
 
 
+def test_p1_20_registering_with_mixed_case_email_can_log_in_with_any_casing(test_env):
+    """P1-20 (external review, 2026-09-21): users.email is TEXT with
+    case-sensitive uniqueness, and registration stored whatever case was
+    typed -- a technician who registered as "Tech.User@Example.com" could
+    not log in with "tech.user@example.com" (or any other casing), since
+    login's SELECT ... WHERE email = %s compared exactly. Fixed by
+    normalizing every write/read through normalize_email()."""
+    register_test_user(client, "bootstrap-admin@example.com", role="administrator")
+    invite = client.post(
+        "/api/admin/invitations", json={"email": "Mixed.Case@Example.com", "role": "technician"}
+    ).json()
+    client.post("/api/auth/logout")
+
+    reg = client.post(
+        "/api/auth/register",
+        json={"email": "Mixed.Case@Example.com", "password": "password123", "invite_token": invite["token"]},
+    )
+    assert reg.status_code == 201
+    assert reg.json()["email"] == "mixed.case@example.com", "the stored/returned email must be normalized to lowercase"
+    client.post("/api/auth/logout")
+
+    login_different_case = client.post(
+        "/api/auth/login", json={"email": "MIXED.CASE@EXAMPLE.COM", "password": "password123"}
+    )
+    assert login_different_case.status_code == 200, (
+        f"a technician who registered with mixed case must be able to log in with any casing, "
+        f"got {login_different_case.status_code}: {login_different_case.text}"
+    )
+
+
+def test_p1_20_invitation_for_an_email_differing_only_in_case_from_an_existing_account_is_rejected(test_env):
+    """Companion to the test above: without normalizing the existing-account
+    check too, "Tech@Example.com" and "tech@example.com" could become two
+    separate accounts sharing what a human considers the same address."""
+    register_test_user(client, "bootstrap-admin2@example.com", role="administrator", admin_email="bootstrap-admin2@example.com")
+    invite = client.post(
+        "/api/admin/invitations", json={"email": "existing.tech@example.com", "role": "technician"}
+    ).json()
+    client.post("/api/auth/logout")
+    client.post(
+        "/api/auth/register",
+        json={"email": "existing.tech@example.com", "password": "password123", "invite_token": invite["token"]},
+    )
+    client.post("/api/auth/logout")
+
+    register_test_user(client, "bootstrap-admin2@example.com", role="administrator", admin_email="bootstrap-admin2@example.com")
+    resp = client.post(
+        "/api/admin/invitations", json={"email": "Existing.Tech@Example.com", "role": "technician"}
+    )
+    assert resp.status_code == 409, (
+        f"inviting a case-variant of an already-registered email must be rejected, got {resp.status_code}"
+    )
+
+
+def test_p1_20_bootstrap_admin_stores_a_lowercase_email(test_env):
+    from app.auth.bootstrap import bootstrap_admin
+
+    bootstrap_admin("Admin.User@Example.com", "password123")
+    with get_conn() as conn:
+        row = conn.execute("SELECT email FROM users").fetchone()
+    assert row["email"] == "admin.user@example.com"
+
+    login = client.post("/api/auth/login", json={"email": "admin.user@example.com", "password": "password123"})
+    assert login.status_code == 200
+
+
+def test_p1_20_database_level_backstop_rejects_a_case_variant_duplicate_email(test_env):
+    """Defense-in-depth (matches test_duplicate_email_registration_rejected's
+    reasoning): normalize_email() is the primary enforcement, applied at
+    every write in Python -- migrations/0004_lowercase_emails.sql's
+    unique(lower(email)) index is the database-level backstop for a future
+    write that bypasses it (a script, a bug). Proven directly at the SQL
+    level, independent of any application code path."""
+    import psycopg
+    import pytest
+
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO users (email, password_hash, role) VALUES (%s, 'x', 'technician')",
+            ("dupe.check@example.com",),
+        )
+
+    # A separate connection/transaction -- Postgres aborts the whole
+    # transaction on a constraint violation until rollback, so the raise
+    # must propagate out through get_conn()'s own except/rollback, not be
+    # swallowed by pytest.raises while still inside the `with` block (which
+    # would leave get_conn() trying to commit an already-aborted transaction).
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO users (email, password_hash, role) VALUES (%s, 'x', 'technician')",
+                ("Dupe.Check@Example.com",),
+            )
+
+
 def test_bootstrap_admin_refuses_once_a_user_exists(test_env):
     from app.auth.bootstrap import bootstrap_admin
 

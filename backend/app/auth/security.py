@@ -15,6 +15,19 @@ JWT_ALGORITHM = "HS256"
 MAX_PASSWORD_BYTES = 72
 
 
+def normalize_email(email: str) -> str:
+    """P1-20 (external review, 2026-09-21): users.email/invitations.email are
+    TEXT with case-sensitive (or no, for invitations) uniqueness, but
+    registration, login, and invitation creation each compared/stored
+    whatever case was typed -- "John@Example.com" and "john@example.com"
+    could become two separate accounts, and a user who registered with
+    mixed case couldn't log in with a lowercased address. Every write and
+    read of an email address that identifies an account or invitation must
+    go through this first -- see migrations/0004_lowercase_emails.sql for
+    the matching backfill + unique(lower(email)) constraint on users."""
+    return email.strip().lower()
+
+
 def hash_password(password: str) -> str:
     if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
         raise ValueError(f"Password must be at most {MAX_PASSWORD_BYTES} bytes.")

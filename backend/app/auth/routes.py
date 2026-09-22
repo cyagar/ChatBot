@@ -12,6 +12,7 @@ from app.auth.security import (
     create_session_token,
     hash_invitation_token,
     hash_password,
+    normalize_email,
     verify_password,
 )
 from app.config import get_settings
@@ -122,6 +123,11 @@ def register(payload: RegisterRequest, request: Request, response: Response):
     only a request that flips used_at from NULL to non-NULL proceeds.
     """
     token_hash = hash_invitation_token(payload.invite_token)
+    # P1-20 (external review, 2026-09-21): every read/write of this address
+    # from here on uses the normalized form -- see normalize_email's
+    # docstring. Stored this way (not as-entered), so a technician who typed
+    # mixed case at registration can still log in with any casing later.
+    email = normalize_email(payload.email)
     # invitations.expires_at is TIMESTAMPTZ -- psycopg hands it back as a
     # real tz-aware datetime (unlike SQLite's TEXT column, which forced an
     # isoformat-string comparison), so `now` must be one too.
@@ -140,7 +146,7 @@ def register(payload: RegisterRequest, request: Request, response: Response):
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="This invitation has been revoked.")
         if invite["expires_at"] <= now:
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="This invitation has expired.")
-        if invite["email"].lower() != payload.email.lower():
+        if normalize_email(invite["email"]) != email:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 detail="This invitation was issued for a different email address.",
@@ -154,7 +160,7 @@ def register(payload: RegisterRequest, request: Request, response: Response):
             # Lost the race to a concurrent request for this same token.
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="This invitation has already been used.")
 
-        existing = conn.execute("SELECT id FROM users WHERE email = %s", (payload.email,)).fetchone()
+        existing = conn.execute("SELECT id FROM users WHERE email = %s", (email,)).fetchone()
         if existing:
             conn.execute("UPDATE invitations SET used_at = NULL WHERE id = %s", (invite["id"],))
             raise HTTPException(status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
@@ -170,7 +176,7 @@ def register(payload: RegisterRequest, request: Request, response: Response):
                 cur = conn.execute(
                     "INSERT INTO users (email, password_hash, role, display_name) "
                     "VALUES (%s, %s, %s, %s) RETURNING id",
-                    (payload.email, hash_password(payload.password), invite["role"], payload.display_name),
+                    (email, hash_password(payload.password), invite["role"], payload.display_name),
                 )
                 user_id = cur.fetchone()["id"]
         except psycopg.errors.UniqueViolation:
@@ -189,7 +195,7 @@ def register(payload: RegisterRequest, request: Request, response: Response):
     # 0 matches the `users.token_version` column DEFAULT used by this INSERT
     # (not read back) -- if that default ever changes, this literal must move too.
     _set_session_cookie(response, user_id, invite["role"], token_version=0)
-    return UserOut(id=user_id, email=payload.email, role=invite["role"], display_name=payload.display_name,
+    return UserOut(id=user_id, email=email, role=invite["role"], display_name=payload.display_name,
                    capabilities=_capabilities_for_role(invite["role"]))
 
 
@@ -200,7 +206,7 @@ def login(payload: LoginRequest, request: Request, response: Response):
         row = conn.execute(
             "SELECT id, email, password_hash, role, display_name, is_disabled, token_version "
             "FROM users WHERE email = %s",
-            (payload.email,),
+            (normalize_email(payload.email),),
         ).fetchone()
         if not row or not verify_password(payload.password, row["password_hash"]):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
