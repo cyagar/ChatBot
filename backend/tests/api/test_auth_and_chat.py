@@ -685,6 +685,70 @@ def test_save_and_list_saved_answer_roundtrip(test_env):
     assert entry["question"] == _ANSWERABLE_QUESTION
 
 
+def test_p2_02_get_messages_hydration_uses_a_bounded_number_of_queries(test_env, monkeypatch):
+    """P2-02 (external review, 2026-09-21): _hydrate_message used to run 3
+    queries PER message (citations, feedback, saved-status) -- a page of N
+    messages was ~3N+1 round trips to the Neon network. Seeds enough
+    messages that an O(N) implementation would clearly blow past a small
+    constant bound, and counts real psycopg Connection.execute calls (only
+    around the GET itself, not the seeding above it) to prove hydration no
+    longer scales with message count."""
+    import psycopg
+
+    _seed_answerable_machine()
+    _register("tech-p202@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+
+    num_turns = 6
+    for _ in range(num_turns):
+        msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": _ANSWERABLE_QUESTION}).json()
+        client.post(f"/api/messages/{msg['id']}/feedback", json={"rating": "helpful"})
+        client.post(f"/api/messages/{msg['id']}/save")
+
+    original_execute = psycopg.Connection.execute
+    call_count = {"n": 0}
+
+    def counting_execute(self, *args, **kwargs):
+        call_count["n"] += 1
+        return original_execute(self, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.Connection, "execute", counting_execute)
+    resp = client.get(f"/api/conversations/{conv['id']}/messages")
+    monkeypatch.undo()  # stop counting before any assertion-side queries below
+
+    assert resp.status_code == 200
+    assert len(resp.json()) == num_turns * 2  # one user + one assistant message per turn
+
+    # Bounded: _require_own_conversation, the message list SELECT, and
+    # exactly 3 hydration queries (citations/feedback/saved) for the WHOLE
+    # page -- nowhere close to the old per-message cost, which would have
+    # needed roughly 3 * (num_turns * 2) additional queries here.
+    assert call_count["n"] <= 8, f"expected a small constant number of queries, got {call_count['n']}"
+
+
+def test_p2_02_saved_answers_batch_question_lookup_pairs_each_answer_with_its_own_question(test_env):
+    """Regression guard for the batched LATERAL-join question lookup added
+    alongside the P2-02 fix: two DIFFERENT questions saved from the SAME
+    conversation must each keep their OWN nearest-prior-question, not get
+    cross-contaminated by batching (e.g. both ending up with the same
+    question, or swapped)."""
+    _seed_answerable_machine()
+    _register("tech-p202b@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+
+    first_question = _ANSWERABLE_QUESTION
+    second_question = "what does error E9 mean now"  # distinct text, still machine-matched via seeding
+    msg1 = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": first_question}).json()
+    client.post(f"/api/messages/{msg1['id']}/save")
+    msg2 = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": second_question}).json()
+    client.post(f"/api/messages/{msg2['id']}/save")
+
+    saved = client.get("/api/saved-answers").json()
+    by_id = {s["answer"]["id"]: s for s in saved}
+    assert by_id[msg1["id"]]["question"] == first_question
+    assert by_id[msg2["id"]]["question"] == second_question
+
+
 def test_list_conversations_derives_a_title_from_the_first_user_message(test_env):
     """P1-3: conversations.title is never written anywhere in the codebase --
     without a derived fallback, every row in a history list would render

@@ -784,14 +784,26 @@ def set_conversation_machine(
     )
 
 
-def _hydrate_message(conn, row, user_id: int) -> MessageOut:
+def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
+    """Batched hydration for a page of messages. P2-02 (external review,
+    2026-09-21): the old per-message _hydrate_message ran 3 queries per
+    message (citations, feedback, saved-status) -- a page of N messages was
+    ~3N+1 round trips to the Neon network, not counting whatever the caller
+    itself does per row (e.g. list_saved_answers' question/machine-label
+    lookups, batched separately below). Fetches all three sets for every id
+    in `rows` in exactly 3 queries total, keyed by message_id, then
+    assembles each MessageOut from those already-fetched dicts."""
+    if not rows:
+        return []
+    message_ids = [r["id"] for r in rows]
+
     # Only rows the provider actually selected (is_citation=1) -- every
     # retrieved passage is still kept in message_sources for retrieval-quality
     # auditing, but reload must reproduce exactly what the technician saw, not
     # every candidate that was merely retrieved (concern #7).
-    citations = []
+    citations_by_message: dict[int, list[CitationOut]] = {mid: [] for mid in message_ids}
     src_rows = conn.execute(
-        "SELECT ms.chunk_id, ms.excerpt, c.document_id, d.original_filename, d.title, "
+        "SELECT ms.message_id, ms.chunk_id, ms.excerpt, c.document_id, d.original_filename, d.title, "
         "c.page_number, c.section_heading, d.revision, d.deactivated_at, d.review_status "
         "FROM message_sources ms "
         "JOIN chunks c ON c.id = ms.chunk_id "
@@ -801,57 +813,76 @@ def _hydrate_message(conn, row, user_id: int) -> MessageOut:
         # citation numbering still lines up with the answer's own claims.
         # COALESCE keeps pre-0004 rows (citation_ordinal NULL) ordering by
         # rank, their historical behavior, rather than arbitrarily.
-        "WHERE ms.message_id = %s AND ms.is_citation = true "
-        "ORDER BY COALESCE(ms.citation_ordinal, ms.rank), ms.rank",
-        (row["id"],),
+        "WHERE ms.message_id = ANY(%s) AND ms.is_citation = true "
+        "ORDER BY ms.message_id, COALESCE(ms.citation_ordinal, ms.rank), ms.rank",
+        (message_ids,),
     ).fetchall()
     for s in src_rows:
         # P0-13: the document's CURRENT state, evaluated fresh on every
         # hydration -- not what it was when this answer was generated.
         withdrawn = s["deactivated_at"] is not None or s["review_status"] != "approved"
-        citations.append(CitationOut(
+        citations_by_message[s["message_id"]].append(CitationOut(
             chunk_id=s["chunk_id"], document_id=s["document_id"], filename=s["original_filename"],
             title=s["title"], page_number=s["page_number"], section_heading=s["section_heading"],
             revision=s["revision"], excerpt=s["excerpt"] or "", source_withdrawn=withdrawn,
         ))
 
-    try:
-        safety_warnings = json.loads(row["safety_warnings"]) if row["safety_warnings"] else []
-    except (TypeError, ValueError):
-        safety_warnings = []
+    feedback_by_message: dict[int, str] = {}
+    feedback_rows = conn.execute(
+        "SELECT message_id, rating FROM feedback WHERE message_id = ANY(%s) AND user_id = %s "
+        "ORDER BY message_id, created_at DESC, id DESC",
+        (message_ids, user_id),
+    ).fetchall()
+    for f in feedback_rows:
+        # First row per message_id wins under the ORDER BY above (most
+        # recent first) -- feedback is intentionally not deduplicated (a
+        # technician reconsidering is a real, allowed case; see the
+        # feedback table's own comment), so this reproduces the same
+        # "most recent rating" semantics the old single-row query's
+        # `ORDER BY created_at DESC, id DESC LIMIT 1` always had.
+        feedback_by_message.setdefault(f["message_id"], f["rating"])
 
-    clarifying_options = []
-    if "clarifying_options" in row.keys() and row["clarifying_options"]:
+    saved_rows = conn.execute(
+        "SELECT message_id FROM saved_answers WHERE message_id = ANY(%s) AND user_id = %s",
+        (message_ids, user_id),
+    ).fetchall()
+    saved_message_ids = {s["message_id"] for s in saved_rows}
+
+    out = []
+    for row in rows:
+        citations = citations_by_message[row["id"]]
         try:
-            clarifying_options = json.loads(row["clarifying_options"])
+            safety_warnings = json.loads(row["safety_warnings"]) if row["safety_warnings"] else []
         except (TypeError, ValueError):
-            clarifying_options = []
+            safety_warnings = []
 
-    feedback_row = conn.execute(
-        "SELECT rating FROM feedback WHERE message_id = %s AND user_id = %s "
-        "ORDER BY created_at DESC, id DESC LIMIT 1",
-        (row["id"], user_id),
-    ).fetchone()
-    is_saved = conn.execute(
-        "SELECT 1 FROM saved_answers WHERE message_id = %s AND user_id = %s LIMIT 1",
-        (row["id"], user_id),
-    ).fetchone() is not None
+        clarifying_options = []
+        if "clarifying_options" in row.keys() and row["clarifying_options"]:
+            try:
+                clarifying_options = json.loads(row["clarifying_options"])
+            except (TypeError, ValueError):
+                clarifying_options = []
 
-    return MessageOut(
-        id=row["id"], role=row["role"], content=row["content"],
-        is_clarifying_question=bool(row["is_clarifying_question"]),
-        is_no_answer=bool(row["is_no_answer"]),
-        answer_status=row["answer_status"] if "answer_status" in row.keys() else "completed",
-        citations=citations,
-        safety_warnings=safety_warnings,
-        conflict_note=row["conflict_note"] if "conflict_note" in row.keys() else None,
-        clarifying_options=clarifying_options,
-        retry_count=row["retry_count"] if "retry_count" in row.keys() else 0,
-        created_at=row["created_at"],
-        feedback_rating=feedback_row["rating"] if feedback_row else None,
-        is_saved=is_saved,
-        has_withdrawn_source=any(c.source_withdrawn for c in citations),
-    )
+        out.append(MessageOut(
+            id=row["id"], role=row["role"], content=row["content"],
+            is_clarifying_question=bool(row["is_clarifying_question"]),
+            is_no_answer=bool(row["is_no_answer"]),
+            answer_status=row["answer_status"] if "answer_status" in row.keys() else "completed",
+            citations=citations,
+            safety_warnings=safety_warnings,
+            conflict_note=row["conflict_note"] if "conflict_note" in row.keys() else None,
+            clarifying_options=clarifying_options,
+            retry_count=row["retry_count"] if "retry_count" in row.keys() else 0,
+            created_at=row["created_at"],
+            feedback_rating=feedback_by_message.get(row["id"]),
+            is_saved=row["id"] in saved_message_ids,
+            has_withdrawn_source=any(c.source_withdrawn for c in citations),
+        ))
+    return out
+
+
+def _hydrate_message(conn, row, user_id: int) -> MessageOut:
+    return _hydrate_messages(conn, [row], user_id)[0]
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageOut])
@@ -879,7 +910,7 @@ def get_messages(
         ).fetchall()
         rows, next_cursor = paginate(rows, limit, lambda r: (r["id"],))
         set_pagination_headers(response, next_cursor)
-        return [_hydrate_message(conn, r, user.id) for r in rows]
+        return _hydrate_messages(conn, rows, user.id)
 
 
 def _message_by_idempotency_key(conn, conversation_id: int, idempotency_key: str):
@@ -1298,17 +1329,50 @@ def list_saved_answers(
         ).fetchall()
         rows, next_cursor = paginate(rows, limit, lambda r: (r["saved_at"], r["id"]))
         set_pagination_headers(response, next_cursor)
-        out = []
-        for r in rows:
-            question_row = conn.execute(
-                "SELECT content FROM messages WHERE conversation_id = %s AND role = 'user' AND id < %s "
-                "ORDER BY id DESC LIMIT 1",
-                (r["conversation_id"], r["id"]),
-            ).fetchone()
-            out.append(SavedAnswerOut(
+        if not rows:
+            return []
+
+        # P2-02 (external review, 2026-09-21): this loop used to run a
+        # separate "most recent prior question" query PER saved answer, on
+        # top of _hydrate_message's own 3 queries per row and a
+        # _machine_label call per row -- a page of N saved answers was
+        # 1 + N*(1 question lookup + 1 machine label + 3 hydration queries)
+        # round trips. Each of those is now exactly one query for the whole
+        # page. The question lookup is genuinely per-row correlated (each
+        # answer needs the nearest PRIOR user message in ITS OWN
+        # conversation, not just any message in that conversation) --
+        # unnest(...) zips the two id arrays into a row set, and LATERAL
+        # runs the "nearest prior" subquery once per pair, still as one
+        # round trip to Postgres rather than N.
+        question_rows = conn.execute(
+            "SELECT input.message_id, q.content AS question_content "
+            "FROM unnest(%s::int[], %s::int[]) AS input(message_id, conversation_id) "
+            "CROSS JOIN LATERAL ("
+            "    SELECT content FROM messages "
+            "    WHERE conversation_id = input.conversation_id AND role = 'user' AND id < input.message_id "
+            "    ORDER BY id DESC LIMIT 1"
+            ") q",
+            ([r["id"] for r in rows], [r["conversation_id"] for r in rows]),
+        ).fetchall()
+        question_by_message = {q["message_id"]: q["question_content"] for q in question_rows}
+
+        machine_ids = list({r["machine_id"] for r in rows if r["machine_id"] is not None})
+        machine_label_by_id: dict[int, str] = {}
+        if machine_ids:
+            label_rows = conn.execute(
+                "SELECT m.id, mf.name AS manufacturer, m.model_name FROM machines m "
+                "JOIN manufacturers mf ON mf.id = m.manufacturer_id WHERE m.id = ANY(%s)",
+                (machine_ids,),
+            ).fetchall()
+            machine_label_by_id = {lr["id"]: f"{lr['manufacturer']} {lr['model_name']}" for lr in label_rows}
+
+        hydrated = _hydrate_messages(conn, rows, user.id)
+        return [
+            SavedAnswerOut(
                 conversation_id=r["conversation_id"],
-                machine_label=_machine_label(conn, r["machine_id"]),
-                question=question_row["content"] if question_row else None,
-                answer=_hydrate_message(conn, r, user.id),
-            ))
-        return out
+                machine_label=machine_label_by_id.get(r["machine_id"]) if r["machine_id"] is not None else None,
+                question=question_by_message.get(r["id"]),
+                answer=answer,
+            )
+            for r, answer in zip(rows, hydrated)
+        ]
