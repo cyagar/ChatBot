@@ -36,10 +36,9 @@ _PIL_FORMAT_TO_MIME = {
 
 
 def _sniff_image_mime(path) -> str:
-    """P1-18 (independent follow-up review): file_type='image' collapses
-    every raster format ingestion accepts into one bucket (see
-    app/ingestion/extractors.py's sniff_file_type) -- serving it as a
-    hardcoded 'image/jpeg' mislabeled any PNG/GIF/etc file. Sniff the real
+    """file_type='image' collapses every raster format ingestion accepts into
+    one bucket (see app/ingestion/extractors.py's sniff_file_type), so a
+    hardcoded MIME type would mislabel any non-default format. Sniff the real
     format from the bytes actually on disk instead of trusting the coarse
     ingestion-time bucket."""
     from PIL import Image
@@ -78,8 +77,8 @@ def get_manual_file(document_id: int, user: CurrentUser = Depends(get_current_us
 
     Gated on review_status='approved' for everyone except administrators --
     the raw file and evidence endpoints are a second path to document content
-    that must honor the same P0-6 approval boundary as retrieval, not just be
-    reachable via an old citation or a guessed document id (concern #6)."""
+    that must honor the same approval boundary as retrieval, not just be
+    reachable via an old citation or a guessed document id."""
     doc = _get_document(document_id, allow_unapproved=user.role == "administrator")
     settings = get_settings()
     path = settings.local_storage_dir_resolved / doc["storage_path"]
@@ -89,19 +88,21 @@ def get_manual_file(document_id: int, user: CurrentUser = Depends(get_current_us
         mime = _sniff_image_mime(path)
     else:
         mime = _MIME_BY_TYPE.get(doc["file_type"], "application/octet-stream")
-    # P1-18 (independent follow-up review): a hand-built
-    # `f'inline; filename="{name}"'` header string let a stored filename
-    # containing a `"` break out of the quoted parameter (and, depending on
-    # the ASGI server, a control character could reach the raw header).
-    # FileResponse's own `filename=`/`content_disposition_type=` builds this
-    # header using Starlette's RFC 6266-aware encoding instead of raw
-    # string interpolation.
+    # A hand-built `f'inline; filename="{name}"'` header string would let a
+    # stored filename containing a `"` break out of the quoted parameter (and,
+    # depending on the ASGI server, a control character could reach the raw
+    # header). FileResponse's own `filename=`/`content_disposition_type=`
+    # builds this header using Starlette's RFC 6266-aware encoding instead of
+    # raw string interpolation.
     return FileResponse(
         path,
         media_type=mime,
         filename=doc["original_filename"],
         content_disposition_type="inline",
     )
+
+
+_PAGE_IMAGE_DPI = 150
 
 
 @lru_cache(maxsize=256)
@@ -114,7 +115,14 @@ def _render_page_png(document_id: int, storage_path: str, page_number: int) -> b
     try:
         if not (1 <= page_number <= doc.page_count):
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Page out of range.")
-        pix = doc[page_number - 1].get_pixmap(dpi=150)
+        fpage = doc[page_number - 1]
+        pixel_estimate = int(fpage.rect.width / 72 * _PAGE_IMAGE_DPI) * int(fpage.rect.height / 72 * _PAGE_IMAGE_DPI)
+        if pixel_estimate > settings.max_page_render_pixels:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=f"Page {page_number} is too large to render (over the configured pixel budget).",
+            )
+        pix = fpage.get_pixmap(dpi=_PAGE_IMAGE_DPI)
         return pix.tobytes("png")
     finally:
         doc.close()
@@ -135,7 +143,7 @@ def get_evidence(document_id: int, chunk_id: int, user: CurrentUser = Depends(ge
     plus (for PDFs) a link to the rendered page image.
 
     Gated on review_status='approved' for everyone except administrators, same
-    as get_manual_file -- this is a second path to full chunk content (concern #6)."""
+    as get_manual_file -- this is a second path to full chunk content."""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT c.id, c.content, c.page_number, c.section_heading, c.chunk_type, "

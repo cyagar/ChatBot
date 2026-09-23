@@ -69,6 +69,43 @@ def test_extract_scanned_pdf_without_ocr_is_unsupported(tmp_path):
     assert "OCR" in extracted.reason or "text layer" in extracted.reason
 
 
+def test_p2_03_a_pdf_over_the_page_count_cap_is_refused_without_processing(make_pdf, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("MAX_PDF_PAGES", "2")
+    get_settings.cache_clear()
+    try:
+        pdf_path = make_pdf(["one", "two", "three"])
+        _, extracted, _ = extract(pdf_path)
+        assert extracted.status == "unsupported"
+        assert "page" in extracted.reason.lower()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_p2_03_an_oversized_page_is_skipped_for_ocr_instead_of_rendered(tmp_path, monkeypatch):
+    import fitz
+
+    import app.ingestion.extractors as extractors_module
+    from app.config import get_settings
+
+    monkeypatch.setattr(extractors_module, "_configure_tesseract", lambda: True)
+    monkeypatch.setenv("MAX_PAGE_RENDER_PIXELS", "100")
+    get_settings.cache_clear()
+    try:
+        doc = fitz.open()
+        doc.new_page(width=3000, height=3000)  # blank page: no text layer, huge dimensions
+        path = tmp_path / "huge_page.pdf"
+        doc.save(path)
+        doc.close()
+
+        _, extracted, _ = extract(path, ocr_available=True)
+        assert extracted.status == "unsupported"
+        assert any("render budget" in w for w in extracted.warnings)
+    finally:
+        get_settings.cache_clear()
+
+
 def test_p1_09_a_real_legacy_doc_is_classified_and_parsed_as_doc(tmp_path):
     """P1-09 (external review, 2026-09-21): OLE files (.doc/.xls/.ppt all
     share the same compound-file magic bytes) used to sniff as the generic

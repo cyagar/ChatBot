@@ -21,13 +21,12 @@ from app.ingestion.extracted import ExtractedDocument, ExtractedPage, ExtractedT
 MIN_CHARS_PER_PAGE_FOR_TEXT_LAYER = 20
 OCR_RENDER_DPI = 300
 
-# Independent follow-up review 2026-08-24 P0-7: bump this whenever extraction
-# logic changes materially (a new file type, a fixed text-layer heuristic, a
-# different OCR trigger). documents.extraction_version records which version
-# actually produced a document's current content -- a mismatch against this
-# constant is what lets _ingest_one detect an already-ingested, unchanged
-# document whose extraction predates a since-shipped fix (see
-# DocumentOut.needs_reprocessing in routes_admin.py).
+# Bump this whenever extraction logic changes materially (a new file type, a
+# fixed text-layer heuristic, a different OCR trigger). documents.extraction_
+# version records which version actually produced a document's current
+# content -- a mismatch against this constant is what lets _ingest_one detect
+# an already-ingested, unchanged document whose extraction predates a
+# since-shipped fix (see DocumentOut.needs_reprocessing in routes_admin.py).
 CURRENT_EXTRACTION_VERSION = 1
 
 
@@ -50,26 +49,33 @@ def _configure_tesseract() -> bool:
 
 
 def _strip_nul(text: str) -> str:
-    """Postgres text columns reject embedded NUL (0x00) bytes outright --
-    confirmed live 2026-09-16 against a real Drive manual (180UC_DWT_I-O_ED4),
-    where PyMuPDF's get_text() returned them for some pages (a known quirk
-    with certain malformed/subset embedded fonts), which aborted that
-    document's whole ingestion with an unhandled psycopg.DataError. SQLite
-    never enforced this, so nothing caught it before the Postgres migration."""
+    """Postgres text columns reject embedded NUL (0x00) bytes outright.
+    PyMuPDF's get_text() can return them for some pages (a known quirk with
+    certain malformed/subset embedded fonts), which would otherwise abort
+    that document's whole ingestion with an unhandled psycopg.DataError."""
     return text.replace("\x00", "") if "\x00" in text else text
 
 
-def _ocr_image_bytes(png_bytes: bytes) -> str:
+def _ocr_image_bytes(png_bytes: bytes, timeout_seconds: int) -> str:
     import io
 
     import pytesseract
     from PIL import Image
 
     with Image.open(io.BytesIO(png_bytes)) as img:
-        return _strip_nul(pytesseract.image_to_string(img))
+        return _strip_nul(pytesseract.image_to_string(img, timeout=timeout_seconds))
+
+
+def _page_pixel_estimate(fpage, dpi: int) -> int:
+    width_px = fpage.rect.width / 72 * dpi
+    height_px = fpage.rect.height / 72 * dpi
+    return int(width_px * height_px)
 
 
 def extract_pdf(path: Path, ocr_available: bool = False) -> ExtractedDocument:
+    from app.config import get_settings
+
+    settings = get_settings()
     warnings: list[str] = []
     pages: list[ExtractedPage] = []
     scanned_pages: list[int] = []
@@ -80,6 +86,17 @@ def extract_pdf(path: Path, ocr_available: bool = False) -> ExtractedDocument:
         fitz_doc = fitz.open(path)
     except Exception as e:
         return ExtractedDocument(status="failed", reason=f"Could not open PDF: {e}")
+
+    if fitz_doc.page_count > settings.max_pdf_pages:
+        page_count = fitz_doc.page_count
+        fitz_doc.close()
+        return ExtractedDocument(
+            status="unsupported",
+            reason=(
+                f"PDF has {page_count} pages, over the {settings.max_pdf_pages}-page "
+                "limit -- refusing to process to avoid unbounded ingestion time/memory."
+            ),
+        )
 
     # pdfplumber gives more reliable table extraction than pymupdf's raw text.
     try:
@@ -99,9 +116,16 @@ def extract_pdf(path: Path, ocr_available: bool = False) -> ExtractedDocument:
                 # No text layer and no OCR engine configured: page contributes nothing.
                 pages.append(ExtractedPage(page_number=page_number, text=""))
                 continue
+            if _page_pixel_estimate(fpage, OCR_RENDER_DPI) > settings.max_page_render_pixels:
+                warnings.append(
+                    f"Page {page_number} skipped for OCR: rendering it at {OCR_RENDER_DPI}dpi "
+                    f"would exceed the {settings.max_page_render_pixels}-pixel render budget."
+                )
+                pages.append(ExtractedPage(page_number=page_number, text=""))
+                continue
             try:
                 pix = fpage.get_pixmap(dpi=OCR_RENDER_DPI)
-                text = _ocr_image_bytes(pix.tobytes("png"))
+                text = _ocr_image_bytes(pix.tobytes("png"), settings.ocr_timeout_seconds)
                 ocr_pages.append(page_number)
             except Exception as e:
                 warnings.append(f"OCR failed on page {page_number}: {e}")
@@ -306,6 +330,9 @@ def extract_legacy_doc(path: Path) -> ExtractedDocument:
 
 
 def extract_image(path: Path, ocr_available: bool = False) -> ExtractedDocument:
+    from app.config import get_settings
+    from PIL import Image
+
     if not (ocr_available and _configure_tesseract()):
         return ExtractedDocument(
             status="unsupported",
@@ -314,8 +341,20 @@ def extract_image(path: Path, ocr_available: bool = False) -> ExtractedDocument:
                 "on this machine. Set TESSERACT_CMD in .env once installed to index this file."
             ),
         )
+    settings = get_settings()
+    with Image.open(path) as img:
+        pixel_count = img.width * img.height
+    if pixel_count > settings.max_page_render_pixels:
+        return ExtractedDocument(
+            status="unsupported",
+            reason=(
+                f"Image is {img.width}x{img.height} ({pixel_count} pixels), over the "
+                f"{settings.max_page_render_pixels}-pixel OCR budget -- refusing to decode "
+                "to avoid unbounded memory use."
+            ),
+        )
     try:
-        text = _ocr_image_bytes(path.read_bytes())
+        text = _ocr_image_bytes(path.read_bytes(), settings.ocr_timeout_seconds)
     except Exception as e:
         return ExtractedDocument(status="failed", reason=f"OCR failed: {e}")
 
@@ -367,11 +406,11 @@ _MAGIC_SIGNATURES: list[tuple[bytes, str]] = [
 
 
 def _is_word_ole(path: Path) -> bool:
-    """P1-09 (external review, 2026-09-21): the OLE compound-file signature
-    alone doesn't distinguish a real .doc from a legacy .xls/.ppt (same
-    container format, different internal streams) -- only a genuine Word
-    document has a top-level "WordDocument" stream. Mirrors the same check
-    extract_legacy_doc already does before parsing."""
+    """The OLE compound-file signature alone doesn't distinguish a real .doc
+    from a legacy .xls/.ppt (same container format, different internal
+    streams) -- only a genuine Word document has a top-level "WordDocument"
+    stream. Mirrors the same check extract_legacy_doc already does before
+    parsing."""
     try:
         if not olefile.isOleFile(str(path)):
             return False
@@ -385,10 +424,9 @@ def _is_word_ole(path: Path) -> bool:
 
 
 def _sniff_ooxml_kind(path: Path) -> str:
-    """P1-09: .docx/.xlsx/.pptx are all ZIP containers sharing the same magic
-    bytes (PK\\x03\\x04) -- every one of them used to be labeled 'docx'
-    regardless of actual content. Distinguished by the one member file each
-    format's own spec guarantees it has."""
+    """.docx/.xlsx/.pptx are all ZIP containers sharing the same magic bytes
+    (PK\\x03\\x04), so magic bytes alone can't tell them apart. Distinguished
+    by the one member file each format's own spec guarantees it has."""
     try:
         with zipfile.ZipFile(path) as zf:
             names = set(zf.namelist())
@@ -418,12 +456,12 @@ def sniff_file_type(path: Path) -> str | None:
             if kind == "zip_ooxml":
                 return _sniff_ooxml_kind(path)
             if kind == "ole":
-                # P1-09: an actual binary .doc previously sniffed as the
-                # generic "ole" kind, which extract() never dispatches on
-                # (only "doc" reaches extract_legacy_doc) -- resolve_file_type
-                # trusts this sniff over the .doc extension, so every real
-                # legacy .doc silently took the "Unrecognized file extension"
-                # unsupported branch instead of being parsed.
+                # Must resolve to "doc", not the generic "ole" kind --
+                # extract() only dispatches on "doc" (to extract_legacy_doc),
+                # and resolve_file_type trusts this sniff over the .doc
+                # extension, so a real legacy .doc left at "ole" would
+                # silently take the "Unrecognized file extension" unsupported
+                # branch instead of being parsed.
                 return "doc" if _is_word_ole(path) else "ole"
             return kind
     return None
