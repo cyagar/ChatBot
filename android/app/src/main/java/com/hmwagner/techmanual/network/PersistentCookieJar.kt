@@ -45,6 +45,15 @@ class PersistentCookieJar(context: Context) : CookieJar {
         }
     }
 
+    // P1-18 (external review, 2026-09-21): OkHttp calls a CookieJar from
+    // whatever thread is running that request's dispatch -- concurrent
+    // requests (a background refresh racing a user-initiated tap, for
+    // instance) could read/write `cache` at the same time with no lock.
+    // @Synchronized on every method touching it (on `this`, the single
+    // instance OkHttpClient.Builder holds) is enough here: none of these
+    // methods call each other, so there's no reentrancy/deadlock risk to
+    // reason about.
+    @Synchronized
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
         for (cookie in cookies) {
             if (cookie.name != SESSION_COOKIE_NAME) continue
@@ -53,17 +62,37 @@ class PersistentCookieJar(context: Context) : CookieJar {
         }
     }
 
+    @Synchronized
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
-        val stored = cache[url.host] ?: return emptyList()
-        return stored.filter { it.expiresAt > System.currentTimeMillis() }
+        // P1-18: used to key straight off url.host and check only expiry --
+        // skipping Cookie.matches()'s path/secure/domain-subdomain rules.
+        // This app only ever has one cookie for one host today, so it's not
+        // an active bug yet, but a future host/path change (or a cookie
+        // this jar doesn't fully control) could send a cookie somewhere
+        // RFC 6265 says it shouldn't go. Checking every cached cookie
+        // (there's realistically one) against the real rule instead of a
+        // hand-rolled subset of it.
+        return cache.values.flatten().filter { it.expiresAt > System.currentTimeMillis() && it.matches(url) }
     }
 
+    @Synchronized
     fun clear() {
         cache.clear()
         prefs.edit().remove(KEY_IV).remove(KEY_CIPHERTEXT).apply()
     }
 
-    fun hasSession(): Boolean = cache.values.any { list -> list.any { it.name == SESSION_COOKIE_NAME } }
+    @Synchronized
+    fun hasSession(): Boolean {
+        // P1-18: used to ignore expiresAt entirely -- an expired cookie
+        // still read as "has a session", so AppNav's startup /me call (which
+        // exists specifically to catch a session the server no longer
+        // honors) ran for a cookie that was never going to be sent in the
+        // first place once loadForRequest's own expiry filter (above)
+        // excluded it -- an avoidable network round trip on a launch that
+        // could have gone straight to SignedOut.
+        val now = System.currentTimeMillis()
+        return cache.values.any { list -> list.any { it.name == SESSION_COOKIE_NAME && it.expiresAt > now } }
+    }
 
     private fun storeCookie(cookie: Cookie) {
         val plaintext = CookieSerialization.serialize(cookie).toByteArray(Charsets.UTF_8)
@@ -80,6 +109,19 @@ class PersistentCookieJar(context: Context) : CookieJar {
             // in-memory cache still has the cookie for this process's
             // lifetime, it just won't survive a restart. Better than a
             // crash loop on a device with a broken Keystore.
+            //
+            // P1-18 (external review, 2026-09-21): this used to leave
+            // whatever ciphertext was ALREADY persisted (from an earlier,
+            // successful encryption) sitting in prefs untouched. On restart,
+            // loadStoredCookie would decrypt and restore that OLD session --
+            // one this in-memory cache had already moved past (e.g. the
+            // user logged in again as someone else, or the session was
+            // cleared, between that old encrypt and this failed one) --
+            // silently resurrecting a session this process no longer
+            // believes is current. Clearing it here means a broken
+            // Keystore loses persistence entirely rather than persisting
+            // stale data.
+            prefs.edit().remove(KEY_IV).remove(KEY_CIPHERTEXT).apply()
         }
     }
 

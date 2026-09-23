@@ -51,18 +51,42 @@ object ApiClient {
      * P0A-1: a visible, explicit sign-out, reachable from every signed-in
      * screen. Always ends the local session even if the server can't be
      * reached -- a technician must never be stuck unable to sign out (or
-     * into a different account) just because the network is down -- but
-     * still tries the real server-side logout first so the session is
-     * actually revoked when possible, not just forgotten locally.
+     * into a different account) just because the network is down.
+     *
+     * P1-17 (external review, 2026-09-21): this used to await the network
+     * call BEFORE clearing local state -- on a dead connection, the 90s read
+     * timeout could leave the app looking signed in for up to 90 seconds
+     * after the tap. Local state is now cleared first, unconditionally, and
+     * the server call is fired after as best-effort only.
+     *
+     * Also, despite what this comment used to claim, POST /api/auth/logout
+     * does NOT revoke anything server-side -- it only deletes the response
+     * cookie (see app/auth/routes.py's logout). The session JWT itself is
+     * stateless and stays valid until its natural expiry
+     * (session_ttl_minutes) unless the user's token_version is bumped
+     * (what disable/enable does, and the only real server-side revocation
+     * this backend has). This logout is local-only: it stops THIS app from
+     * presenting the cookie again, nothing more. A stolen/copied cookie
+     * value would remain valid until it expires on its own. Documented here
+     * accurately rather than silently changing to a real server-side
+     * revocation, which would sign the user out of every other device too --
+     * a bigger behavior change than a comment fix should make unasked.
      */
     suspend fun logout() {
+        // Cancelling in-flight calls here, before clearing, closes a race:
+        // an old, slow in-flight request (e.g. a login the technician gave
+        // up on and is now logging out from a DIFFERENT signed-in state)
+        // completing after cookieJar.clear() could otherwise let OkHttp's
+        // cookie-jar plumbing silently repopulate a session they just
+        // explicitly signed out of.
+        okHttpClient.dispatcher.cancelAll()
+        cookieJar.clear()
+        _sessionExpired.value = true
         try {
             service.logout()
         } catch (_: Exception) {
-            // Best-effort; the local session is cleared unconditionally below.
+            // Best-effort; local state is already cleared above regardless.
         }
-        cookieJar.clear()
-        _sessionExpired.value = true
     }
 
     fun init(context: Context) {

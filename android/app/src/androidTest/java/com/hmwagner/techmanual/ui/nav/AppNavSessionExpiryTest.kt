@@ -13,6 +13,10 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.LoginRequest
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -113,6 +117,33 @@ class AppNavSessionExpiryTest {
 
         assertFalse("the cleared session must not still look logged in after the redirect", ApiClient.hasSession())
         assertFalse("AppNav must have consumed the flag via onSessionExpiredHandled()", ApiClient.sessionExpired.value)
+    }
+
+    // P1-17 (external review, 2026-09-21): the launch-time /me check used to
+    // treat ANY non-2xx response identically to a 401 -- a transient outage
+    // (500/503/429) during cold launch signed a technician out of a
+    // perfectly valid session, the same as a genuinely revoked one.
+    @Test
+    fun aTransientServerErrorOnTheStartupMeCallDoesNotSignOut() {
+        server.enqueue(MockResponse().setResponseCode(503))
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("[]"),
+        ) // MachinesViewModel's recentMachines(), once Home mounts as SignedIn
+
+        composeTestRule.setContent {
+            AppNav(windowSizeClass = compactWindowSizeClass)
+        }
+
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodesWithText("Ask about a machine").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.onNodeWithText("Ask about a machine").assertExists()
+        assertTrue(
+            "a transient 503 at launch must not sign the technician out of a valid session",
+            ApiClient.hasSession(),
+        )
     }
 
     @Test
@@ -308,5 +339,31 @@ class AppNavSessionExpiryTest {
         runBlocking { ApiClient.logout() }
 
         assertFalse("logout must clear the local session even when the server call fails", ApiClient.hasSession())
+    }
+
+    // P1-17: logout() used to await the network call before clearing local
+    // state -- a dead/slow connection could leave the app looking signed in
+    // for up to the full 90s read timeout after the tap. Local state
+    // (including sessionExpired, which AppNav's redirect reacts to) must
+    // flip immediately; the server call is best-effort only, afterward.
+    @OptIn(DelicateCoroutinesApi::class)
+    @Test
+    fun logoutSignalsSessionExpiredWellBeforeASlowServerCallCompletes() {
+        server.enqueue(MockResponse().setResponseCode(200).setBodyDelay(10, TimeUnit.SECONDS))
+
+        GlobalScope.launch { ApiClient.logout() }
+
+        // Polling a short deadline, not a fixed sleep -- proves this happens
+        // fast, not merely "eventually" within a window a slow CI runner
+        // could satisfy even under the old, wrong ordering.
+        val deadline = System.currentTimeMillis() + 1_000
+        while (System.currentTimeMillis() < deadline && !ApiClient.sessionExpired.value) {
+            Thread.sleep(10)
+        }
+        assertTrue(
+            "sessionExpired must flip well before the 10s slow logout response arrives",
+            ApiClient.sessionExpired.value,
+        )
+        assertFalse(ApiClient.hasSession())
     }
 }

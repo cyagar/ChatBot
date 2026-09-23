@@ -128,13 +128,25 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
                     val resp = ApiClient.service.me()
                     if (resp.isSuccessful) {
                         LaunchSessionState.SignedIn
-                    } else {
+                    } else if (resp.code() == 401) {
                         // authExpiryInterceptor already cleared the cookie and
                         // set sessionExpired for a 401 here; consuming it now
                         // avoids a redundant navigate() once Home/Login mount.
                         ApiClient.clearSession()
                         ApiClient.onSessionExpiredHandled()
                         LaunchSessionState.SignedOut
+                    } else {
+                        // P1-17 (external review, 2026-09-21): a temporary
+                        // 500/503/429 here used to be treated identically to
+                        // a 401 -- an outage during cold launch signed a
+                        // technician out of a perfectly valid session. Only
+                        // 401 (get_current_user's own "session expired or
+                        // invalid" / "user no longer exists" / "disabled"
+                        // rejections -- see app/auth/deps.py) is proof the
+                        // session itself is bad; anything else is a server
+                        // hiccup and must fail open, same as the connection
+                        // exception below.
+                        LaunchSessionState.SignedIn
                     }
                 } catch (_: Exception) {
                     // Couldn't reach the server to validate -- fail open on a
