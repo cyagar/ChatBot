@@ -2,6 +2,7 @@ package com.hmwagner.techmanual.ui.nav
 
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -82,6 +83,18 @@ class AppNavSessionExpiryTest {
         assertTrue("PersistentCookieJar must have stored the session cookie from the fake login", ApiClient.hasSession())
     }
 
+    // P1-23 (external review, 2026-09-21): AppNav's own LaunchedEffect(Unit)
+    // now fetches GET /api/config as its first request on every composition
+    // -- every test below that calls composeTestRule.setContent { AppNav(...) }
+    // must enqueue this first, ahead of whatever that test's own scenario
+    // needs, the same way setUp()'s fake login already comes first.
+    private fun configOkResponse() = MockResponse().setResponseCode(200)
+        .setHeader("Content-Type", "application/json")
+        .setBody(
+            """{"maintenance_mode": false, "maintenance_message": "", "minimum_supported_version": "0.0.0",
+                "support_contact": "", "status": "ok", "status_message": ""}""",
+        )
+
     @After
     fun tearDown() {
         // logoutClearsTheLocalSessionEvenWhenTheServerIsUnreachable() below
@@ -99,6 +112,7 @@ class AppNavSessionExpiryTest {
         // succeed here so Home actually mounts -- this test is about the
         // 401 that MachinesViewModel.init{}'s GET api/machines/recent gets
         // once MachinesScreen enters composition, not about /me itself.
+        server.enqueue(configOkResponse())
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
@@ -125,6 +139,7 @@ class AppNavSessionExpiryTest {
     // perfectly valid session, the same as a genuinely revoked one.
     @Test
     fun aTransientServerErrorOnTheStartupMeCallDoesNotSignOut() {
+        server.enqueue(configOkResponse())
         server.enqueue(MockResponse().setResponseCode(503))
         server.enqueue(
             MockResponse().setResponseCode(200)
@@ -146,8 +161,38 @@ class AppNavSessionExpiryTest {
         )
     }
 
+    // P1-23 (external review, 2026-09-21): maintenance_mode from GET
+    // /api/config must block the app entirely -- not just Home, since there
+    // is nothing useful to do at Login either during an incident.
+    @Test
+    fun maintenanceModeBlocksTheAppBeforeHomeOrLoginRenders() {
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody(
+                    """{"maintenance_mode": true, "maintenance_message": "Down for scheduled maintenance.",
+                        "minimum_supported_version": "0.0.0", "support_contact": "help@hmwagner.com",
+                        "status": "degraded", "status_message": ""}""",
+                ),
+        )
+
+        composeTestRule.setContent {
+            AppNav(windowSizeClass = compactWindowSizeClass)
+        }
+
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodesWithText("Maintenance").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.onNodeWithText("Down for scheduled maintenance.").assertExists()
+        composeTestRule.onNodeWithText("Contact: help@hmwagner.com").assertExists()
+        // Neither Home nor Login must have rendered underneath.
+        composeTestRule.onAllNodesWithText("Ask about a machine").assertCountEquals(0)
+        composeTestRule.onAllNodesWithText("Technician Manual Assistant").assertCountEquals(0)
+    }
+
     @Test
     fun aSuccessfulAuthenticatedRequestDoesNotRedirectToLogin() {
+        server.enqueue(configOkResponse())
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
@@ -173,8 +218,9 @@ class AppNavSessionExpiryTest {
         }
         composeTestRule.onNodeWithText("Ask about a machine").assertExists()
         assertEquals(
-            "expected exactly the fake login, AppNav's launch-time /me check, plus one recentMachines() call",
-            3,
+            "expected exactly the fake login, AppNav's config fetch, its launch-time /me check, " +
+                "plus one recentMachines() call",
+            4,
             server.requestCount,
         )
 
@@ -196,6 +242,7 @@ class AppNavSessionExpiryTest {
     // ViewModels are), so a fresh login could reopen the old conversation.
     @Test
     fun sessionExpiryClearsTheSelectedConversationSoALaterLoginStartsClean() {
+        server.enqueue(configOkResponse())
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
@@ -290,6 +337,7 @@ class AppNavSessionExpiryTest {
     @Test
     fun aMachineLabelWithReservedUriCharactersNavigatesAndDisplaysCorrectly() {
         val trickyLabel = "AJ/AX 100 & Co. 50%"
+        server.enqueue(configOkResponse())
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setHeader("Content-Type", "application/json")

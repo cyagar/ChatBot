@@ -19,6 +19,9 @@ interface ApiService {
     @GET("api/auth/me")
     suspend fun me(): Response<UserOut>
 
+    @GET("api/config")
+    suspend fun getConfig(): Response<ConfigOut>
+
     @GET("api/machines")
     suspend fun searchMachines(@Query("q") query: String = "", @Query("limit") limit: Int = 25): Response<List<MachineOut>>
 

@@ -124,3 +124,16 @@ data class SavedAnswerOut(
     val question: String? = null,
     val answer: MessageOut,
 )
+
+// P1-23 (external review, 2026-09-21): GET /api/config existed since Phase 1
+// but nothing in Android ever called it -- maintenance mode and a minimum
+// supported version had no way to reach a technician.
+@Serializable
+data class ConfigOut(
+    val maintenance_mode: Boolean,
+    val maintenance_message: String,
+    val minimum_supported_version: String,
+    val support_contact: String,
+    val status: String,
+    val status_message: String,
+)

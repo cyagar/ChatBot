@@ -39,12 +39,14 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.hmwagner.techmanual.BuildConfig
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.ui.chat.ChatScreen
 import com.hmwagner.techmanual.ui.history.HistoryScreen
 import com.hmwagner.techmanual.ui.login.LoginScreen
 import com.hmwagner.techmanual.ui.machines.MachinesScreen
 import com.hmwagner.techmanual.ui.saved.SavedAnswersScreen
+import com.hmwagner.techmanual.util.isVersionBelowMinimum
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -100,6 +102,12 @@ private object Routes {
  */
 private enum class LaunchSessionState { Checking, SignedIn, SignedOut }
 
+// P1-23 (external review, 2026-09-21): GET /api/config carries maintenance
+// state and a minimum supported version, but nothing in Android ever
+// fetched it -- a maintenance incident or a forced-upgrade decision had no
+// way to reach a technician through the app itself.
+private data class BlockingConfigState(val title: String, val message: String, val supportContact: String)
+
 @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
 @Composable
 fun AppNav(windowSizeClass: WindowSizeClass) {
@@ -112,7 +120,40 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
     val selection: HomeSelectionViewModel = viewModel()
 
     var launchState by remember { mutableStateOf(LaunchSessionState.Checking) }
+    var blockingConfig by remember { mutableStateOf<BlockingConfigState?>(null) }
     LaunchedEffect(Unit) {
+        // Bounded the same way the /me check below is -- a slow/unreachable
+        // config endpoint must not meaningfully delay startup, and a
+        // technician must never be locked OUT of the app by a config check
+        // that itself couldn't complete (fails open: null on any failure).
+        val config = withTimeoutOrNull(5_000) {
+            try {
+                ApiClient.service.getConfig().takeIf { it.isSuccessful }?.body()
+            } catch (_: Exception) {
+                null
+            }
+        }
+        if (config != null) {
+            blockingConfig = when {
+                config.maintenance_mode -> BlockingConfigState(
+                    title = "Maintenance",
+                    message = config.maintenance_message.ifBlank { "This app is temporarily in maintenance mode." },
+                    supportContact = config.support_contact,
+                )
+                isVersionBelowMinimum(BuildConfig.VERSION_NAME, config.minimum_supported_version) -> BlockingConfigState(
+                    title = "Update required",
+                    message = "A newer version of this app is required to continue.",
+                    supportContact = config.support_contact,
+                )
+                else -> null
+            }
+        }
+        // Skip the session check entirely once blocked -- nothing it could
+        // find changes what renders, and (more concretely, in tests) it
+        // would otherwise wait out its own 5s timeout for a response no one
+        // needs to enqueue.
+        if (blockingConfig != null) return@LaunchedEffect
+
         launchState = if (!ApiClient.hasSession()) {
             LaunchSessionState.SignedOut
         } else {
@@ -212,8 +253,15 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
         }
     }
 
-    when (launchState) {
-        LaunchSessionState.Checking -> LaunchChecking()
+    val blocking = blockingConfig
+    when {
+        // Checked ahead of launchState entirely: a maintenance window or a
+        // forced upgrade applies regardless of whether this device happens
+        // to have a valid session -- an outdated or maintenance-mode client
+        // must not reach Login either, since there is nothing useful to do
+        // there until the incident clears.
+        blocking != null -> BlockingConfigScreen(blocking)
+        launchState == LaunchSessionState.Checking -> LaunchChecking()
         else -> {
             val startDestination = if (launchState == LaunchSessionState.SignedIn) Routes.HOME else Routes.LOGIN
             NavHost(navController = navController, startDestination = startDestination) {
@@ -238,6 +286,27 @@ private fun LaunchChecking() {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
             CircularProgressIndicator()
             Text("Checking your session…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun BlockingConfigScreen(state: BlockingConfigState) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(24.dp),
+        ) {
+            Text(state.title, style = MaterialTheme.typography.headlineSmall)
+            Text(state.message, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            if (state.supportContact.isNotBlank()) {
+                Text(
+                    "Contact: ${state.supportContact}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
         }
     }
 }
