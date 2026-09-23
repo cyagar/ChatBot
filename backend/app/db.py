@@ -1,3 +1,4 @@
+import re
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -32,15 +33,120 @@ def get_conn():
         conn.close()
 
 
-def split_sql_statements(script: str) -> list[str]:
-    """Split a migration script into individual statements on ';' boundaries.
+_DOLLAR_TAG_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$")
 
-    Safe because these migration files are authored by us and never contain a
-    semicolon inside a string literal or comment -- unlike the old SQLite
-    migrations (one of which grandfathered seed data with an embedded
-    semicolon), starting the Postgres database empty means no migration here
-    ever carries row data, only schema."""
-    return [stmt.strip() + ";" for stmt in script.split(";") if stmt.strip()]
+
+def split_sql_statements(script: str) -> list[str]:
+    """SQL-aware statement splitter: tracks single-quoted string literals
+    ('' escaping), double-quoted identifiers, -- line comments, /* */ block
+    comments, and $$.../$tag$...$tag$ dollar-quoted bodies, splitting only
+    on a ';' outside all of them.
+
+    P2-06 (external review, 2026-09-21): run_migrations() below no longer
+    uses this for real execution -- it sends each migration file to
+    Postgres as a single multi-statement script instead, which lets
+    Postgres's own parser (not a hand-rolled one) handle every one of these
+    cases correctly, including a future PL/pgSQL function/trigger body
+    (routine semicolons inside $$...$$) that a naive split(';') would have
+    silently mangled. This function is now purely a TEST helper (see
+    test_migrations.py's rollback sweep, which needs "this migration's
+    statements minus its last one" to construct a deliberately-broken
+    migration) -- production correctness no longer depends on it."""
+    statements: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(script)
+    in_single = in_double = in_line_comment = in_block_comment = False
+    dollar_tag: str | None = None
+
+    while i < n:
+        ch = script[i]
+
+        if in_line_comment:
+            buf.append(ch)
+            in_line_comment = ch != "\n"
+            i += 1
+            continue
+        if in_block_comment:
+            if ch == "*" and script[i + 1 : i + 2] == "/":
+                buf.append("*/")
+                i += 2
+                in_block_comment = False
+            else:
+                buf.append(ch)
+                i += 1
+            continue
+        if dollar_tag is not None:
+            if script.startswith(dollar_tag, i):
+                buf.append(dollar_tag)
+                i += len(dollar_tag)
+                dollar_tag = None
+            else:
+                buf.append(ch)
+                i += 1
+            continue
+        if in_single:
+            if ch == "'" and script[i + 1 : i + 2] == "'":
+                buf.append("''")
+                i += 2
+            elif ch == "'":
+                buf.append(ch)
+                i += 1
+                in_single = False
+            else:
+                buf.append(ch)
+                i += 1
+            continue
+        if in_double:
+            buf.append(ch)
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+
+        # Not inside any quoted/comment region -- check for one starting here.
+        if ch == "-" and script[i + 1 : i + 2] == "-":
+            in_line_comment = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "/" and script[i + 1 : i + 2] == "*":
+            in_block_comment = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "'":
+            in_single = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "$":
+            m = _DOLLAR_TAG_RE.match(script, i)
+            if m:
+                dollar_tag = m.group(0)
+                buf.append(dollar_tag)
+                i += len(dollar_tag)
+                continue
+        if ch == ";":
+            buf.append(ch)
+            stmt = "".join(buf).strip()
+            if stmt:
+                statements.append(stmt)
+            buf = []
+            i += 1
+            continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        statements.append(tail)
+    return statements
 
 
 def run_migrations() -> list[str]:
@@ -53,7 +159,22 @@ def run_migrations() -> list[str]:
     skill's pooled-vs-direct guidance). Each migration runs inside its own
     transaction together with its own schema_migrations INSERT, so a failure
     part-way through rolls the whole migration back and leaves no record --
-    the next start retries it cleanly from the original schema."""
+    the next start retries it cleanly from the original schema.
+
+    P2-06 (external review, 2026-09-21): each migration file used to be
+    split on a naive ';'.split() before execution, correct only because
+    every migration so far happens to avoid a semicolon inside a string
+    literal or comment -- a real, easy-to-violate-by-accident constraint on
+    every future migration author, enforced by nothing but a proxy test.
+    Each file is now sent to Postgres as ONE multi-statement script via a
+    single parameterless execute() call (confirmed: psycopg3 falls back to
+    libpq's simple query protocol for a parameterless execute(), the same
+    protocol psql itself uses, which supports a full multi-statement script
+    and correctly stops at the first failing statement -- verified this
+    still rolls back atomically inside `with conn.transaction():` and that
+    a semicolon inside a string literal survives intact). This removes the
+    splitting step from the trusted-execution path entirely rather than
+    trying to make a hand-rolled splitter perfect."""
     settings = get_settings()
     applied = []
     conn = psycopg.connect(settings.database_url_unpooled, row_factory=dict_row, autocommit=True)
@@ -67,10 +188,8 @@ def run_migrations() -> list[str]:
             version = path.stem
             if version in already:
                 continue
-            statements = split_sql_statements(path.read_text(encoding="utf-8"))
             with conn.transaction():
-                for stmt in statements:
-                    conn.execute(stmt)
+                conn.execute(path.read_text(encoding="utf-8"))
                 conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
             applied.append(version)
     finally:

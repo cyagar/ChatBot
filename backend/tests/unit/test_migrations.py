@@ -6,16 +6,16 @@ would retry from a schema that no longer matched what the migration expected.
 
 These tests prove each migration is now all-or-nothing and retries cleanly.
 
-Ported from SQLite to Postgres (2026-09-14): split_sql_statements() used to be
-a real statement-aware parser (sqlite3.complete_statement-based) that
-respected semicolons inside string literals/comments. It's now a naive
-split(';') -- see split_sql_statements's own docstring in app/db.py -- so
-every migration author's real, accepted constraint is: never write a
-semicolon anywhere except as a genuine statement terminator, not even inside
-a string literal or a comment. test_split_does_not_respect_semicolons_inside_
-string_literals below pins that this really is naive, deliberately, so
-nobody "fixes" it into doing something smarter without updating this file
-and confirming no real migration relies on the naive behavior.
+P2-06 (external review, 2026-09-21): split_sql_statements() used to be a
+naive split(';') -- silently wrong for a semicolon inside a string literal,
+a comment, or (for a future PL/pgSQL function/trigger) a dollar-quoted body.
+run_migrations() no longer uses it for real execution at all -- see its
+docstring in app/db.py -- so that naive-splitter constraint on migration
+authors no longer exists. split_sql_statements is now a genuinely SQL-aware
+splitter (tracks string/identifier quoting, comments, and dollar-quoting),
+kept only as a test helper for the rollback sweep below, which needs "this
+migration's statements minus its last one" to construct a deliberately
+broken migration.
 """
 from __future__ import annotations
 
@@ -38,32 +38,104 @@ def _table_exists(conn, name: str) -> bool:
     ).fetchone() is not None
 
 
-def test_split_does_not_respect_semicolons_inside_string_literals():
-    """The naive split(';') this app now uses does NOT special-case string
-    literals or comments the way the old sqlite3.complete_statement-based
-    splitter did -- a semicolon anywhere ends a statement, even mid-literal.
-    This is a real, accepted constraint on every migration author now (see
-    0001_initial_schema.sql's own two comment edits made to satisfy it)."""
+def test_split_respects_semicolons_inside_string_literals():
+    """P2-06: the old naive split(';') tore a string literal in two at any
+    semicolon inside it. The SQL-aware splitter must not."""
     script = (
         "CREATE TABLE t (a TEXT);\n"
         "UPDATE t SET a = 'first clause; second clause' WHERE a IS NULL;\n"
     )
     statements = split_sql_statements(script)
-    assert len(statements) == 3, "a semicolon inside the string literal splits the statement in two"
+    assert len(statements) == 2, "a semicolon inside a string literal must not split the statement"
+    assert "first clause; second clause" in statements[1]
 
 
-def test_real_migration_files_never_contain_a_semicolon_that_would_split_a_statement_mid_way():
-    """Direct regression guard for the naive-splitter constraint above: a
-    semicolon that tore a string literal in half would leave an odd number
-    of single quotes in one of the resulting fragments (half the literal's
-    opening/closing quote pair torn off into the next fragment)."""
+def test_split_respects_escaped_quotes_inside_string_literals():
+    """A doubled '' is SQL's escape for a literal single quote, not the end
+    of the string -- the splitter must keep tracking the literal through it,
+    not treat the second ' as closing early."""
+    script = "INSERT INTO t (a) VALUES ('it''s; still one literal');\n"
+    statements = split_sql_statements(script)
+    assert len(statements) == 1
+    assert "it''s; still one literal" in statements[0]
+
+
+def test_split_respects_semicolons_inside_double_quoted_identifiers():
+    script = 'CREATE TABLE t ("weird; column name" TEXT);\n'
+    statements = split_sql_statements(script)
+    assert len(statements) == 1
+    assert '"weird; column name"' in statements[0]
+
+
+def test_split_respects_semicolons_inside_line_comments():
+    script = "-- a comment; with a semicolon\nCREATE TABLE t (a TEXT);\n"
+    statements = split_sql_statements(script)
+    assert len(statements) == 1
+    assert "CREATE TABLE t (a TEXT);" in statements[0]
+
+
+def test_split_respects_semicolons_inside_block_comments():
+    script = "/* a block comment; with one */ CREATE TABLE t (a TEXT);\n"
+    statements = split_sql_statements(script)
+    assert len(statements) == 1
+
+
+def test_split_respects_semicolons_inside_dollar_quoted_bodies():
+    """The case the old naive splitter would have mangled worst: a PL/pgSQL
+    function/trigger body, which routinely contains its own semicolons
+    inside $$...$$ (or a tagged $tag$...$tag$)."""
+    script = (
+        "CREATE FUNCTION f() RETURNS trigger AS $$\n"
+        "BEGIN\n"
+        "  UPDATE t SET a = 1;\n"
+        "  RETURN NEW;\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n"
+        "CREATE TABLE t (a INTEGER);\n"
+    )
+    statements = split_sql_statements(script)
+    assert len(statements) == 2, f"expected the whole function body as one statement, got: {statements}"
+    assert "RETURN NEW;" in statements[0]
+    assert statements[1].startswith("CREATE TABLE t")
+
+
+def test_real_migration_files_split_into_at_least_one_statement():
+    """Basic sanity for the splitter against every real migration file --
+    the rollback sweep below (test_every_real_migration_rolls_back_and_
+    retries_cleanly_on_failure) depends on this producing a real statement
+    list to drop the last element from."""
     for path in sorted(db_module.MIGRATIONS_DIR.glob("*.sql")):
         statements = split_sql_statements(path.read_text(encoding="utf-8"))
         assert statements, f"{path.name} produced no statements"
-        for stmt in statements:
-            assert stmt.count("'") % 2 == 0, (
-                f"a semicolon likely split a string literal mid-statement in {path.name}: {stmt[:80]}"
-            )
+
+
+def test_migration_with_a_semicolon_inside_a_string_literal_applies_correctly(test_env, tmp_path, monkeypatch):
+    """P2-06 (external review, 2026-09-21): the actual production bug this
+    whole change addresses. The old naive splitter would have torn the
+    INSERT below into two garbage fragments at the semicolon inside the
+    literal; run_migrations() sends the whole file to Postgres as one
+    script now, so this must apply -- and the inserted value must be
+    intact, not truncated at the semicolon."""
+    mig_dir = tmp_path / "migrations_semicolon"
+    mig_dir.mkdir()
+    (mig_dir / "9003_semicolon.sql").write_text(
+        "CREATE TABLE p2_6_semicolon (a TEXT);\n"
+        "INSERT INTO p2_6_semicolon (a) VALUES ('first clause; second clause');\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(db_module, "MIGRATIONS_DIR", mig_dir)
+
+    try:
+        applied = run_migrations()
+        assert "9003_semicolon" in applied
+
+        with get_conn() as conn:
+            row = conn.execute("SELECT a FROM p2_6_semicolon").fetchone()
+        assert row["a"] == "first clause; second clause"
+    finally:
+        with get_conn() as conn:
+            conn.execute("DROP TABLE IF EXISTS p2_6_semicolon")
+            conn.execute("DELETE FROM schema_migrations WHERE version = '9003_semicolon'")
 
 
 def test_failing_migration_rolls_back_completely_and_leaves_no_record(test_env, tmp_path, monkeypatch):
