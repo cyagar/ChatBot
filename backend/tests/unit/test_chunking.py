@@ -42,6 +42,40 @@ def test_warning_line_becomes_warning_chunk():
     assert any(r.chunk_type == "warning" for r in records)
 
 
+def test_p1_16_a_warnings_continuation_lines_stay_in_the_same_chunk():
+    """P1-16 (external review, 2026-09-21): _classify_line only recognizes a
+    warning's OWN marker line ("WARNING: ..."), never its continuation --
+    every line after it used to classify as plain 'text' and immediately
+    flush(), detaching the warning label from its own body/safety content
+    into a separate, unlabeled chunk one line later."""
+    text = (
+        "WARNING: Disconnect power before servicing.\n"
+        "Risk of electric shock if this step is skipped.\n"
+        "Wait 5 minutes before opening the panel."
+    )
+    doc = _doc(text)
+    records = chunk_document(doc)
+    warning_records = [r for r in records if r.chunk_type == "warning"]
+    assert len(warning_records) == 1, (
+        f"expected one merged warning chunk, got {len(warning_records)}: {[r.content for r in warning_records]}"
+    )
+    assert "Risk of electric shock" in warning_records[0].content
+    assert "Wait 5 minutes" in warning_records[0].content
+
+
+def test_p1_16_a_procedure_steps_continuation_lines_stay_with_that_step():
+    text = (
+        "1. Disconnect power.\n"
+        "Make sure the breaker is fully off before proceeding.\n"
+        "2. Remove the front panel."
+    )
+    doc = _doc(text)
+    records = chunk_document(doc)
+    procedure_records = [r for r in records if r.chunk_type == "procedure"]
+    assert len(procedure_records) == 1
+    assert "Make sure the breaker is fully off" in procedure_records[0].content
+
+
 def test_table_under_error_code_heading_is_classified_error_code():
     table = ExtractedTable(page_number=1, rows=[["Code", "Meaning"], ["E1", "Thermistor open"], ["E2", "Thermistor shorted"]])
     doc = _doc("Fault Codes\nSee table below.", headings=[("Fault Codes", 0)], tables=[table])
@@ -117,6 +151,24 @@ def test_single_oversized_row_is_split_across_cells_without_losing_values():
     assert "PARTNUM-11111" in combined
     assert "PARTNUM-22222" in combined
     assert "E99" in combined
+
+
+def test_p1_16_split_row_repeats_the_row_identifier_in_every_piece():
+    """P1-16 (external review, 2026-09-21): a long remedy/description in a
+    LATER column used to push the split so the row's own identifier (column
+    0 -- the error code, in this test) only survived in the first piece. A
+    retrieved later piece had no way to tell which code its remedy was for."""
+    header = ["Code", "Meaning", "Corrective Action"]
+    huge_remedy = "Check the following in order: " + ("step detail " * 200)
+    rows = [header, ["E77", "Heater relay failure", huge_remedy]]
+    table = ExtractedTable(page_number=1, rows=rows)
+    doc = _doc("Error Codes\nSee table below.", headings=[("Error Codes", 0)], tables=[table])
+    records = chunk_document(doc)
+    table_records = [r for r in records if r.chunk_type == "error_code" and "Code" in r.content]
+
+    assert len(table_records) > 1, "the remedy must be split across more than one piece"
+    for rec in table_records:
+        assert "E77" in rec.content, f"row identifier missing from a split piece: {rec.content[:120]}"
 
 
 def test_single_cell_larger_than_the_budget_is_kept_whole_not_truncated():

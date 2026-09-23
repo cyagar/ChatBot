@@ -92,7 +92,18 @@ def _chunk_page_text(page_number: int, text: str, headings: list[tuple[str, int]
             continue
 
         line_type = _classify_line(stripped)
-        if buffer and buffer_type != line_type:
+        # P1-16 (external review, 2026-09-21): _classify_line only recognizes
+        # the FIRST line of a warning or numbered step -- "WARNING: ..." or
+        # "1. ..." -- by its leading marker. Every line after it (the actual
+        # warning body, or a step's explanatory continuation) has no such
+        # marker and classified as plain "text", which used to flush() here
+        # on every single one: a warning's own content chunk was detached
+        # from its "WARNING" label into a separate chunk one line later.
+        # A "text" line inside an open warning/procedure buffer is now kept
+        # as part of it instead of ending the block.
+        if buffer_type in ("warning", "procedure") and line_type == "text":
+            line_type = buffer_type
+        elif buffer and buffer_type != line_type:
             flush()
         buffer_type = line_type
         buffer.append(stripped)
@@ -158,28 +169,45 @@ def _split_oversized_row(header: list[str], row: list[str]) -> list[list[str]]:
     row identity, and exact values"). A single cell that alone exceeds the
     budget is still emitted whole, on its own: truncating it would silently
     corrupt the value, and an over-budget chunk merely risks embedding
-    truncation for that one cell rather than losing data outright."""
-    groups: list[list[str]] = []
-    current = [""] * len(row)
-    current_len = 0
-    used = False
+    truncation for that one cell rather than losing data outright.
+
+    P1-16 (external review, 2026-09-21): the row's first cell -- in every
+    real table this pipeline splits (error-code, part-number, measured-value
+    listings), the row's identifier -- used to land in whichever piece
+    happened to hold column 0. A long remedy/description in a LATER column
+    could push the split into a second (or third) piece with an EMPTY
+    identifier column, so a retrieved chunk for that piece carried an error
+    code's remedy with no way to tell which code it was for. The first cell
+    is now repeated in every piece, mirroring the header-repeat-per-window
+    fix already applied one level up in _split_table_rows."""
+    if len(row) <= 1:
+        return [[c or "" for c in row]] if row else []
+
+    identifier = row[0] or ""
+    identifier_len = len(identifier) + 3
     header_overhead = len(" | ".join(c or "" for c in header)) + 10
 
-    for i, cell in enumerate(row):
-        cell_text = cell or ""
+    groups: list[list[str]] = []
+    current = [""] * len(row)
+    current[0] = identifier
+    current_len = identifier_len
+    used = False  # whether any column past 0 has been placed into `current`
+
+    for i in range(1, len(row)):
+        cell_text = row[i] or ""
         cell_len = len(cell_text) + 3
         if used and header_overhead + current_len + cell_len > MAX_TABLE_CHUNK_CHARS:
             groups.append(current)
             current = [""] * len(row)
-            current_len = 0
+            current[0] = identifier
+            current_len = identifier_len
             used = False
         current[i] = cell_text
         current_len += cell_len
         used = True
 
-    if used:
-        groups.append(current)
-    return groups or [row]
+    groups.append(current)
+    return groups
 
 
 def _split_table_rows(table: ExtractedTable) -> list[str]:
