@@ -38,7 +38,10 @@ interface ApiService {
     suspend fun createConversation(@Body body: CreateConversationRequest): Response<ConversationOut>
 
     @GET("api/conversations")
-    suspend fun listConversations(@Query("limit") limit: Int = 20): Response<List<ConversationOut>>
+    suspend fun listConversations(
+        @Query("limit") limit: Int = 20,
+        @Query("cursor") cursor: String? = null,
+    ): Response<List<ConversationOut>>
 
     // P1-13 (external review, 2026-09-21): the only prior way to refresh a
     // conversation's own record was listConversations() (fetches every
@@ -88,7 +91,10 @@ interface ApiService {
     ): Response<Unit>
 
     @GET("api/saved-answers")
-    suspend fun listSavedAnswers(@Query("limit") limit: Int = 50): Response<List<SavedAnswerOut>>
+    suspend fun listSavedAnswers(
+        @Query("limit") limit: Int = 50,
+        @Query("cursor") cursor: String? = null,
+    ): Response<List<SavedAnswerOut>>
 
     @GET("api/manuals/{documentId}/chunks/{chunkId}/evidence")
     suspend fun getEvidence(

@@ -104,6 +104,36 @@ class HistoryViewModelTest {
     }
 
     @Test
+    fun `loadMore appends a second page using the cursor from the first response`() {
+        server.enqueue(
+            jsonResponse(
+                """[{"id": 1, "machine_id": null, "machine_label": null, "title": "First",
+                    "started_at": "2026-08-25 10:00:00", "updated_at": "2026-08-25 10:00:00"}]"""
+            ).addHeader("X-Next-Cursor", "page2cursor").addHeader("X-Has-More", "true")
+        )
+        vm = HistoryViewModel()
+        vm.refresh()
+        awaitState { !it.loading }
+        assertEquals("page2cursor", vm.state.value.nextCursor)
+
+        server.enqueue(
+            jsonResponse(
+                """[{"id": 2, "machine_id": null, "machine_label": null, "title": "Second",
+                    "started_at": "2026-08-25 09:00:00", "updated_at": "2026-08-25 09:00:00"}]"""
+            ).addHeader("X-Has-More", "false")
+        )
+        vm.loadMore()
+        awaitState { it.conversations.size == 2 }
+
+        assertEquals(listOf(1, 2), vm.state.value.conversations.map { it.id })
+        assertEquals(null, vm.state.value.nextCursor)
+
+        server.takeRequest() // the initial refresh() call
+        val secondRequest = server.takeRequest()
+        assertTrue(secondRequest.path!!.contains("cursor=page2cursor"))
+    }
+
+    @Test
     fun `refresh replaces the list rather than appending to it`() {
         server.enqueue(jsonResponse(
             """[{"id": 1, "machine_id": null, "machine_label": null, "title": "First",

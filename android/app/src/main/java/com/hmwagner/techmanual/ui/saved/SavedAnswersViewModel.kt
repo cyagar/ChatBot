@@ -11,6 +11,8 @@ import kotlinx.coroutines.launch
 data class SavedAnswersUiState(
     val answers: List<SavedAnswerOut> = emptyList(),
     val loading: Boolean = true,
+    val loadingMore: Boolean = false,
+    val nextCursor: String? = null,
     val error: String? = null,
 )
 
@@ -32,12 +34,41 @@ class SavedAnswersViewModel : ViewModel() {
             try {
                 val resp = ApiClient.service.listSavedAnswers()
                 if (resp.isSuccessful) {
-                    _state.value = _state.value.copy(answers = resp.body().orEmpty(), loading = false)
+                    _state.value = _state.value.copy(
+                        answers = resp.body().orEmpty(),
+                        loading = false,
+                        nextCursor = resp.headers()["X-Next-Cursor"],
+                    )
                 } else {
                     _state.value = _state.value.copy(loading = false, error = "Couldn't load saved answers (code ${resp.code()}).")
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(loading = false, error = "Can't reach the server. Check your connection.")
+            }
+        }
+    }
+
+    // P1-11 (external review, 2026-09-21): same gap as HistoryViewModel.loadMore
+    // -- the backend has paginated GET /saved-answers since Phase 1, but
+    // nothing in Android ever requested a page past the first.
+    fun loadMore() {
+        val cursor = _state.value.nextCursor ?: return
+        if (_state.value.loadingMore) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(loadingMore = true, error = null)
+            try {
+                val resp = ApiClient.service.listSavedAnswers(cursor = cursor)
+                if (resp.isSuccessful) {
+                    _state.value = _state.value.copy(
+                        answers = _state.value.answers + resp.body().orEmpty(),
+                        loadingMore = false,
+                        nextCursor = resp.headers()["X-Next-Cursor"],
+                    )
+                } else {
+                    _state.value = _state.value.copy(loadingMore = false, error = "Couldn't load more saved answers (code ${resp.code()}).")
+                }
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(loadingMore = false, error = "Can't reach the server. Check your connection.")
             }
         }
     }

@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -18,6 +19,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -100,6 +102,17 @@ fun HistoryScreen(
                         LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             items(state.conversations, key = { it.id }) { conv ->
                                 ConversationRow(conv, onClick = { onConversationSelected(conv.id, conv.machine_label) })
+                            }
+                            if (state.nextCursor != null) {
+                                item {
+                                    Box(Modifier.fillMaxWidth().padding(12.dp)) {
+                                        if (state.loadingMore) {
+                                            CircularProgressIndicator(modifier = Modifier.padding(8.dp))
+                                        } else {
+                                            TextButton(onClick = vm::loadMore) { Text("Load more") }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

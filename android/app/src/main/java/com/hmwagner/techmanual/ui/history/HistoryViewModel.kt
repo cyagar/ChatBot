@@ -11,6 +11,8 @@ import kotlinx.coroutines.launch
 data class HistoryUiState(
     val conversations: List<ConversationOut> = emptyList(),
     val loading: Boolean = true,
+    val loadingMore: Boolean = false,
+    val nextCursor: String? = null,
     val error: String? = null,
 )
 
@@ -29,12 +31,43 @@ class HistoryViewModel : ViewModel() {
             try {
                 val resp = ApiClient.service.listConversations()
                 if (resp.isSuccessful) {
-                    _state.value = _state.value.copy(conversations = resp.body().orEmpty(), loading = false)
+                    _state.value = _state.value.copy(
+                        conversations = resp.body().orEmpty(),
+                        loading = false,
+                        nextCursor = resp.headers()["X-Next-Cursor"],
+                    )
                 } else {
                     _state.value = _state.value.copy(loading = false, error = "Couldn't load history (code ${resp.code()}).")
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(loading = false, error = "Can't reach the server. Check your connection.")
+            }
+        }
+    }
+
+    // P1-11 (external review, 2026-09-21): the backend has supported cursor
+    // pagination on GET /conversations since Phase 1, but nothing in Android
+    // ever passed a cursor -- a technician with more than one page of history
+    // (limit=20) had no way to see anything older than that. Appends onto
+    // the existing list rather than replacing it, the opposite of refresh().
+    fun loadMore() {
+        val cursor = _state.value.nextCursor ?: return
+        if (_state.value.loadingMore) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(loadingMore = true, error = null)
+            try {
+                val resp = ApiClient.service.listConversations(cursor = cursor)
+                if (resp.isSuccessful) {
+                    _state.value = _state.value.copy(
+                        conversations = _state.value.conversations + resp.body().orEmpty(),
+                        loadingMore = false,
+                        nextCursor = resp.headers()["X-Next-Cursor"],
+                    )
+                } else {
+                    _state.value = _state.value.copy(loadingMore = false, error = "Couldn't load more history (code ${resp.code()}).")
+                }
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(loadingMore = false, error = "Can't reach the server. Check your connection.")
             }
         }
     }

@@ -68,6 +68,25 @@ class SavedAnswersViewModelTest {
     """.trimIndent()
 
     @Test
+    fun `loadMore appends a second page using the cursor from the first response`() {
+        server.enqueue(jsonResponse("[${savedAnswerJson(1)}]").addHeader("X-Next-Cursor", "page2cursor"))
+        vm.refresh()
+        awaitState { !it.loading }
+        assertEquals("page2cursor", vm.state.value.nextCursor)
+
+        server.enqueue(jsonResponse("[${savedAnswerJson(2)}]"))
+        vm.loadMore()
+        awaitState { it.answers.size == 2 }
+
+        assertEquals(listOf(1, 2), vm.state.value.answers.map { it.answer.id })
+        assertEquals(null, vm.state.value.nextCursor)
+
+        server.takeRequest() // the initial refresh() call
+        val secondRequest = server.takeRequest()
+        assertTrue(secondRequest.path!!.contains("cursor=page2cursor"))
+    }
+
+    @Test
     fun `unsave optimistically removes the row before the server confirms it`() {
         server.enqueue(jsonResponse("[${savedAnswerJson(5)}]"))
         vm.refresh()

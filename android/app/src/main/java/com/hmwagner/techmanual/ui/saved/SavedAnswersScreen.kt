@@ -2,6 +2,7 @@ package com.hmwagner.techmanual.ui.saved
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,6 +20,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -98,6 +100,17 @@ fun SavedAnswersScreen(
                                     onClick = { onConversationSelected(saved.conversation_id, saved.machine_label) },
                                     onRemove = { vm.unsave(saved.answer.id) },
                                 )
+                            }
+                            if (state.nextCursor != null) {
+                                item {
+                                    Box(Modifier.fillMaxWidth().padding(12.dp)) {
+                                        if (state.loadingMore) {
+                                            CircularProgressIndicator(modifier = Modifier.padding(8.dp))
+                                        } else {
+                                            TextButton(onClick = vm::loadMore) { Text("Load more") }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
