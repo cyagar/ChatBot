@@ -29,7 +29,7 @@ def _seed_pending_document(conn) -> int:
 
 def test_technician_cannot_fetch_a_pending_documents_raw_file(test_env):
     """The raw-file, page-image, and evidence endpoints are a second path to
-    document content and must honor the same P0-6 approval boundary as
+    document content and must honor the same approval boundary as
     retrieval -- not be reachable via a guessed document id just because
     review_status hasn't caught up with a Drive listing yet."""
     with get_conn() as conn:

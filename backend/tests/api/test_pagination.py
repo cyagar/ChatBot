@@ -68,10 +68,9 @@ def test_messages_pagination_covers_every_row_once_and_default_limit_is_unaffect
 
 
 def test_saved_answers_pagination_covers_every_row_once(test_env):
-    """P1-11 (independent follow-up review, applied here 2026-09-14): save
-    is now restricted to a completed, substantive assistant answer -- an
+    """Save is restricted to a completed, substantive assistant answer -- an
     unanswerable question (no machine/chunks seeded) produces a no-answer
-    message, which is no longer a valid save target. A real chunk plus a
+    message, which is not a valid save target. A real chunk plus a
     code-token question (see app/providers/extractive.py's
     _code_token_rescue -- no embeddings are seeded here, so the vector gate
     itself would otherwise reject every answer) is seeded so all 5 questions
@@ -200,15 +199,13 @@ def test_invalid_cursor_returns_a_400_with_the_standard_error_envelope(test_env)
 
 
 def test_p2_01_a_well_formed_but_wrongly_typed_cursor_400s_instead_of_500ing(test_env):
-    """P2-01 (external review, 2026-09-21): decode_cursor used to accept any
-    scalar in any position as long as the tuple LENGTH matched -- a
-    well-formed base64/JSON cursor with a garbage timestamp or a string
-    where an integer id was expected passed that check and was handed
-    straight to PostgreSQL, which can't cast it for that comparison
-    (surfaced as an unhandled 500, not a clean 400). Reproduced directly
-    against the exact repro from the review: encoding
-    ['not-a-date', 'not-an-id'] for GET /api/conversations, whose cursor is
-    (updated_at, id)."""
+    """decode_cursor must reject a scalar of the wrong type in any position,
+    not just check the tuple LENGTH -- a well-formed base64/JSON cursor with
+    a garbage timestamp or a string where an integer id was expected must
+    not be handed straight to PostgreSQL, which can't cast it for that
+    comparison (would otherwise surface as an unhandled 500, not a clean
+    400). Encodes ['not-a-date', 'not-an-id'] for GET /api/conversations,
+    whose cursor is (updated_at, id)."""
     from app.api.pagination import encode_cursor
 
     register_test_user(client, "page-badtypes@example.com", role="technician")

@@ -43,11 +43,11 @@ def test_warning_line_becomes_warning_chunk():
 
 
 def test_p1_16_a_warnings_continuation_lines_stay_in_the_same_chunk():
-    """P1-16 (external review, 2026-09-21): _classify_line only recognizes a
-    warning's OWN marker line ("WARNING: ..."), never its continuation --
-    every line after it used to classify as plain 'text' and immediately
-    flush(), detaching the warning label from its own body/safety content
-    into a separate, unlabeled chunk one line later."""
+    """_classify_line only recognizes a warning's OWN marker line
+    ("WARNING: ..."), never its continuation -- a continuation line
+    classifying as plain 'text' and immediately flushing would detach the
+    warning label from its own body/safety content into a separate,
+    unlabeled chunk one line later."""
     text = (
         "WARNING: Disconnect power before servicing.\n"
         "Risk of electric shock if this step is skipped.\n"
@@ -127,11 +127,10 @@ def test_large_table_is_split_into_bounded_windows_with_header_repeated():
 
 
 def test_single_oversized_row_is_split_across_cells_without_losing_values():
-    """P1-13 (independent follow-up review): the old row-window arithmetic used
-    `max(1, ...)`, guaranteeing at least one row per window -- so a single row
-    bigger than the whole budget still produced one over-limit chunk whose tail
-    the embedding model would truncate away. The row must now be split across
-    cells, with exact values preserved (never truncated)."""
+    """A single row bigger than the whole chunk budget must be split across
+    cells, with exact values preserved (never truncated) -- not emitted as
+    one over-limit chunk whose tail the embedding model would truncate
+    away."""
     header = ["Code", "Meaning", "Corrective Action"]
     huge_cell_a = "A" * 1500 + " PARTNUM-11111"
     huge_cell_b = "B" * 1500 + " PARTNUM-22222"
@@ -154,10 +153,10 @@ def test_single_oversized_row_is_split_across_cells_without_losing_values():
 
 
 def test_p1_16_split_row_repeats_the_row_identifier_in_every_piece():
-    """P1-16 (external review, 2026-09-21): a long remedy/description in a
-    LATER column used to push the split so the row's own identifier (column
-    0 -- the error code, in this test) only survived in the first piece. A
-    retrieved later piece had no way to tell which code its remedy was for."""
+    """A long remedy/description in a LATER column must not push the split
+    so the row's own identifier (column 0 -- the error code, in this test)
+    only survives in the first piece -- a retrieved later piece would have
+    no way to tell which code its remedy was for."""
     header = ["Code", "Meaning", "Corrective Action"]
     huge_remedy = "Check the following in order: " + ("step detail " * 200)
     rows = [header, ["E77", "Heater relay failure", huge_remedy]]

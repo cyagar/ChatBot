@@ -1,7 +1,6 @@
-"""P2-07 (external review, 2026-09-21): "/healthz ... cannot prove
-readiness for serving a citation." GET /readyz checks the concrete
-dependencies a real answer needs -- database, object storage, corpus
-freshness -- instead of always reporting healthy."""
+"""/healthz cannot prove readiness for serving a citation. GET /readyz
+checks the concrete dependencies a real answer needs -- database, object
+storage, corpus freshness -- instead of always reporting healthy."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -55,10 +54,9 @@ def test_readyz_returns_503_when_storage_is_unreadable(test_env, monkeypatch):
 
 
 def test_readyz_response_never_includes_filenames_or_manual_content(test_env):
-    """The review's own constraint: "without exposing proprietary filenames
-    publicly." Public, unauthenticated endpoint -- the response body must
-    stay limited to booleans/status strings, never anything from the
-    documents/chunks tables."""
+    """Public, unauthenticated endpoint -- the response body must stay
+    limited to booleans/status strings, never a filename or anything else
+    from the documents/chunks tables."""
     resp = client.get("/readyz")
     body = resp.json()
     assert set(body.keys()) == {"ok", "database", "storage", "corpus"}

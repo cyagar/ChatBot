@@ -1,10 +1,6 @@
-"""P1-10 (independent follow-up review): "reindex_metadata.py STILL DOES NOT
-MATCH ITS DOCUMENTATION... update each non-overridden metadata field
-transactionally, preserve per-field human overrides, clear resolved stale
-notes, and test every promised field." The script's docstring always
-promised manufacturer/doc_type/title/revision/doc_number/machine_links, but
-the code only ever touched machine_links -- these tests cover the fix,
-field by field, plus the two things a naive per-document (not per-field)
+"""reindex_metadata.py's docstring promises manufacturer/doc_type/title/
+revision/doc_number/machine_links all get updated -- these tests cover
+each field, plus the two things a naive per-document (not per-field)
 override check or a naive notes-append would get wrong.
 
 extract() and extract_metadata() are monkeypatched per test: the interesting
@@ -366,15 +362,13 @@ def test_extraction_failure_is_recorded_and_does_not_abort_the_run(test_env, mon
 
 
 def test_p1_10_extraction_returning_failed_status_does_not_overwrite_good_metadata(test_env, monkeypatch):
-    """P1-10 (external review, 2026-09-21): extract() returning NORMALLY
-    with status='failed'/'unsupported' (no exception -- a corrupt or
-    now-unreadable stored file, an extractor regression) used to fall
-    straight through to extract_metadata() on that near-empty
-    ExtractedDocument. The resulting near-empty metadata then looked like a
-    genuine change from the document's real, good existing values and got
-    written over them. Only a raised exception was ever treated as
-    "not safely reindexable" -- reproduced before the fix: this exact
-    scenario reported report.changed with title overwritten to None."""
+    """extract() returning NORMALLY with status='failed'/'unsupported' (no
+    exception -- a corrupt or now-unreadable stored file, an extractor
+    regression) must be treated as "not safely reindexable" the same as a
+    raised exception, not fall through to extract_metadata() on a
+    near-empty ExtractedDocument -- that near-empty metadata would look
+    like a genuine change from the document's real, good existing values
+    and get written over them."""
     with get_conn() as conn:
         from app.config import get_settings
         storage_dir = get_settings().local_storage_dir_resolved
@@ -404,12 +398,12 @@ def test_p1_10_extraction_returning_failed_status_does_not_overwrite_good_metada
 
 
 def test_p1_10_machine_links_distinguish_manufacturer_not_just_model_name(test_env, monkeypatch):
-    """P1-10: old links were identified by model_name ALONE, ignoring
-    manufacturer -- two different manufacturers sharing a model name (a
+    """Links must be identified by (manufacturer, model_name) together, not
+    model_name ALONE -- two different manufacturers sharing a model name (a
     real, expected catalog collision, e.g. two brands both selling an
-    "Axiom") compared as identical, so a genuinely different machine link
-    the new extraction proposes was silently never added whenever an
-    unrelated same-named model happened to already be linked."""
+    "Axiom") must not compare as identical, or a genuinely different
+    machine link the new extraction proposes would silently never get added
+    whenever an unrelated same-named model happened to already be linked."""
     with get_conn() as conn:
         from app.config import get_settings
         storage_dir = get_settings().local_storage_dir_resolved
@@ -440,14 +434,14 @@ def test_p1_10_machine_links_distinguish_manufacturer_not_just_model_name(test_e
 
 
 def test_p1_10_an_approved_link_below_confidence_1_survives_a_reindex_without_an_override(test_env, monkeypatch):
-    """P1-10: EVERY confidence<1.0 row used to be deleted on any machine_links
-    change, including an admin-approved or -rejected link --
+    """A machine_links change must not delete every confidence<1.0 row,
+    including an admin-approved or -rejected link --
     review_document_machine_link (routes_admin.py) only ever updates
     review_status, never confidence, so an approved link (the normal,
     common case -- confidence is whatever the auto-detector originally
     scored it) is routinely still <1.0 with no metadata_overrides row at
     all (overrides only come from the separate PATCH metadata-correction
-    endpoint). A reindex could silently take an approved manual out of a
+    endpoint). A reindex must not silently take an approved manual out of a
     machine's retrieval and replace it with a fresh, unreviewed pending
     proposal. Only a still-pending link may be added or removed; an
     approved/rejected link is a human decision and survives regardless of

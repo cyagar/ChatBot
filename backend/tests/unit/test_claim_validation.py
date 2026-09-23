@@ -1,10 +1,11 @@
-"""P0-7 (independent follow-up review): parse_and_validate previously checked
-only that cited excerpt *numbers* existed -- ID validation, not evidence
-validation. A model could cite a real excerpt while inventing the number or
-warning text it attributed to that excerpt. These tests reproduce the review's
-adversarial diagnostic (fabricated part, fabricated voltage, invented safety
-warning, invented conflict) directly against parse_and_validate, plus one
-positive case proving a genuinely-supported answer still passes.
+"""parse_and_validate must check that cited excerpt *numbers* exist AND that
+the material content (number, identifier, warning text) attributed to each
+citation is actually present in it -- ID validation alone would let a model
+cite a real excerpt while inventing the number or warning text it attributed
+to that excerpt. These tests exercise that adversarial surface (fabricated
+part, fabricated voltage, invented safety warning, invented conflict)
+directly against parse_and_validate, plus one positive case proving a
+genuinely-supported answer still passes.
 
 These exercise parse_and_validate in isolation -- they do not call the real
 Anthropic API (no key is configured in this environment; AI_PROVIDER stays
@@ -222,12 +223,11 @@ def test_no_answer_path_does_not_require_claims():
 
 
 def test_no_answer_explanation_with_fabricated_technical_content_is_rejected():
-    """Independent follow-up review 2026-08-24 P0-5: is_no_answer used to
-    skip every claim/warning check, so a fabricated, specific instruction
-    could reach the technician disguised as an "I couldn't find this"
-    message. Reproduces the review's own example: no cited excerpt backs
-    "600V" at all, since no_answer_explanation has no citation mechanism --
-    a genuine non-answer has no reason to state a voltage."""
+    """is_no_answer must not skip every claim/warning check, or a fabricated,
+    specific instruction could reach the technician disguised as an "I
+    couldn't find this" message. No cited excerpt backs "600V" at all, since
+    no_answer_explanation has no citation mechanism -- a genuine non-answer
+    has no reason to state a voltage."""
     passages = [_passage(1, 1, "This manual does not cover high-voltage interlock procedures.")]
     raw = json.dumps({
         "is_no_answer": True,
@@ -255,15 +255,12 @@ def test_no_answer_explanation_without_technical_content_still_passes():
 
 
 def test_no_answer_explanation_naming_the_machine_is_not_rejected():
-    """Found live 2026-08-25: a technician on the "Ultra-1/Ultra-2" got
-    UNVERIFIED_ANSWER for several honestly-unanswerable questions in a row.
-    The model's real explanation was fine each time -- it just naturally
-    named the machine it was told about, and that name has two digits ("1",
-    "2") scattered in it, which _material_tokens flagged the same as it
-    would a fabricated part number. The machine name is prompt-given
-    context (see AnthropicProvider.generate's "Selected machine:" line),
-    not something the model could be fabricating, so parse_and_validate now
-    takes it as a parameter and exempts its own tokens from this check."""
+    """A machine name like "Ultra-1/Ultra-2" has digits scattered in it
+    ("1", "2"), which _material_tokens would otherwise flag the same as a
+    fabricated part number. The machine name is prompt-given context (see
+    AnthropicProvider.generate's "Selected machine:" line), not something
+    the model could be fabricating, so parse_and_validate takes it as a
+    parameter and exempts its own tokens from this check."""
     passages = [_passage(1, 1, "This manual covers routine maintenance only.")]
     raw = json.dumps({
         "is_no_answer": True,
@@ -278,12 +275,10 @@ def test_no_answer_explanation_naming_the_machine_is_not_rejected():
 
 
 def test_claim_naming_the_machine_is_not_rejected():
-    """Same bug, second location: a *claim* (not just a no-answer
+    """Same exemption, second location: a *claim* (not just a no-answer
     explanation) naturally referencing the machine by name goes through
     _claim_supported, a separate function with its own material-token
-    check, and hit the identical false positive live 2026-08-25 -- a
-    "what can I ask you" summary claim said "...for the Ultra-1/Ultra-2"
-    and got the whole six-claim answer rejected over that one phrase."""
+    check, and must not be flagged as fabricating the machine's own name."""
     passages = [_passage(1, 1, "Replace hopper drum seal every 12 months.")]
     raw = json.dumps({
         "is_no_answer": False,
@@ -302,28 +297,24 @@ def test_claim_naming_the_machine_is_not_rejected():
     "excerpt, claim, expect_supported",
     [
         # 5 vs 50 psi -- a single-digit claim not present in the excerpt at
-        # all used to have NO material token to check against (P0-01: the
-        # old threshold required at least 2 digits before a bare number
-        # counted as material).
+        # all still needs a material token to check against.
         ("Set the regulator to 50 PSI.", "Set the regulator to 5 PSI.", False),
         ("Set the regulator to 50 PSI.", "Set the regulator to 50 PSI.", True),
-        # 24 vs 240 V -- "24" is a genuine substring of "240", which the old
-        # plain containment check accepted.
+        # 24 vs 240 V -- "24" is a genuine substring of "240", so a plain
+        # containment check alone would wrongly accept it.
         ("The transformer outputs 240 V.", "The transformer outputs 24V.", False),
         ("The transformer outputs 240 V.", "The transformer outputs 240V.", True),
-        # amperage vs voltage -- the old check discarded the unit suffix and
-        # verified only the numeral, so swapping the unit on a real numeral
-        # passed.
+        # amperage vs voltage -- the unit suffix matters, not just the
+        # numeral, so swapping the unit on a real numeral must be rejected.
         ("The heating element operates at 120V and draws 8.5A.", "The heating element draws 120A.", False),
         ("The heating element operates at 120V and draws 8.5A.", "The heating element draws 8.5A.", True),
         ("The heating element operates at 120V and draws 8.5A.", "The heating element operates at 120PSI.", False),
-        # negative numbers -- the old tokenizer never captured a leading "-"
-        # at all, so a fabricated negative passed against a positive
-        # excerpt.
+        # negative numbers -- a leading "-" must be captured, so a
+        # fabricated negative is rejected against a positive excerpt.
         ("The sensor reads 240 V nominal.", "The sensor reads -240 V nominal.", False),
         ("The minimum storage temperature is -40F.", "The minimum storage temperature is -40F.", True),
         # unsupported parts -- a prefix of the real part number is a genuine
-        # substring, which the old plain "in" check accepted.
+        # substring, so a plain "in" check alone would wrongly accept it.
         (
             "Replace the inlet fitting, part number 81-118-31, during service.",
             "Replace the inlet fitting, part number 81-118-3.",
@@ -349,16 +340,16 @@ def test_claim_naming_the_machine_is_not_rejected():
     ],
 )
 def test_p0_01_numeric_claim_adversarial_table(excerpt, claim, expect_supported):
-    """P0-01 (external review, 2026-09-21): the number/identifier check used
-    to normalize a unit-suffixed token down to its bare numeral (discarding
-    the unit) and check substring presence anywhere in the cited passage --
-    a single digit had no material token at all, "24" is a substring of
-    "240", a unit mismatch was silently ignored, and a leading sign was
-    stripped before the token was even captured. Named adversarial cases
-    from the review, run as one table with a positive control alongside
-    each so the stricter checks are proven to still accept a genuinely
-    -supported claim, not just reject everything (a check that rejects
-    every case in this table would pass the negative rows by accident)."""
+    """The number/identifier check must not normalize a unit-suffixed token
+    down to its bare numeral (discarding the unit) and check substring
+    presence anywhere in the cited passage -- that would miss a single-digit
+    claim with no material token at all, accept "24" as a substring of
+    "240", silently ignore a unit mismatch, and drop a leading sign before
+    the token is even captured. Run as one table with a positive control
+    alongside each adversarial case so the stricter checks are proven to
+    still accept a genuinely-supported claim, not just reject everything (a
+    check that rejects every case in this table would pass the negative rows
+    by accident)."""
     passages = [_passage(1, 1, excerpt)]
     raw = json.dumps({
         "is_no_answer": False,
@@ -376,8 +367,8 @@ def test_p0_01_numeric_claim_adversarial_table(excerpt, claim, expect_supported)
     "excerpt, warning, expect_supported",
     [
         # negated instructions -- trimming the negation word off the front
-        # of a real warning leaves a genuine, contiguous substring of it,
-        # which the old plain containment check accepted.
+        # of a real warning leaves a genuine, contiguous substring of it, so
+        # a plain containment check alone would wrongly accept it.
         ("Do not operate with the cover removed.", "Operate with the cover removed.", False),
         ("Do not operate with the cover removed.", "Do not operate with the cover removed.", True),
         ("WARNING: Never bypass the interlock switch.", "Bypass the interlock switch.", False),
@@ -385,8 +376,8 @@ def test_p0_01_numeric_claim_adversarial_table(excerpt, claim, expect_supported)
     ],
 )
 def test_p0_01_warning_negation_adversarial_table(excerpt, warning, expect_supported):
-    """P0-01: a warning that's a proper substring of its cited excerpt used
-    to pass unconditionally -- trimming a leading negation word off a real
+    """A warning that's merely a proper substring of its cited excerpt must
+    not pass unconditionally -- trimming a leading negation word off a real
     warning produces exactly that: a genuine substring with the opposite
     meaning. The claim alongside each warning here deliberately has no
     material token, so only the warning check is exercised."""

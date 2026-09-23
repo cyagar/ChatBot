@@ -31,7 +31,7 @@ def _seed_two_machines_with_similar_language(conn):
     )
 
     # review_status='approved' explicitly: these fixtures simulate an
-    # already-published, reviewed corpus, not the P0-6 review-queue workflow
+    # already-published, reviewed corpus, not the review-queue workflow
     # itself (that's covered separately in test_review_status_gates_retrieval).
     conn.execute(
         "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
@@ -69,17 +69,17 @@ def _embed_seeded_chunks():
             )
 
 
-# --- P1-5: a no-document query must never load the embedding model -------
+# --- A no-document query must never load the embedding model -------------
 # Deliberately NOT @pytest.mark.slow: the whole point is proving embed_query
 # is never called, so these must never load the real model either.
 
 def test_vector_search_never_calls_embed_query_when_no_eligible_chunks(test_env, monkeypatch):
-    """Independent follow-up review P1-5: 'query eligible rows first and
-    return [] before embed_query() when none exist.' An empty corpus (or one
-    with nothing for the given machine) must resolve without ever touching
-    the embedding model -- loading it just to discover there's nothing to
-    compare against wastes time and makes an otherwise-instant 'nothing
-    here' answer depend on model/network availability for no reason."""
+    """Eligible rows are queried first, returning [] before embed_query()
+    when none exist. An empty corpus (or one with nothing for the given
+    machine) must resolve without ever touching the embedding model --
+    loading it just to discover there's nothing to compare against wastes
+    time and makes an otherwise-instant 'nothing here' answer depend on
+    model/network availability for no reason."""
     from app.retrieval import search as search_module
 
     def exploding_embed_query(text):
@@ -137,11 +137,10 @@ def test_vector_search_calls_embed_query_when_eligible_chunks_exist(test_env, mo
 
 
 def test_p1_15_vector_search_excludes_a_chunk_embedded_under_a_different_model_fingerprint(test_env, monkeypatch):
-    """The actual bug: embeddings.model_name used to record only the model
-    name, not the revision -- a stale row (from before a model/revision
-    change) looked eligible and got compared against a fresh query vector
-    from a DIFFERENT vector space, producing meaningless similarity scores.
-    vector_search must now exclude it -- proven here by making it the ONLY
+    """A chunk whose only embedding predates the currently configured
+    model/revision must be excluded from vector_search -- comparing it
+    against a fresh query vector from a DIFFERENT vector space would produce
+    meaningless similarity scores. Proven here by making it the ONLY
     embedding for the only eligible chunk, so an unfiltered query would
     return it and a correctly filtered one returns []."""
     import numpy as np
@@ -173,12 +172,10 @@ def test_p1_15_vector_search_excludes_a_chunk_embedded_under_a_different_model_f
 
 
 def test_vector_search_returns_empty_list_without_raising_when_embedding_model_fails(test_env, monkeypatch):
-    """Advisor-caught gap in the first pass at P1-5: the review's ask was an
-    honest not_found response when the model is unavailable, but throwing away
-    a whole hybrid_search() call (including a perfectly working lexical result)
-    over the *vector* half failing was stricter than necessary -- and the
-    P1-2 fix already established the precedent of degrading to a labeled
-    lexical-only mode rather than refusing outright. vector_search() must
+    """Throwing away a whole hybrid_search() call (including a perfectly
+    working lexical result) over the *vector* half failing would be
+    stricter than necessary -- degrading to a labeled lexical-only mode is
+    the right response instead of refusing outright. vector_search() must
     swallow an embed_query() failure and return [] so hybrid_search() (below)
     can still return real, citable lexical results."""
     import numpy as np
@@ -280,9 +277,8 @@ def test_unfiltered_query_can_return_both_machines(test_env):
 
 @pytest.mark.slow
 def test_review_status_gates_retrieval(test_env):
-    """Independent follow-up review P0-6: 'Confidence is stored but not
-    enforced.' Same document, linked to two machines -- one link approved,
-    one still pending. Retrieval must return results for the approved link
+    """Same document, linked to two machines -- one link approved, one
+    still pending. Retrieval must return results for the approved link
     and nothing for the pending one, proving both documents.review_status AND
     document_machines.review_status are enforced, not just one of them."""
     with get_conn() as conn:
@@ -387,11 +383,10 @@ def test_deactivated_document_excluded_from_retrieval(test_env):
 
 
 def test_superseded_document_is_excluded_from_retrieval_not_merely_penalized(test_env):
-    """P1-11 (independent follow-up review): is_current_revision previously
-    only applied a -0.20 rerank boost, so a withdrawn revision could still
-    surface and be cited. A superseded manual isn't a weaker answer, it's a
-    wrong one -- an obsolete torque spec or wiring diagram is exactly the harm
-    this system exists to prevent."""
+    """A superseded revision must be excluded from retrieval, not merely
+    rank-penalized -- a superseded manual isn't a weaker answer, it's a
+    wrong one, and an obsolete torque spec or wiring diagram is exactly the
+    harm this system exists to prevent."""
     with get_conn() as conn:
         _seed_two_machines_with_similar_language(conn)
         conn.execute("UPDATE documents SET is_current_revision = false WHERE id = 1")
@@ -407,7 +402,7 @@ def test_superseded_document_is_excluded_from_retrieval_not_merely_penalized(tes
 
 
 def test_machine_picker_excludes_machines_whose_only_manual_is_superseded(test_env):
-    """The picker's eligibility rules must match retrieval's exactly (P1-6),
+    """The picker's eligibility rules must match retrieval's exactly,
     including the current-revision rule -- otherwise a technician selects a
     machine that then dead-ends into 'no manuals'."""
     from fastapi.testclient import TestClient

@@ -18,11 +18,10 @@ _ANSWERABLE_QUESTION = "what does error E9 mean"
 
 
 def _seed_answerable_machine():
-    """P1-11 (independent follow-up review, applied 2026-09-14): feedback/save
-    are now restricted to a completed, substantive assistant answer -- an
-    unanswerable question (no machine/chunks seeded) produces a no-answer or
-    clarifying message, which is no longer a valid feedback/save target. This
-    seeds a real chunk plus relies on a code-token question (see
+    """Feedback/save are restricted to a completed, substantive assistant
+    answer -- an unanswerable question (no machine/chunks seeded) produces a
+    no-answer or clarifying message, which is not a valid feedback/save
+    target. This seeds a real chunk plus relies on a code-token question (see
     app/providers/extractive.py's _code_token_rescue -- no embeddings are
     seeded here, so the vector-similarity gate alone would otherwise reject
     every answer) so a conversation on machine_id=1 gets a genuine, eligible
@@ -50,10 +49,9 @@ def _seed_answerable_machine():
 
 
 def test_registration_without_invite_is_rejected(test_env):
-    """Independent follow-up review P0-5: public self-registration used to
-    always succeed (the first registrant even became administrator). Now a
-    request with no invite_token at all must fail validation, and critically
-    must not create a user row -- a 4xx alone doesn't prove that."""
+    """Public self-registration requires an invite -- a request with no
+    invite_token at all must fail validation, and critically must not
+    create a user row -- a 4xx alone doesn't prove that."""
     resp = client.post("/api/auth/register", json={"email": "uninvited@example.com", "password": "password123"})
     assert resp.status_code == 422
 
@@ -106,12 +104,10 @@ def test_invite_is_bound_to_its_email_and_single_use(test_env):
 
 
 def test_p1_20_registering_with_mixed_case_email_can_log_in_with_any_casing(test_env):
-    """P1-20 (external review, 2026-09-21): users.email is TEXT with
-    case-sensitive uniqueness, and registration stored whatever case was
-    typed -- a technician who registered as "Tech.User@Example.com" could
-    not log in with "tech.user@example.com" (or any other casing), since
-    login's SELECT ... WHERE email = %s compared exactly. Fixed by
-    normalizing every write/read through normalize_email()."""
+    """A technician who registers as "Tech.User@Example.com" must be able to
+    log in with "tech.user@example.com" or any other casing -- every
+    write/read normalizes through normalize_email() rather than comparing
+    whatever case was typed."""
     register_test_user(client, "bootstrap-admin@example.com", role="administrator")
     invite = client.post(
         "/api/admin/invitations", json={"email": "Mixed.Case@Example.com", "role": "technician"}
@@ -236,8 +232,7 @@ def test_disabled_user_cannot_log_in_or_use_an_existing_session(test_env):
 
     # A second client holds the disabled-to-be user's own session cookie,
     # captured before the admin disables them, so we can prove an ALREADY
-    # ISSUED token stops working -- not just that a fresh login is blocked
-    # (independent follow-up review P0-5: "session revocation").
+    # ISSUED token stops working -- not just that a fresh login is blocked.
     tech_client = TestClient(app)
     tech_client.cookies.set("tma_session", client.cookies.get("tma_session"))
     assert tech_client.get("/api/auth/me").status_code == 200
@@ -337,12 +332,11 @@ def test_cannot_access_another_users_conversation(test_env):
 
 
 def test_p1_13_get_conversation_reports_the_current_machine_label(test_env):
-    """P1-13 (external review, 2026-09-21): the Android client had no way to
-    re-fetch a single conversation's authoritative state -- ChatScreen's
-    toolbar used the label passed through navigation instead, which never
-    updated when the server resolved a machine for the conversation. This
-    pins the new GET /api/conversations/{id} contract: starts with no
-    machine, then reports the real label once one is set."""
+    """The Android client must be able to re-fetch a single conversation's
+    authoritative state -- ChatScreen's toolbar needs the server-resolved
+    machine label, not just whatever was passed through navigation. Pins
+    the GET /api/conversations/{id} contract: starts with no machine, then
+    reports the real label once one is set."""
     _register("labeltech@example.com")
     with get_conn() as conn:
         conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
@@ -391,16 +385,14 @@ def test_feedback_rejects_invalid_rating(test_env):
 
 
 def test_concurrent_feedback_submission_does_not_crash_or_corrupt(test_env):
-    """P1-6 (2026-08-24 independent follow-up review, "concurrent chat,
-    feedback, ... tests"): unlike retry/machine-confirmation/invitation,
-    feedback has no idempotency mechanism and none was added here -- there
-    is no expensive or duplicative side effect a double-tap could trigger
-    (no provider call, no second conversation turn), so multiple feedback
-    rows per message are allowed by design (a technician can submit
-    "helpful" and later reconsider "incorrect"; the schema has no
-    UNIQUE(message_id, user_id)). This is a characterization test proving
-    concurrent submission is merely safe -- no crash, no lost/merged row --
-    not a test of deduplication, which was never the ask here."""
+    """Unlike retry/machine-confirmation/invitation, feedback has no
+    idempotency mechanism -- there is no expensive or duplicative side
+    effect a double-tap could trigger (no provider call, no second
+    conversation turn), so multiple feedback rows per message are allowed
+    by design (a technician can submit "helpful" and later reconsider
+    "incorrect"; the schema has no UNIQUE(message_id, user_id)). This is a
+    characterization test proving concurrent submission is merely safe --
+    no crash, no lost/merged row -- not a test of deduplication."""
     _seed_answerable_machine()
     _register("feedbackracer@example.com")
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()
@@ -428,12 +420,12 @@ def test_concurrent_feedback_submission_does_not_crash_or_corrupt(test_env):
 
 
 def test_get_messages_reports_the_current_users_feedback_and_saved_state(test_env):
-    """Found via live tablet testing (2026-08-25): a client that reloads a
-    conversation (app restart, rotation recreating a ViewModel, navigating
-    away and back) had no way to know a message was already rated/saved, so
-    the buttons reset to unmarked and a re-tap silently duplicated the row.
-    MessageOut.feedback_rating/is_saved is how a client rehydrates that
-    state instead of re-deriving it -- this pins the contract."""
+    """A client that reloads a conversation (app restart, rotation
+    recreating a ViewModel, navigating away and back) must be able to know
+    a message was already rated/saved, or the buttons reset to unmarked and
+    a re-tap silently duplicates the row. MessageOut.feedback_rating/
+    is_saved is how a client rehydrates that state instead of re-deriving
+    it -- this pins the contract."""
     _seed_answerable_machine()
     _register("tech10@example.com")
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()
@@ -490,11 +482,10 @@ def test_save_answer_twice_is_idempotent(test_env):
 
 
 def test_p1_21_unsave_removes_a_saved_answer(test_env):
-    """External review P1-21 (2026-09-21): the saved-answers list had no way
-    to remove an entry. save_answer's own idempotent ON CONFLICT DO NOTHING
-    is the model here -- unsave_answer is symmetric: a plain DELETE, no
-    existence check, so the end state ("not saved") is the same whether or
-    not it was saved to begin with."""
+    """save_answer's own idempotent ON CONFLICT DO NOTHING is the model here
+    -- unsave_answer is symmetric: a plain DELETE, no existence check, so
+    the end state ("not saved") is the same whether or not it was saved to
+    begin with."""
     _seed_answerable_machine()
     _register("tech21a@example.com")
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()
@@ -678,7 +669,7 @@ def test_save_and_list_saved_answer_roundtrip(test_env):
     saved = list_resp.json()
     entry = next((s for s in saved if s["answer"]["id"] == msg["id"]), None)
     assert entry is not None
-    # P1-3: a saved answer must carry enough context to resume from -- which
+    # A saved answer must carry enough context to resume from -- which
     # conversation it belongs to and the question that produced it, not just
     # the bare answer text.
     assert entry["conversation_id"] == conv["id"]
@@ -686,13 +677,13 @@ def test_save_and_list_saved_answer_roundtrip(test_env):
 
 
 def test_p2_02_get_messages_hydration_uses_a_bounded_number_of_queries(test_env, monkeypatch):
-    """P2-02 (external review, 2026-09-21): _hydrate_message used to run 3
-    queries PER message (citations, feedback, saved-status) -- a page of N
-    messages was ~3N+1 round trips to the Neon network. Seeds enough
-    messages that an O(N) implementation would clearly blow past a small
-    constant bound, and counts real psycopg Connection.execute calls (only
-    around the GET itself, not the seeding above it) to prove hydration no
-    longer scales with message count."""
+    """Message hydration must be O(1) round trips for a page, not O(N)
+    (citations, feedback, and saved-status per message would otherwise be
+    ~3N+1 round trips to the Neon network for a page of N messages). Seeds
+    enough messages that an O(N) implementation would clearly blow past a
+    small constant bound, and counts real psycopg Connection.execute calls
+    (only around the GET itself, not the seeding above it) to prove
+    hydration doesn't scale with message count."""
     import psycopg
 
     _seed_answerable_machine()
@@ -721,16 +712,15 @@ def test_p2_02_get_messages_hydration_uses_a_bounded_number_of_queries(test_env,
 
     # Bounded: _require_own_conversation, the message list SELECT, and
     # exactly 3 hydration queries (citations/feedback/saved) for the WHOLE
-    # page -- nowhere close to the old per-message cost, which would have
-    # needed roughly 3 * (num_turns * 2) additional queries here.
+    # page -- a per-message cost would instead scale with 3 * (num_turns * 2)
+    # additional queries here.
     assert call_count["n"] <= 8, f"expected a small constant number of queries, got {call_count['n']}"
 
 
 def test_p2_02_saved_answers_batch_question_lookup_pairs_each_answer_with_its_own_question(test_env):
-    """Regression guard for the batched LATERAL-join question lookup added
-    alongside the P2-02 fix: two DIFFERENT questions saved from the SAME
-    conversation must each keep their OWN nearest-prior-question, not get
-    cross-contaminated by batching (e.g. both ending up with the same
+    """The batched LATERAL-join question lookup must not cross-contaminate:
+    two DIFFERENT questions saved from the SAME conversation must each keep
+    their OWN nearest-prior-question (e.g. not both ending up with the same
     question, or swapped)."""
     _seed_answerable_machine()
     _register("tech-p202b@example.com")
@@ -750,7 +740,7 @@ def test_p2_02_saved_answers_batch_question_lookup_pairs_each_answer_with_its_ow
 
 
 def test_list_conversations_derives_a_title_from_the_first_user_message(test_env):
-    """P1-3: conversations.title is never written anywhere in the codebase --
+    """conversations.title is never written anywhere in the codebase --
     without a derived fallback, every row in a history list would render
     blank."""
     _register("tech8@example.com")
@@ -764,11 +754,11 @@ def test_list_conversations_derives_a_title_from_the_first_user_message(test_env
 
 
 def test_list_conversations_omits_conversations_with_no_questions_asked(test_env):
-    """Reported live on the tablet (2026-08-25): tapping a machine (or "Not
-    sure which machine?") creates the conversation row immediately, before
-    any question is typed -- backing out without asking anything left a
-    blank, useless entry in History. list_conversations must only surface
-    conversations where a question was actually sent."""
+    """Tapping a machine (or "Not sure which machine?") creates the
+    conversation row immediately, before any question is typed -- backing
+    out without asking anything must not leave a blank, useless entry in
+    History. list_conversations must only surface conversations where a
+    question was actually sent."""
     _register("tech8b@example.com")
     asked = client.post("/api/conversations", json={"machine_id": None}).json()
     abandoned = client.post("/api/conversations", json={"machine_id": None}).json()

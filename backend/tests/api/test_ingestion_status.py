@@ -1,6 +1,6 @@
-"""P1-4 (independent follow-up review): "visible last-success
-timestamp/source snapshot" and a stale-corpus alert against the configured
-operational SLA -- GET /api/admin/ingestion/status."""
+"""GET /api/admin/ingestion/status: a visible last-success
+timestamp/source snapshot and a stale-corpus alert against the configured
+operational SLA."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -132,10 +132,10 @@ def test_p1_15_status_reports_chunks_needing_reembedding(test_env):
 
 
 def test_last_success_status_distinguishes_clean_from_error_runs(test_env):
-    """Independent follow-up review 2026-08-24 P0-6: staleness correctly
-    treats completed_with_errors as a success (the test above), but the
-    response previously gave no way to tell a clean success from one with
-    individual file failures without a second call to /ingestion/runs."""
+    """Staleness correctly treats completed_with_errors as a success (the
+    test above), but the response must still let a caller tell a clean
+    success apart from one with individual file failures without a second
+    call to /ingestion/runs."""
     with get_conn() as conn:
         _insert_run(
             conn, status="completed_with_errors", trigger="scheduled",
@@ -147,17 +147,15 @@ def test_last_success_status_distinguishes_clean_from_error_runs(test_env):
     assert resp.json()["last_success_status"] == "completed_with_errors"
 
 
-# --- Run row persisted before the 202 (P0-6) -------------------------------
+# --- Run row persisted before the 202 ---------------------------------------
 
 def test_reindex_run_row_exists_synchronously_before_the_background_task_runs(test_env, monkeypatch):
-    """Independent follow-up review 2026-08-24 P0-6: the ingestion_runs row
-    used to be created inside ingest_all(), which only executes once the
-    BackgroundTask actually runs -- after the 202 response was already sent.
-    If the process restarted in that window, an admin told a run started
-    would see no evidence one ever was. The row must now exist by the time
-    trigger_reindex() calls background_tasks.add_task(), which this proves
-    by stubbing ingest_all() to record what run_id it was handed instead of
-    doing any real ingestion work."""
+    """The ingestion_runs row must exist by the time trigger_reindex() calls
+    background_tasks.add_task(), not only once ingest_all() itself runs
+    (which happens after the 202 response is already sent) -- otherwise a
+    process restart in that window would leave an admin told a run started
+    with no evidence one ever was. Proven by stubbing ingest_all() to record
+    what run_id it was handed instead of doing any real ingestion work."""
     calls = []
 
     def fake_ingest_all(run_id=None, **kwargs):
@@ -207,12 +205,12 @@ def test_ingest_all_marks_the_passed_in_run_failed_if_it_cannot_get_the_lock(tes
 
 
 def test_ingest_all_marks_the_run_failed_if_another_process_holds_the_db_advisory_lock(test_env):
-    """P1-14 (external review, 2026-09-21): _INGEST_LOCK is a threading.Lock,
-    process-local -- it does nothing against a second worker process (or two
-    app instances briefly overlapping during a rolling deploy) starting a
-    concurrent run. Simulates "another process" by holding the same
-    Postgres advisory lock on a separate connection, bypassing this
-    process's own (necessarily free) threading.Lock entirely."""
+    """_INGEST_LOCK is a threading.Lock, process-local -- it does nothing
+    against a second worker process (or two app instances briefly
+    overlapping during a rolling deploy) starting a concurrent run.
+    Simulates "another process" by holding the same Postgres advisory lock
+    on a separate connection, bypassing this process's own (necessarily
+    free) threading.Lock entirely."""
     import psycopg
 
     from app.config import get_settings

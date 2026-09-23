@@ -13,7 +13,7 @@ def _register_admin(email="admin@example.com"):
     # admin_email=email makes this specific address the bootstrap administrator
     # (created directly, no invite needed) rather than a second admin invited
     # by some other bootstrap identity -- keeps a single, predictable admin
-    # per test the way the old first-HTTP-registrant behavior used to.
+    # per test.
     return register_test_user(client, email, role="administrator", admin_email=email)
 
 
@@ -28,8 +28,8 @@ def _seed_document(conn) -> int:
     )
     doc_id = cur.fetchone()["id"]
     conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (%s, 1)", (doc_id,))
-    # P0-02: review_document() now requires nonempty chunks before a document
-    # can be approved -- every real 'indexed' document has at least one.
+    # review_document() requires nonempty chunks before a document can be
+    # approved -- every real 'indexed' document has at least one.
     conn.execute(
         "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
         "VALUES (%s, 'text', 'seeded chunk content', 21, 0)",
@@ -62,9 +62,9 @@ def test_document_at_current_pipeline_version_does_not_need_reprocessing(test_en
 
 
 def test_document_at_a_stale_pipeline_version_needs_reprocessing(test_env):
-    """Independent follow-up review 2026-08-24 P0-7 (bounded slice): a
-    document's pipeline version is now visible via the same listing an admin
-    already uses to review documents, not buried only in ingestion_events."""
+    """A document's pipeline version must be visible via the same listing an
+    admin already uses to review documents, not buried only in
+    ingestion_events."""
     with get_conn() as conn:
         doc_id = _seed_document(conn)
         conn.execute("UPDATE documents SET chunking_version = 0 WHERE id = %s", (doc_id,))
@@ -150,7 +150,7 @@ def test_empty_duplicates_list_is_empty_not_error(test_env):
     assert resp.json() == []
 
 
-# --- Review queue (P0-6) ---
+# --- Review queue ---
 
 def test_new_document_appears_in_review_queue_pending(test_env):
     with get_conn() as conn:
@@ -171,7 +171,7 @@ def test_approving_document_and_link_removes_it_from_the_queue(test_env):
         doc_id = _seed_document(conn)
     _register_admin()
 
-    # P0-02: a document can only be approved once it has an approved machine
+    # A document can only be approved once it has an approved machine
     # link -- link review must happen first.
     resp = client.post(f"/api/admin/documents/{doc_id}/machines/1/review", json={"decision": "approved"})
     assert resp.status_code == 200
@@ -230,18 +230,15 @@ def test_metadata_correction_approves_the_links_it_sets(test_env):
     assert link["reviewed_by"] is not None
 
 
-# --- Replacement cutover (independent follow-up review P0-2, 2026-08-24
-# follow-up): approving a replacement is the moment it retires whatever it's
-# superseding, not ingestion. ---
+# --- Replacement cutover: approving a replacement is the moment it retires
+# whatever it's superseding, not ingestion. ---
 
 def _seed_document_at_source_ref(conn, source_ref, *, sha256, review_status="pending",
                                   status="indexed", title="Axiom Service Manual") -> int:
-    # ON CONFLICT DO NOTHING (SQLite's INSERT OR IGNORE, ported) against
-    # manufacturers.name's/machines' own UNIQUE constraints -- this helper is
-    # called twice per test (old + new document at the same source_ref), and
-    # unlike the explicit id=1 the old version forced, letting the first call
-    # create manufacturer/machine id=1 and the second no-op is what actually
-    # needs the conflict guard now.
+    # ON CONFLICT DO NOTHING against manufacturers.name's/machines' own
+    # UNIQUE constraints -- this helper is called twice per test (old + new
+    # document at the same source_ref), so the first call creates
+    # manufacturer/machine id=1 and the second no-ops.
     conn.execute(
         "INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation') ON CONFLICT (name) DO NOTHING"
     )
@@ -267,14 +264,14 @@ def test_approving_replacement_deactivates_old_document_at_same_source_ref(test_
     document and the new pending replacement both active at the same
     source_ref. Approving the replacement must be the atomic cutover --
     the old one retires in the same request, not on some later admin
-    pass, so there's never a moment with two approved documents (or,
-    before this fix, zero) live at this source_ref."""
+    pass, so there's never a moment with either two approved documents or
+    zero live at this source_ref."""
     source_ref = "google_drive:file123"
     with get_conn() as conn:
         old_id = _seed_document_at_source_ref(conn, source_ref, sha256="old-hash", review_status="approved")
         new_id = _seed_document_at_source_ref(conn, source_ref, sha256="new-hash", review_status="pending")
-        # P0-02: review_document() now requires nonempty chunks and an
-        # approved machine link before a document can be approved/promoted.
+        # review_document() requires nonempty chunks and an approved
+        # machine link before a document can be approved/promoted.
         conn.execute(
             "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
             "VALUES (%s, 'text', 'seeded chunk content', 21, 0)",
@@ -322,37 +319,36 @@ def test_rejecting_replacement_leaves_old_document_active(test_env):
 
 
 def test_concurrent_approval_of_two_replacement_candidates_leaves_exactly_one_active(test_env, monkeypatch):
-    """P1-6 (2026-08-24 independent follow-up review, "concurrent ...
-    approval ... and promotion tests"): two admins approving two DIFFERENT
-    pending replacement candidates at the SAME source_ref at nearly the same
-    moment. Before the fix, the review_status UPDATE had no re-check against
-    a concurrent supersession -- the loser's approval could still succeed
-    after its document was already deactivated by the winner, then that
-    loser's own supersede step would deactivate the winner's document too,
-    leaving ZERO active approved documents at this source_ref (the exact
-    failure mode P0-2 fixed for ingestion, reintroduced here). Exactly one
-    of the two concurrent requests must succeed; the other must see a clean
-    404, and exactly one document must end up active and approved.
+    """Two admins approving two DIFFERENT pending replacement candidates at
+    the SAME source_ref at nearly the same moment must not both succeed --
+    the review_status UPDATE must re-check against a concurrent
+    supersession, or the loser's approval could succeed after its document
+    was already deactivated by the winner, and the loser's own supersede
+    step would then deactivate the winner's document too, leaving ZERO
+    active approved documents at this source_ref. Exactly one of the two
+    concurrent requests must succeed; the other must see a clean 404, and
+    exactly one document must end up active and approved.
 
     The vulnerable window is narrow: candidate_b's request must read
     "not yet deactivated" BEFORE candidate_a's request commits, then write
     AFTER it commits. Two bare threads rarely land there on their own -- the
     whole request (SELECT + UPDATE + commit) completes well within one GIL
-    switch interval against this fast, local, WAL-mode DB, so an
-    uninstrumented version of this test passed even against the unguarded
-    code it's meant to catch. sqlite3.Connection.execute is patched for the
-    duration of this test only (not the app's own code) so candidate_b's
-    initial SELECT deterministically blocks until candidate_a's request has
-    fully committed, before candidate_b's own UPDATE runs -- reproducing
-    exactly the interleaving the original bug depended on."""
+    switch interval against this fast local DB, so an uninstrumented version
+    of this test would pass even against unguarded code. psycopg.Connection
+    itself can't be monkeypatched (it's a C-backed type), so the connection
+    this route sees is wrapped in a thin Python proxy for the duration of
+    this test only (not the app's own code) so candidate_b's initial SELECT
+    deterministically blocks until candidate_a's request has fully
+    committed, before candidate_b's own UPDATE runs -- reproducing exactly
+    the interleaving this guards against."""
     source_ref = "google_drive:file789"
     with get_conn() as conn:
         old_id = _seed_document_at_source_ref(conn, source_ref, sha256="old-hash", review_status="approved")
         candidate_a = _seed_document_at_source_ref(conn, source_ref, sha256="candidate-a", review_status="pending")
         candidate_b = _seed_document_at_source_ref(conn, source_ref, sha256="candidate-b", review_status="pending")
-        # P0-02: review_document() now requires nonempty chunks and an
-        # approved machine link before a document can be approved/promoted --
-        # both candidates need that BEFORE the race below, or every approval
+        # review_document() requires nonempty chunks and an approved
+        # machine link before a document can be approved/promoted -- both
+        # candidates need that BEFORE the race below, or every approval
         # attempt would 409 for a reason unrelated to what this test covers.
         for candidate_id in (candidate_a, candidate_b):
             conn.execute(
@@ -371,11 +367,9 @@ def test_concurrent_approval_of_two_replacement_candidates_leaves_exactly_one_ac
     import app.api.routes_admin as routes_admin_module
     from app.db import get_conn as real_get_conn
 
-    # Must match routes_admin.py's review_document() SQL text exactly --
-    # %s placeholders (psycopg), not SQLite's ?.
-    # Must match review_document()'s SQL text exactly -- P0-02 added `status`
-    # to this SELECT's column list, which silently broke this comparison
-    # (the barrier below never fired, so the two threads raced with no
+    # Must match review_document()'s SQL text exactly, including the full
+    # column list -- a mismatch here silently breaks this comparison (the
+    # barrier below never fires, so the two threads race with no
     # synchronization at all instead of the deliberate interleaving this
     # test depends on).
     select_sql = "SELECT id, source_ref, status FROM documents WHERE id = %s AND deactivated_at IS NULL"
@@ -384,8 +378,8 @@ def test_concurrent_approval_of_two_replacement_candidates_leaves_exactly_one_ac
     # only THEN does candidate_b additionally wait for candidate_a's full
     # commit before candidate_b's own write proceeds -- reproducing "read
     # stale, write late" exactly. psycopg.Connection itself can't be
-    # monkeypatched (it's a C-backed type, like sqlite3.Connection was), so
-    # the connection this route sees is wrapped in a thin Python proxy instead.
+    # monkeypatched (it's a C-backed type), so the connection this route
+    # sees is wrapped in a thin Python proxy instead.
     both_read = threading.Barrier(2, timeout=5)
     a_committed = threading.Event()
 
@@ -460,7 +454,7 @@ def test_concurrent_approval_of_two_replacement_candidates_leaves_exactly_one_ac
         )
 
 
-# --- Invitations, disable/enable (P0-5) ---
+# --- Invitations, disable/enable ---
 
 def test_invitation_create_and_use(test_env):
     _register_admin()
@@ -495,19 +489,17 @@ def test_revoked_invitation_cannot_be_used(test_env):
 
 
 def test_concurrent_registration_with_the_same_invite_token_only_succeeds_once(test_env):
-    """P1-6 (2026-08-24 independent follow-up review, "concurrent ...
-    invitation ... tests"): two requests racing to register with the SAME
-    single-use invite token. Before this fix, the invite was consumed with
-    a check-then-act read followed by an unconditional UPDATE at the end --
-    both requests could read used_at=NULL and both proceed to INSERT a
-    user, with users.email's UNIQUE constraint as the only thing stopping a
-    duplicate account; the loser then raised an unhandled
-    sqlite3.IntegrityError (a 500, not the same clean 403 every other
-    invitation-rejection path returns) instead of failing cleanly. The
-    invite is now claimed atomically via the same claim-UPDATE pattern used
-    everywhere else in this codebase, which is race-safe under any
-    interleaving -- unlike the P0-2 approval race above, this needs no
-    forced-interleaving instrumentation to demonstrate."""
+    """Two requests racing to register with the SAME single-use invite token
+    must not both succeed. A check-then-act read followed by an
+    unconditional UPDATE at the end would let both requests read
+    used_at=NULL and both proceed to INSERT a user, with users.email's
+    UNIQUE constraint as the only thing stopping a duplicate account -- the
+    loser would then raise an unhandled IntegrityError (a 500, not the same
+    clean 403 every other invitation-rejection path returns) instead of
+    failing cleanly. The invite is claimed atomically via the same
+    claim-UPDATE pattern used everywhere else in this codebase, which is
+    race-safe under any interleaving -- unlike the approval race above,
+    this needs no forced-interleaving instrumentation to demonstrate."""
     _register_admin()
     invite = client.post("/api/admin/invitations", json={"email": "racer@example.com"}).json()
     token = invite["token"]
@@ -546,8 +538,8 @@ def test_admin_cannot_disable_own_account(test_env):
 def test_machine_picker_excludes_machines_with_only_pending_links(test_env):
     """A pending-only document_machines link must not surface the machine in
     the picker at all -- otherwise a technician selects a machine that then
-    dead-ends into "no manuals" the moment retrieval applies its own approval
-    filter (independent follow-up review P0-6)."""
+    dead-ends into "no manuals" the moment retrieval applies its own
+    approval filter."""
     with get_conn() as conn:
         conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
         conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
@@ -557,8 +549,8 @@ def test_machine_picker_excludes_machines_with_only_pending_links(test_env):
             "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed')"
         )
         conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (1, 1)")
-        # P0-02: review_document() now requires nonempty chunks and an
-        # approved machine link before a document can be approved.
+        # review_document() requires nonempty chunks and an approved
+        # machine link before a document can be approved.
         conn.execute(
             "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
             "VALUES (1, 'text', 'seeded chunk content', 21, 0)"

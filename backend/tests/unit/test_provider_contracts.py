@@ -1,8 +1,6 @@
-"""P1-7 (independent follow-up review, 2026-08-24): "Provider/model
-configuration and failure behavior require production contracts. Add mocked
-contract tests for every provider, timeouts, rate limits, malformed
-responses, retries, token budgets, model retirement, safety fallback, and
-request cancellation."
+"""Provider/model configuration and failure behavior contract tests: every
+provider, timeouts, rate limits, malformed responses, retries, token
+budgets, model retirement, safety fallback, and request cancellation.
 
 Every network call here is mocked -- these test the CONTRACT between this
 codebase and the anthropic SDK (which exceptions map to which
@@ -189,11 +187,10 @@ def test_anthropic_no_answer_explanation_mentioning_the_machine_name_is_not_reje
 def test_anthropic_no_answer_explanation_with_an_unrelated_material_token_still_falls_back(
     anthropic_provider, monkeypatch
 ):
-    """Regression guard for P0-5 (independent review): the machine-name
-    exemption above must not become a blanket exemption for every material
-    token. A part number/voltage/error code that has nothing to do with the
-    machine's own name is still exactly the fabrication risk that check
-    exists for."""
+    """The machine-name exemption above must not become a blanket exemption
+    for every material token. A part number/voltage/error code that has
+    nothing to do with the machine's own name is still exactly the
+    fabrication risk that check exists for."""
     explanation = "Bypass the interlock at 600V to test the control board."
     response = json.dumps({
         "is_no_answer": True, "no_answer_explanation": explanation,
@@ -209,14 +206,13 @@ def test_anthropic_no_answer_explanation_with_an_unrelated_material_token_still_
 
 
 def test_anthropic_claim_mentioning_the_machine_name_is_not_rejected(anthropic_provider, monkeypatch):
-    """Same bug, second location: found live 2026-08-25 immediately after
-    the no_answer_explanation case above -- a *claim* (not just a no-answer
-    explanation) naturally referencing the machine by name hit the same
-    false-positive rejection, since claims go through _claim_supported, a
-    separate function with its own material-token check. A technician's
-    "what can I ask you" got the generic fallback because one of six claims
-    said "...for the Ultra-1/Ultra-2" -- the other five were all fine, but
-    validation is all-or-nothing per response."""
+    """Same exemption, second location: a *claim* (not just a no-answer
+    explanation) naturally referencing the machine by name must not hit a
+    false-positive rejection either, since claims go through
+    _claim_supported, a separate function with its own material-token
+    check. Validation is all-or-nothing per response, so even one claim out
+    of six naming the machine would otherwise sink an entire genuine
+    answer."""
     passage = _passage(content="Replace hopper drum seal every 12 months.")
     response = json.dumps({
         "is_no_answer": False, "no_answer_explanation": None,
@@ -235,11 +231,10 @@ def test_anthropic_claim_mentioning_the_machine_name_is_not_rejected(anthropic_p
 
 
 def test_anthropic_claim_with_an_unrelated_material_token_still_falls_back(anthropic_provider, monkeypatch):
-    """Regression guard for P0-7 (independent review): the machine-name
-    exemption in _claim_supported must not become a blanket exemption for
-    every material token in a claim either -- a fabricated part number
-    unrelated to the machine's own name is still exactly the risk that
-    check exists for."""
+    """The machine-name exemption in _claim_supported must not become a
+    blanket exemption for every material token in a claim either -- a
+    fabricated part number unrelated to the machine's own name is still
+    exactly the risk that check exists for."""
     passage = _passage(content="Replace hopper drum seal every 12 months.")
     response = json.dumps({
         "is_no_answer": False, "no_answer_explanation": None,
@@ -282,14 +277,13 @@ def test_anthropic_request_sets_a_bounded_max_tokens(anthropic_provider, monkeyp
 
 
 def test_p1_19_worst_case_provider_latency_fits_under_the_android_read_timeout(anthropic_provider):
-    """P1-19 (external review, 2026-09-21): the SDK's own default max_retries
-    is 2, so worst case was 2 _call()s (the original attempt plus
-    generate()'s own JSON-repair retry) x 3 attempts each (1 original + 2 SDK
-    retries) x the 30s request timeout = up to 180s against Android's
-    90-second read timeout (ApiClient.kt) -- a technician could see
-    "connection lost" while the server was still working. Pins the actual
-    worst-case bound, not just the individual settings, so a future change
-    to either number is caught if it pushes the total back over budget."""
+    """Worst-case provider latency (2 _call()s -- the original attempt plus
+    generate()'s own JSON-repair retry -- times attempts-per-call times the
+    request timeout) must fit under Android's read timeout (ApiClient.kt),
+    or a technician could see "connection lost" while the server was still
+    working. Pins the actual worst-case bound, not just the individual
+    settings, so a future change to either number is caught if it pushes the
+    total back over budget."""
     ANDROID_READ_TIMEOUT_SECONDS = 90
     CALLS_PER_GENERATE = 2  # original attempt + generate()'s own repair retry
 

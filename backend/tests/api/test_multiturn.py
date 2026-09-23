@@ -1,10 +1,11 @@
-"""P1-8 (independent follow-up review): pending-message resumption and
-standalone-query resolution, exercised end to end through the real chat API
-with the real (local_extractive, no API key) default provider.
+"""Pending-message resumption and standalone-query resolution, exercised
+end to end through the real chat API with the real (local_extractive, no
+API key) default provider.
 
 No embeddings rows are seeded in any test here, so vector_search's own
-early-return (P1-5) means these never load the embedding model -- lexical/FTS
-matching alone is enough to prove both behaviors and keeps the suite fast.
+early-return on an empty eligible-chunk set means these never load the
+embedding model -- lexical/FTS matching alone is enough to prove both
+behaviors and keeps the suite fast.
 """
 from __future__ import annotations
 

@@ -1,29 +1,24 @@
-"""P1-6 (independent follow-up review): "Count DISTINCT eligible document
-rows, not document_machines rows, and apply active/current/approved/indexed
-rules consistently to search and recent machines."
+"""Both /api/machines and /api/machines/recent must count DISTINCT
+eligible document rows, not document_machines rows, and apply
+active/current/approved/indexed rules consistently.
 
-The original bug: `COUNT(DISTINCT dm.document_id)` counts a column from the
-document_machines side of a LEFT JOIN, which stays non-NULL even when the
-paired `documents` row fails the eligibility ON-clause (wrong status,
-deactivated, unapproved, superseded) -- so an inactive link still inflated
-the count. `COUNT(DISTINCT d.id)` (the documents side) is NULL whenever the
-join's eligibility conditions aren't met, so it only counts documents that
-are actually retrievable. This was fixed in an earlier session (P0-6/P1-11
-follow-on work); these tests are the regression coverage that work never
-got -- most fail under the old `COUNT(DISTINCT dm.document_id)` query and
-pass under the current one (see each test's docstring for the one
-exception, which is enforced elsewhere), and pin that /api/machines and
-/api/machines/recent can never disagree about the same machine's count,
-since a picker offering a machine that then dead-ends into "no manuals" is
-exactly the bug P0-6's docstring warns about.
+`COUNT(DISTINCT dm.document_id)` counts a column from the document_machines
+side of a LEFT JOIN, which stays non-NULL even when the paired `documents`
+row fails the eligibility ON-clause (wrong status, deactivated, unapproved,
+superseded) -- so an inactive link would inflate the count. `COUNT(DISTINCT
+d.id)` (the documents side) is NULL whenever the join's eligibility
+conditions aren't met, so it only counts documents that are actually
+retrievable. These tests pin that /api/machines and /api/machines/recent
+can never disagree about the same machine's count, since a picker offering
+a machine that then dead-ends into "no manuals" is exactly the failure this
+guards against.
 
-Also covers a second gap an advisor review caught in this same pass:
-`recent_machines()` was missing the `HAVING document_count > 0` clause
-`search_machines()` already had, so a favorited/recently-used machine whose
-only manual went away (deactivated, unapproved, superseded) still surfaced
-in `/api/machines/recent` with `document_count: 0` even though
-`/api/machines` correctly hid it -- the exact "dead-ends into no manuals"
-failure this item exists to close, just reached through the other endpoint.
+Also covers: `recent_machines()` must have the same `HAVING document_count
+> 0` clause `search_machines()` has, or a favorited/recently-used machine
+whose only manual went away (deactivated, unapproved, superseded) would
+surface in `/api/machines/recent` with `document_count: 0` even though
+`/api/machines` correctly hides it -- the same "dead-ends into no manuals"
+failure, just reached through the other endpoint.
 """
 
 from __future__ import annotations
@@ -135,15 +130,16 @@ def test_document_count_excludes_superseded_revisions(test_env):
 
     assert len(results) == 1
     assert results[0]["document_count"] == 1, (
-        "a superseded revision has nothing retrievable (P1-11) -- the picker's "
+        "a superseded revision has nothing retrievable -- the picker's "
         "count must match retrieval's own eligibility, not just document status"
     )
 
 
 def test_machine_with_only_ineligible_documents_does_not_appear(test_env):
     """The complement of the above: not just an undercount, but the machine
-    must vanish from the picker entirely once nothing it links to is eligible
-    -- otherwise it's exactly the dead-end the P0-6/P1-6 docstring names."""
+    must vanish from the picker entirely once nothing it links to is
+    eligible -- otherwise a technician selects a machine that dead-ends
+    into "no manuals"."""
     with get_conn() as conn:
         conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
         conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
@@ -181,13 +177,11 @@ def test_search_and_recent_machines_report_the_same_document_count(test_env):
 
 
 def test_recent_machines_drops_a_favorite_whose_only_manual_went_away(test_env):
-    """Advisor-caught gap: recent_machines() was missing the HAVING clause
-    search_machines() already had, so a machine a technician favorited or
-    recently viewed could still show up in /api/machines/recent with
-    document_count: 0 after its only manual was deactivated -- a dead-end
-    reachable through the recents list even though /api/machines correctly
-    hides the same machine. This must fail under the query state before that
-    fix (no HAVING clause on recent_machines' SQL) and pass now."""
+    """recent_machines() must have the same HAVING clause search_machines()
+    has, or a machine a technician favorited or recently viewed could still
+    show up in /api/machines/recent with document_count: 0 after its only
+    manual was deactivated -- a dead-end reachable through the recents list
+    even though /api/machines correctly hides the same machine."""
     with get_conn() as conn:
         conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
         conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
@@ -211,14 +205,13 @@ def test_recent_machines_drops_a_favorite_whose_only_manual_went_away(test_env):
 
 
 def test_p1_12_search_reports_is_favorite_for_a_favorited_machine(test_env):
-    """P1-12 (external review, 2026-09-21): search_machines()'s SQL had no
-    join to recent_machines at all, so _row_to_machine's "is_favorite" key
-    was always absent and silently defaulted to False -- a favorited
-    machine always drew an empty star in search results (only
-    /api/machines/recent, which does join recent_machines, ever reported
-    the real value). The Android client's optimistic toggle flips
-    !machine.is_favorite, so acting on this wrong initial state sent the
-    wrong direction on first tap."""
+    """search_machines()'s SQL must join to recent_machines so
+    _row_to_machine's "is_favorite" key reports the real value -- otherwise
+    a favorited machine would draw an empty star in search results (only
+    /api/machines/recent, which does join recent_machines, would report the
+    real value). The Android client's optimistic toggle flips
+    !machine.is_favorite, so a wrong initial state would send the wrong
+    direction on first tap."""
     with get_conn() as conn:
         conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
         conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")

@@ -107,15 +107,13 @@ def test_p2_03_an_oversized_page_is_skipped_for_ocr_instead_of_rendered(tmp_path
 
 
 def test_p1_09_a_real_legacy_doc_is_classified_and_parsed_as_doc(tmp_path):
-    """P1-09 (external review, 2026-09-21): OLE files (.doc/.xls/.ppt all
-    share the same compound-file magic bytes) used to sniff as the generic
-    "ole" kind unconditionally -- resolve_file_type trusts the sniff over
-    the .doc extension, and extract() only ever dispatches to
-    extract_legacy_doc for a "doc" file_type, never "ole". A genuine binary
-    .doc therefore always took the unsupported branch, contradicting the
-    documented "legacy .doc supported" claim. Reproduced before the fix:
-    this exact file resolved to effective_type "ole" and extract() returned
-    status="unsupported" instead of parsing it."""
+    """OLE files (.doc/.xls/.ppt all share the same compound-file magic
+    bytes) must not sniff as the generic "ole" kind unconditionally --
+    resolve_file_type trusts the sniff over the .doc extension, and
+    extract() only ever dispatches to extract_legacy_doc for a "doc"
+    file_type, never "ole". A genuine binary .doc that instead resolved to
+    "ole" would always take the unsupported branch, contradicting the
+    documented "legacy .doc supported" claim."""
     from tests.ingestion.ole_fixtures import make_ole_file, word_stream_bytes
 
     data = word_stream_bytes([
@@ -165,11 +163,10 @@ def _make_ooxml(path, member_name):
 
 
 def test_p1_09_xlsx_and_pptx_are_not_misclassified_as_docx(tmp_path):
-    """P1-09: .docx/.xlsx/.pptx are all ZIP containers sharing the same
-    magic bytes -- every ZIP OOXML file used to be labeled 'docx'
-    unconditionally, so an .xlsx or .pptx could be sent to the docx parser.
-    Distinguished by the one member file each format's own spec
-    guarantees."""
+    """.docx/.xlsx/.pptx are all ZIP containers sharing the same magic
+    bytes -- a ZIP OOXML file must not be labeled 'docx' unconditionally, or
+    an .xlsx/.pptx could be sent to the docx parser. Distinguished by the
+    one member file each format's own spec guarantees."""
     docx_path = tmp_path / "real.docx"
     _make_ooxml(docx_path, "word/document.xml")
     assert sniff_file_type(docx_path) == "docx"

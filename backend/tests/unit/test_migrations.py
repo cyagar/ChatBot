@@ -1,21 +1,16 @@
-"""P1-9 (independent follow-up review): run_migrations used conn.executescript(),
-which issues an implicit COMMIT before running the script. A migration that
-failed part-way through therefore left its earlier statements permanently
-applied with no schema_migrations row to explain them -- and the next start
-would retry from a schema that no longer matched what the migration expected.
+"""run_migrations() must apply each migration atomically: a migration that
+fails part-way through must leave no earlier statements permanently applied
+and no schema_migrations row to explain them, so the next start retries
+cleanly from a schema that still matches what the migration expects.
 
-These tests prove each migration is now all-or-nothing and retries cleanly.
+These tests prove each migration is all-or-nothing and retries cleanly.
 
-P2-06 (external review, 2026-09-21): split_sql_statements() used to be a
-naive split(';') -- silently wrong for a semicolon inside a string literal,
-a comment, or (for a future PL/pgSQL function/trigger) a dollar-quoted body.
-run_migrations() no longer uses it for real execution at all -- see its
-docstring in app/db.py -- so that naive-splitter constraint on migration
-authors no longer exists. split_sql_statements is now a genuinely SQL-aware
-splitter (tracks string/identifier quoting, comments, and dollar-quoting),
-kept only as a test helper for the rollback sweep below, which needs "this
-migration's statements minus its last one" to construct a deliberately
-broken migration.
+split_sql_statements() is a SQL-aware splitter (tracks string/identifier
+quoting, comments, and dollar-quoting) -- run_migrations() doesn't use it
+for real execution (see its docstring in app/db.py); it's kept only as a
+test helper for the rollback sweep below, which needs "this migration's
+statements minus its last one" to construct a deliberately broken
+migration.
 """
 from __future__ import annotations
 
@@ -39,7 +34,7 @@ def _table_exists(conn, name: str) -> bool:
 
 
 def test_split_respects_semicolons_inside_string_literals():
-    """P2-06: the old naive split(';') tore a string literal in two at any
+    """A naive split(';') would tear a string literal in two at any
     semicolon inside it. The SQL-aware splitter must not."""
     script = (
         "CREATE TABLE t (a TEXT);\n"
@@ -110,12 +105,10 @@ def test_real_migration_files_split_into_at_least_one_statement():
 
 
 def test_migration_with_a_semicolon_inside_a_string_literal_applies_correctly(test_env, tmp_path, monkeypatch):
-    """P2-06 (external review, 2026-09-21): the actual production bug this
-    whole change addresses. The old naive splitter would have torn the
-    INSERT below into two garbage fragments at the semicolon inside the
-    literal; run_migrations() sends the whole file to Postgres as one
-    script now, so this must apply -- and the inserted value must be
-    intact, not truncated at the semicolon."""
+    """A naive splitter would tear the INSERT below into two garbage
+    fragments at the semicolon inside the literal; run_migrations() sends
+    the whole file to Postgres as one script, so this must apply -- and the
+    inserted value must be intact, not truncated at the semicolon."""
     mig_dir = tmp_path / "migrations_semicolon"
     mig_dir.mkdir()
     (mig_dir / "9003_semicolon.sql").write_text(
@@ -273,8 +266,8 @@ def fresh_unmigrated_db(monkeypatch):
 def test_every_real_migration_rolls_back_and_retries_cleanly_on_failure(
     target_index, tmp_path, monkeypatch, fresh_unmigrated_db
 ):
-    """P1-9's own wording: 'retry successfully after every simulated
-    statement-boundary failure.' The tests above prove the rollback
+    """Every migration must retry successfully after a simulated
+    statement-boundary failure. The tests above prove the rollback
     MECHANISM works in principle using a synthetic migration; this sweeps
     every REAL migration file to prove none of them contains a statement
     that defeats it.

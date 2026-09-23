@@ -1,6 +1,6 @@
-"""Integration tests for the ingestion pipeline against a real temp SQLite DB
-and real (synthetic) PDF files — no mocking of extraction or storage, since
-idempotency bugs live exactly in that plumbing.
+"""Integration tests for the ingestion pipeline against the real Postgres
+test database and real (synthetic) PDF files — no mocking of extraction or
+storage, since idempotency bugs live exactly in that plumbing.
 
 Exercised via FakeDirectorySource (tests/ingestion/fakes.py), not the real
 GoogleDriveSource -- these tests are about pipeline.py's idempotency/dedup
@@ -23,16 +23,14 @@ def manuals_dir(tmp_path):
 
 
 def test_p1_15_a_chunk_embedded_under_a_stale_fingerprint_is_reembedded(test_env, monkeypatch):
-    """P1-15 (external review, 2026-09-21): embeddings.model_name used to
-    record only the model name, not the revision -- a chunk whose only
-    embedding predates a model/revision change looked identical to one
-    that was never embedded, EXCEPT _embed_pending_chunks' old
-    `LEFT JOIN embeddings e ON e.chunk_id = c.id WHERE e.chunk_id IS NULL`
-    considered it already done and skipped it forever. Unlike this file's
-    other tests, embed_texts is monkeypatched here (a fake, fixed-size
-    vector) rather than loaded for real -- the real model is exercised in
-    tests/retrieval/test_search.py; this test is about which chunks
-    _embed_pending_chunks decides need embedding, not embedding quality."""
+    """embeddings.model_name records the model name AND revision together
+    (see embedding_fingerprint()) -- a chunk whose only embedding predates a
+    model/revision change must be treated as needing re-embedding, not as
+    already done. Unlike this file's other tests, embed_texts is
+    monkeypatched here (a fake, fixed-size vector) rather than loaded for
+    real -- the real model is exercised in tests/retrieval/test_search.py;
+    this test is about which chunks _embed_pending_chunks decides need
+    embedding, not embedding quality."""
     import numpy as np
 
     from app.ingestion import pipeline as pipeline_module
@@ -80,7 +78,7 @@ def test_full_run_indexes_every_file_exactly_once(test_env, make_pdf, manuals_di
 
 
 def test_ingest_all_records_which_trigger_started_the_run(test_env, make_pdf, manuals_dir):
-    """P1-4: distinguishes a scheduler-started run from an admin's manual
+    """Distinguishes a scheduler-started run from an admin's manual
     'Run re-index now' click, so the admin UI can show the scheduler is
     actually running rather than taking it on faith. Default stays 'manual'
     -- callers that don't pass trigger explicitly (e.g. the reindex endpoint)
@@ -117,15 +115,14 @@ def test_second_run_skips_unchanged_files(test_env, make_pdf, manuals_dir):
 def test_unchanged_file_at_a_stale_pipeline_version_is_flagged_not_silently_skipped(
     test_env, make_pdf, manuals_dir, monkeypatch
 ):
-    """Independent follow-up review 2026-08-24 P0-7: 'unchanged manuals don't
-    receive new pipeline logic.' A document whose bytes never change used to
-    be skipped forever regardless of whether extraction/chunking logic
-    changed since it was last processed. Simulates a pipeline version bump
-    (CURRENT_CHUNKING_VERSION going from 1 to 2) and confirms an otherwise-
-    unchanged file is reported as needs_reprocessing, not silently absorbed
-    into skipped_unchanged -- and that it is NOT auto-reprocessed (the
-    document's chunking_version in the DB stays at what actually produced its
-    current chunks, not the new code's version, since nothing re-chunked it)."""
+    """A document whose bytes never change must not be skipped forever
+    regardless of whether extraction/chunking logic changed since it was
+    last processed. Simulates a pipeline version bump (CURRENT_CHUNKING_VERSION
+    going from 1 to 2) and confirms an otherwise-unchanged file is reported
+    as needs_reprocessing, not silently absorbed into skipped_unchanged --
+    and that it is NOT auto-reprocessed (the document's chunking_version in
+    the DB stays at what actually produced its current chunks, not the new
+    code's version, since nothing re-chunked it)."""
     pdf = make_pdf(["Content about the ice cream machine compressor cycle."])
     shutil.copy(pdf, manuals_dir / pdf.name)
     source = FakeDirectorySource(manuals_dir)
@@ -190,12 +187,12 @@ def test_exact_duplicate_bytes_are_flagged_and_excluded_from_retrieval(test_env,
 def test_content_change_at_same_path_creates_new_pending_row_without_deactivating_old(
     test_env, make_pdf, manuals_dir
 ):
-    """Independent follow-up review P0-2 (2026-08-24 follow-up): a replacement
-    that merely extracts/chunks successfully must NOT retire the manual it's
-    replacing -- the new row's review_status defaults to 'pending' (migration
-    0003), so deactivating the old one here would leave technicians with zero
-    approved documents at this source_ref until a human happens to review it.
-    Both rows must stay active until an admin approves the replacement (see
+    """A replacement that merely extracts/chunks successfully must NOT
+    retire the manual it's replacing -- the new row's review_status
+    defaults to 'pending' (migration 0003), so deactivating the old one
+    here would leave technicians with zero approved documents at this
+    source_ref until a human happens to review it. Both rows must stay
+    active until an admin approves the replacement (see
     tests/api/test_admin.py for the approval-time cutover)."""
     path = manuals_dir / "evolving.pdf"
 
@@ -249,16 +246,14 @@ def test_relocated_corpus_root_does_not_create_a_duplicate_row(test_env, make_pd
 
 
 def test_document_missing_from_a_later_listing_is_not_deactivated(test_env, make_pdf, manuals_dir):
-    """Independent follow-up review P0-2/P1-1: the pipeline iterates whatever
-    files a listing happens to return but has no reconciliation step for
-    active rows a listing doesn't mention -- documented in
-    PRODUCTION_READINESS.md as 'true today, but not exercised by a dedicated
-    test' until this one. A manual temporarily absent from a source listing
-    (Drive outage, a partial page, a file briefly unshared) must not be
-    deactivated just because one run's listing didn't include it -- there is
-    no 'complete, verified listing' concept implemented to safely tell that
-    apart from a real removal, so the current, deliberately conservative
-    behavior is: never deactivate on absence alone."""
+    """The pipeline iterates whatever files a listing happens to return but
+    has no reconciliation step for active rows a listing doesn't mention
+    (see PRODUCTION_READINESS.md). A manual temporarily absent from a source
+    listing (Drive outage, a partial page, a file briefly unshared) must not
+    be deactivated just because one run's listing didn't include it -- there
+    is no 'complete, verified listing' concept implemented to safely tell
+    that apart from a real removal, so the current, deliberately
+    conservative behavior is: never deactivate on absence alone."""
     pdf = make_pdf(["Content about the fryer oil filtration schedule."], name="fryer.pdf")
     shutil.copy(pdf, manuals_dir / pdf.name)
     source = FakeDirectorySource(manuals_dir)
@@ -284,10 +279,10 @@ def test_document_missing_from_a_later_listing_is_not_deactivated(test_env, make
 
 
 def test_failed_replacement_does_not_retire_the_still_good_active_document(test_env, make_pdf, manuals_dir):
-    """Independent follow-up review P0-2: the active row used to be deactivated
-    the moment content changed at a source_ref, before the replacement was
-    extracted or validated. A corrupt/unreadable replacement must not take
-    down a manual that was still working."""
+    """The active row must not be deactivated the moment content changes at
+    a source_ref, before the replacement is extracted or validated -- a
+    corrupt/unreadable replacement must not take down a manual that was
+    still working."""
     import fitz
 
     path = manuals_dir / "evolving.pdf"
@@ -331,11 +326,11 @@ def test_failed_replacement_does_not_retire_the_still_good_active_document(test_
 
 
 def test_listing_failure_still_produces_a_visible_failed_run(test_env, manuals_dir):
-    """Independent follow-up review P0-3: source.list_files() used to run
-    before the ingestion_runs row was created, so a Drive auth/quota/network
-    failure aborted the whole operation before any run existed -- the admin
-    UI showed nothing happened. The run row must exist first, and a listing
-    failure must land as a visible failed run with a recorded reason."""
+    """The ingestion_runs row must exist before source.list_files() runs --
+    otherwise a Drive auth/quota/network failure would abort the whole
+    operation before any run existed, and the admin UI would show nothing
+    happened. A listing failure must land as a visible failed run with a
+    recorded reason."""
     import pytest as _pytest
 
     class ExplodingSource:
@@ -362,8 +357,7 @@ def test_listing_failure_still_produces_a_visible_failed_run(test_env, manuals_d
 
 
 def test_source_level_skips_are_recorded_as_visible_ingestion_events(test_env, make_pdf, manuals_dir):
-    """Independent follow-up review P1-3: 'report every skipped item.' A
-    DocumentSource can report items it noticed but didn't return from
+    """A DocumentSource can report items it noticed but didn't return from
     list_files() (e.g. GoogleDriveSource skipping an oversized file or a
     Google Workspace document) via pop_skipped(); ingest_all() must surface
     each one as a normal ingestion_events row and FileOutcome, not only a
@@ -421,12 +415,11 @@ def test_unsupported_file_retried_after_capability_change_updates_in_place(test_
 
 
 def test_p1_05_an_all_failed_run_is_marked_completed_with_errors_not_completed(test_env, manuals_dir):
-    """P1-05 (external review, 2026-09-21): had_error only flipped on a
-    raised exception -- a HANDLED extraction failure (extract() returning
-    status="failed" rather than raising, e.g. a corrupt/unreadable PDF) left
-    had_error False, so a run where every file failed still finished
-    status='completed', identical to a clean run. Reproduced before the fix:
-    this exact scenario asserted status == 'completed' and passed."""
+    """had_error must flip on a HANDLED extraction failure too (extract()
+    returning status="failed" rather than raising, e.g. a corrupt/unreadable
+    PDF), not only on a raised exception -- otherwise a run where every file
+    failed would still finish status='completed', identical to a clean
+    run."""
     (manuals_dir / "corrupt.pdf").write_bytes(b"not a real pdf, just garbage bytes")
 
     report = ingest_all(source=FakeDirectorySource(manuals_dir), embed=False)
@@ -461,15 +454,14 @@ def test_p1_05_an_unsupported_only_run_is_still_completed_not_completed_with_err
 
 
 def test_p1_05_a_source_level_download_failure_is_a_real_error_not_an_intentional_skip(test_env, manuals_dir):
-    """Companion to the two tests above, for the other half of P1-05: a
-    source-level skip reported via pop_skipped() with a download failure
-    (SkippedFile.is_error=True) used to be indistinguishable from an
-    intentional, by-design skip (a subfolder, a Workspace file, an oversized
-    file) and never affected the run's overall status -- a folder where
-    every download failed still finished status='completed'. An intentional
-    skip (is_error=False, the default -- see
-    test_source_level_skips_are_recorded_as_visible_ingestion_events) must
-    keep NOT flipping it."""
+    """Companion to the two tests above: a source-level skip reported via
+    pop_skipped() with a download failure (SkippedFile.is_error=True) must
+    be distinguishable from an intentional, by-design skip (a subfolder, a
+    Workspace file, an oversized file) and must affect the run's overall
+    status -- a folder where every download failed must not finish
+    status='completed'. An intentional skip (is_error=False, the default --
+    see test_source_level_skips_are_recorded_as_visible_ingestion_events)
+    must keep NOT flipping it."""
     from app.ingestion.sources import SkippedFile
 
     class SourceWithFailedDownload(FakeDirectorySource):
