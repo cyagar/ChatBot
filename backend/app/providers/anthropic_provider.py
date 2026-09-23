@@ -1,7 +1,13 @@
-"""Anthropic-backed provider. Not active until ANTHROPIC_API_KEY is set and the
-`anthropic` package is installed (uncomment it in requirements.txt then
-`pip install -r requirements.txt`). Kept separate from extractive.py so switching
+"""Anthropic-backed provider. Not active until ANTHROPIC_API_KEY is set and
+AI_PROVIDER=anthropic (see app/providers/factory.py) -- the `anthropic`
+package itself is already an unconditional requirements.txt dependency, no
+separate install step needed. Kept separate from extractive.py so switching
 AI_PROVIDER is a one-line .env change, never a code change.
+
+P2-04 (external review, 2026-09-21): this docstring used to tell readers to
+"uncomment [anthropic] in requirements.txt" -- stale advice from before it
+became an always-installed dependency; corrected rather than left to mislead
+the next person setting this up.
 """
 
 from __future__ import annotations
@@ -80,7 +86,8 @@ class AnthropicProvider(AIProvider):
         except ImportError as e:
             raise RuntimeError(
                 "AI_PROVIDER=anthropic but the 'anthropic' package is not installed. "
-                "Uncomment it in requirements.txt and reinstall."
+                "It's an unconditional requirements.txt dependency -- run "
+                "'pip install -r requirements.txt' to install it."
             ) from e
         self._client = anthropic.Anthropic(
             api_key=settings.anthropic_api_key, timeout=REQUEST_TIMEOUT_SECONDS, max_retries=MAX_RETRIES,

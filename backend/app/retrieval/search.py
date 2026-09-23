@@ -1,5 +1,10 @@
-"""Hybrid retrieval: BM25/FTS5 lexical + dense vector, fused and reranked, with
-hard machine-scoped filtering.
+"""Hybrid retrieval: Postgres full-text search (ts_rank) lexical + dense
+vector, fused and reranked, with hard machine-scoped filtering.
+
+P2-04 (external review, 2026-09-21): this docstring used to call the lexical
+half "BM25/FTS5" -- accurate for the original SQLite implementation this was
+ported from, stale ever since (see lexical_search's own comment below for
+the actual ts_rank()-based mechanism this uses today).
 
 The machine filter is the safety-critical part. Plan requirement 11 ("Prevents
 information from a similarly named but different machine from being presented as
@@ -53,11 +58,8 @@ _FTS_SPECIAL = re.compile(r'["\'\(\)\*\:\^\-&|!<>]')
 def _sanitize_fts_query(q: str) -> str:
     """Postgres to_tsquery() has its own query syntax (&, |, !, (), :, <->) --
     user text must be neutralized to avoid both syntax errors and unintended
-    operators, same reasoning as the old FTS5 sanitizer this replaced (that
-    version stripped FTS5's own special-character set; this one strips
-    to_tsquery's instead, a superset that also covers tsquery's boolean
-    operators). Each term is OR'd together -- broad recall across whatever
-    words the question actually contains, same as before."""
+    operators. Each term is OR'd together for broad recall across whatever
+    words the question actually contains."""
     cleaned = _FTS_SPECIAL.sub(" ", q)
     terms = [t for t in cleaned.split() if t.strip()]
     if not terms:
@@ -96,11 +98,9 @@ def lexical_search(query: str, machine_id: int | None, limit: int = CANDIDATE_PO
         return []
     filter_sql, filter_params = _machine_filter_sql(machine_id)
     revision_sql = _revision_filter_sql(include_superseded)
-    # Ported from SQLite's FTS5 virtual table (chunks_fts + bm25()) to
-    # Postgres full-text search: chunks.content_tsv (a GENERATED tsvector
-    # column, GIN-indexed -- see backend/migrations/0001_initial_schema.sql)
-    # plus ts_rank(), matched with @@ against a to_tsquery() built from the
-    # same OR-of-terms this always sent FTS5.
+    # chunks.content_tsv (a GENERATED tsvector column, GIN-indexed -- see
+    # backend/migrations/0001_initial_schema.sql) plus ts_rank(), matched
+    # with @@ against a to_tsquery() built from the OR-of-terms above.
     sql = f"""
         SELECT c.id AS chunk_id, ts_rank(c.content_tsv, to_tsquery('english', %s)) AS score
         FROM chunks c
@@ -116,8 +116,7 @@ def lexical_search(query: str, machine_id: int | None, limit: int = CANDIDATE_PO
     """
     with get_conn() as conn:
         rows = conn.execute(sql, [fts_query, fts_query, *filter_params, limit]).fetchall()
-    # ts_rank() already returns higher = better, unlike FTS5's bm25() (lower
-    # = better) -- no negation needed here, unlike the old return.
+    # ts_rank() returns higher = better, so no negation is needed here.
     return [(r["chunk_id"], r["score"]) for r in rows]
 
 
@@ -185,8 +184,8 @@ def reciprocal_rank_fusion(
     lexical: list[tuple[int, float]],
     vector: list[tuple[int, float]],
 ) -> dict[int, float]:
-    """RRF is used instead of raw score blending because BM25 and cosine live on
-    incomparable scales; rank-based fusion needs no per-corpus normalization."""
+    """RRF is used instead of raw score blending because ts_rank and cosine live
+    on incomparable scales; rank-based fusion needs no per-corpus normalization."""
     fused: dict[int, float] = {}
     for rank, (chunk_id, _) in enumerate(lexical):
         fused[chunk_id] = fused.get(chunk_id, 0.0) + 1.0 / (RRF_K + rank + 1)
