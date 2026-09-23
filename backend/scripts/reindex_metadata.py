@@ -47,11 +47,14 @@ from app.ingestion.extractors import extract  # noqa: E402
 from app.ingestion.metadata import extract_metadata  # noqa: E402
 from app.ingestion.pipeline import _get_or_create_machine, _get_or_create_manufacturer  # noqa: E402
 
-# Every field a human can actually correct today via
-# PATCH /api/admin/documents/{id} (app/api/routes_admin.py's
-# MetadataCorrection). doc_number is deliberately absent -- there is no way
-# for a human to override it, so it's always safe to refresh.
-OVERRIDABLE_FIELDS = ("manufacturer", "doc_type", "title", "revision", "machine_links")
+# P2-05 (external review, 2026-09-21): removed an OVERRIDABLE_FIELDS tuple
+# here that nothing ever referenced -- the actual overridable-field list
+# lives inline as `simple_fields` below (manufacturer/doc_type/title/
+# revision; machine_links has its own separate handling further down).
+# doc_number is deliberately absent from both: there is no way for a human
+# to override it via PATCH /api/admin/documents/{id}
+# (app/api/routes_admin.py's MetadataCorrection), so it's always safe to
+# refresh -- see the doc_number block below.
 
 _STATIC_METADATA_NOTES = {
     "Manufacturer not confidently detected; needs admin review.",

@@ -14,7 +14,12 @@ class Settings(BaseSettings):
     secret_key: str = "dev-only-insecure-key"
     session_ttl_minutes: int = 480
 
-    storage_backend: str = "local"
+    # P2-05 (external review, 2026-09-21): storage_backend was removed here --
+    # "configuration theater until a second driver exists." Only ever one
+    # value ("local"), never read/branched on anywhere; local_storage_dir
+    # alone drives where files actually live (app/ingestion/pipeline.py,
+    # app/api/routes_manuals.py). Add the setting back if/when a second
+    # storage driver is actually implemented, not before.
     local_storage_dir: str = "../data/object_storage"
 
     # Postgres (Neon). Pooled for normal app traffic; unpooled (direct) for

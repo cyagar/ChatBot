@@ -7,7 +7,6 @@ cost is significant and most unit tests don't need it.
 
 from __future__ import annotations
 
-import struct
 from functools import lru_cache
 
 import numpy as np

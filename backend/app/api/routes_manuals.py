@@ -10,7 +10,6 @@ the id is a DB primary key, not a filename.
 
 from __future__ import annotations
 
-import io
 from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status

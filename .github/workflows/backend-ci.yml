@@ -73,7 +73,7 @@ jobs:
         continue-on-error: true
         with:
           path: ~/.cache/pip
-          key: pip-${{ hashFiles('backend/requirements.txt') }}
+          key: pip-${{ hashFiles('backend/requirements.txt', 'backend/requirements-dev.txt') }}
 
       # embedding_model_revision in app/config.py is a pinned commit SHA, not
       # a branch -- caching this key is safe from silently picking up a
@@ -95,9 +95,12 @@ jobs:
         # dependency's import path, not anything OCR-specific).
 
       - name: Install Python dependencies
+        # requirements-dev.txt (P2-05) pulls in requirements.txt itself plus
+        # pytest/httpx -- this job needs both, unlike the Dockerfile, which
+        # only ever installs requirements.txt for the deployed image.
         run: |
           pip install --no-cache-dir torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
-          pip install --no-cache-dir -r requirements.txt
+          pip install --no-cache-dir -r requirements-dev.txt
 
       - name: Write backend/.env.test for the ephemeral Postgres service
         # P0-10: a plain postgres:// DSN, not a Neon one -- tests/conftest.py's
