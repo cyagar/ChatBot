@@ -1,3 +1,4 @@
+import java.net.URI
 import java.util.Properties
 
 plugins {
@@ -82,6 +83,15 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+            // P1-22 (external review, 2026-09-21): debug and release used to
+            // share one applicationId -- installing a signed release build
+            // over an existing debug install (or vice versa) fails with an
+            // INSTALL_FAILED_UPDATE_INCOMPATIBLE-style signature mismatch,
+            // forcing an uninstall (and losing any local data) first. The
+            // standard fix: only debug gets a distinct id, so the two can
+            // coexist on the same device; release keeps the real
+            // applicationId technicians actually install.
+            applicationIdSuffix = ".debug"
             // Dev backend reachable over plain HTTP; src/debug/res/xml/
             // network_security_config_debug.xml permits cleartext broadly
             // for this build type only, so any dev-machine LAN IP or
@@ -119,13 +129,38 @@ android {
 // release {} block above) so it only runs -- and only fails -- when a
 // release-assembling task actually executes; assembleDebug,
 // testDebugUnitTest, and connectedDebugAndroidTest never evaluate it.
+//
+// P1-22 (external review, 2026-09-21): the old check was only
+// startsWith("https://") plus an exact placeholder comparison -- it would
+// happily pass "https://" alone, a value with an embedded space, or a URL
+// missing the trailing slash Retrofit's Retrofit.Builder().baseUrl()
+// requires (that one fails at runtime with IllegalArgumentException on the
+// very first API call, not here at build time). Now parsed with
+// java.net.URI and checked for a real https scheme, a non-blank host, and
+// the trailing slash Retrofit actually needs.
 tasks.register("verifyReleaseBaseUrl") {
     doLast {
-        check(releaseBaseUrl.startsWith("https://") && releaseBaseUrl != releaseBaseUrlPlaceholder) {
+        check(releaseBaseUrl != releaseBaseUrlPlaceholder) {
             "Release BASE_URL is not configured (currently '$releaseBaseUrl'). Set " +
                 "techManual.baseUrl.release in local.properties, or the " +
                 "TECHMANUAL_BASE_URL_RELEASE environment variable, to a real https:// " +
                 "endpoint before building a release variant."
+        }
+        val uri = try {
+            URI(releaseBaseUrl)
+        } catch (e: Exception) {
+            throw GradleException("Release BASE_URL '$releaseBaseUrl' is not a valid URL: ${e.message}")
+        }
+        check(uri.scheme == "https") {
+            "Release BASE_URL '$releaseBaseUrl' must use https:// (scheme was ${uri.scheme ?: "none"})."
+        }
+        check(!uri.host.isNullOrBlank()) {
+            "Release BASE_URL '$releaseBaseUrl' has no valid host."
+        }
+        check(releaseBaseUrl.endsWith("/")) {
+            "Release BASE_URL '$releaseBaseUrl' must end with a trailing slash -- " +
+                "Retrofit.Builder().baseUrl() throws IllegalArgumentException at runtime " +
+                "otherwise, on the very first API call."
         }
     }
 }
