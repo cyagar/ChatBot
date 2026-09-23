@@ -174,6 +174,58 @@ def test_ingest_all_marks_the_passed_in_run_failed_if_it_cannot_get_the_lock(tes
     assert row["finished_at"] is not None
 
 
+def test_ingest_all_marks_the_run_failed_if_another_process_holds_the_db_advisory_lock(test_env):
+    """P1-14 (external review, 2026-09-21): _INGEST_LOCK is a threading.Lock,
+    process-local -- it does nothing against a second worker process (or two
+    app instances briefly overlapping during a rolling deploy) starting a
+    concurrent run. Simulates "another process" by holding the same
+    Postgres advisory lock on a separate connection, bypassing this
+    process's own (necessarily free) threading.Lock entirely."""
+    import psycopg
+
+    from app.config import get_settings
+    from app.ingestion.pipeline import _ADVISORY_LOCK_KEY, ingest_all
+
+    with get_conn() as conn:
+        cur = conn.execute("INSERT INTO ingestion_runs (status, trigger) VALUES ('running', 'manual') RETURNING id")
+        run_id = cur.fetchone()["id"]
+
+    other_session = psycopg.connect(get_settings().database_url_unpooled, autocommit=True)
+    other_session.execute("SELECT pg_try_advisory_lock(%s)", (_ADVISORY_LOCK_KEY,))
+    try:
+        with pytest.raises(RuntimeError):
+            ingest_all(run_id=run_id)
+    finally:
+        other_session.execute("SELECT pg_advisory_unlock(%s)", (_ADVISORY_LOCK_KEY,))
+        other_session.close()
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT status, finished_at FROM ingestion_runs WHERE id = %s", (run_id,)).fetchone()
+    assert row["status"] == "failed"
+    assert row["finished_at"] is not None
+
+
+def test_ingest_all_releases_the_db_advisory_lock_once_the_run_finishes(test_env, tmp_path):
+    """Regression guard against a leaked session/lock: if _release_db_lock
+    didn't run (or didn't actually close/unlock), a second, genuinely
+    sequential run would be permanently blocked."""
+    import psycopg
+
+    from app.config import get_settings
+    from app.ingestion.pipeline import _ADVISORY_LOCK_KEY, ingest_all
+    from tests.ingestion.fakes import FakeDirectorySource
+
+    ingest_all(source=FakeDirectorySource(tmp_path), embed=False)
+
+    probe = psycopg.connect(get_settings().database_url_unpooled, autocommit=True)
+    try:
+        held = probe.execute("SELECT pg_try_advisory_lock(%s)", (_ADVISORY_LOCK_KEY,)).fetchone()[0]
+        assert held is True, "the advisory lock from the finished run was never released"
+        probe.execute("SELECT pg_advisory_unlock(%s)", (_ADVISORY_LOCK_KEY,))
+    finally:
+        probe.close()
+
+
 def test_status_requires_admin(test_env):
     _register_admin("admin2@example.com")
     register_test_user(client, "tech@example.com", admin_email="admin2@example.com")

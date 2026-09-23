@@ -16,6 +16,8 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import psycopg
+
 from app.config import get_settings
 from app.db import get_conn
 from app.ingestion import dedup
@@ -29,9 +31,56 @@ logger = logging.getLogger(__name__)
 # Guards against two ingestion runs (e.g. an upload-triggered reindex and a
 # manual "Run re-index now" click) racing through the module-level dedup
 # caches and database writes at the same time (independent review concern
-# #14). Process-local only -- correct for the documented single-instance
-# pilot deployment, not a multi-worker/multi-process one.
+# #14). Process-local only -- cheap, and still worth keeping as the fast
+# path for the common same-process case, but P1-14 (external review,
+# 2026-09-21) pointed out it does nothing against a SECOND process (another
+# gunicorn worker, or two app instances briefly overlapping during a
+# rolling deploy) starting a concurrent run -- see _try_acquire_db_lock
+# below for the cross-process guard that actually closes that gap.
 _INGEST_LOCK = threading.Lock()
+
+# Arbitrary fixed key identifying "an ingestion run is in progress" as a
+# Postgres advisory lock -- any int64 works; this one has no other meaning.
+_ADVISORY_LOCK_KEY = 851234001
+
+
+def _try_acquire_db_lock() -> psycopg.Connection | None:
+    """Session-scoped advisory lock, held for the whole run across every
+    process/worker talking to this database -- not just this one. Must use
+    the UNPOOLED connection: a PgBouncer transaction-mode connection (what
+    get_conn() uses) can hand the underlying server connection to a
+    different session between statements, silently dropping a session-scoped
+    lock -- the same constraint documented on db.py's run_migrations. The
+    returned connection must be kept open for the run's duration and closed
+    via _release_db_lock in a finally block (closing it also releases the
+    lock even if the explicit unlock is skipped, but doing both keeps the
+    release deterministic and testable rather than relying on GC/close timing).
+    Returns None if another session already holds it."""
+    settings = get_settings()
+    conn = psycopg.connect(settings.database_url_unpooled, autocommit=True)
+    acquired = conn.execute("SELECT pg_try_advisory_lock(%s)", (_ADVISORY_LOCK_KEY,)).fetchone()[0]
+    if not acquired:
+        conn.close()
+        return None
+    return conn
+
+
+def _release_db_lock(conn: psycopg.Connection) -> None:
+    try:
+        conn.execute("SELECT pg_advisory_unlock(%s)", (_ADVISORY_LOCK_KEY,))
+    finally:
+        conn.close()
+
+
+def _record_lock_failure(run_id: int | None, trigger: str, detail: str) -> None:
+    if run_id is None:
+        return
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE ingestion_runs SET status='failed', finished_at=now(), trigger=%s WHERE id = %s",
+            (trigger, run_id),
+        )
+        _record_event(conn, run_id, "(run)", "failed", detail, None)
 
 
 @dataclass
@@ -130,20 +179,24 @@ def ingest_all(
     run_id and keep creating their own row exactly as before -- there's no
     HTTP response for that path to race against."""
     if not _INGEST_LOCK.acquire(blocking=False):
-        if run_id is not None:
-            with get_conn() as conn:
-                conn.execute(
-                    "UPDATE ingestion_runs SET status='failed', finished_at=now(), "
-                    "trigger=%s WHERE id = %s",
-                    (trigger, run_id),
-                )
-                _record_event(conn, run_id, "(run)", "failed",
-                               "Could not start: another ingestion run was already in progress.", None)
+        _record_lock_failure(run_id, trigger, "Could not start: another ingestion run was already in progress.")
         raise RuntimeError(
             "An ingestion run is already in progress. Wait for it to finish before starting another."
         )
     try:
-        return _ingest_all_locked(source, embed, trigger, run_id)
+        db_lock_conn = _try_acquire_db_lock()
+        if db_lock_conn is None:
+            _record_lock_failure(
+                run_id, trigger,
+                "Could not start: another ingestion run was already in progress on a different worker.",
+            )
+            raise RuntimeError(
+                "An ingestion run is already in progress. Wait for it to finish before starting another."
+            )
+        try:
+            return _ingest_all_locked(source, embed, trigger, run_id)
+        finally:
+            _release_db_lock(db_lock_conn)
     finally:
         _INGEST_LOCK.release()
 
