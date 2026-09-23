@@ -129,11 +129,11 @@ report is the actual measurement.
 
 ## Backup
 
-Two things to back up, both under `data/`:
+Two things to back up:
 
-- `data/db/app.db` (+ `.db-wal`/`.db-shm` if present) — all metadata, chunks,
-  users, conversations, feedback. SQLite: safe to copy while the app is
-  stopped; for a live backup use `sqlite3 app.db ".backup backup.db"`.
+- The Postgres/Neon database (all metadata, chunks, users, conversations,
+  feedback) — Neon retains point-in-time recovery automatically; for a manual
+  snapshot, `pg_dump "$DATABASE_URL_UNPOOLED" > backup.sql`.
 - `data/object_storage/` — the stored original manual files.
 
 `data/gdrive_cache/` is a local download cache keyed by Drive file ID, not a

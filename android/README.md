@@ -1,31 +1,22 @@
-# Technician Manual Assistant — Android (Day-1 Demo)
+# Technician Manual Assistant — Android
 
-This is the first vertical slice of the native Android rewrite described in
-`../Technician_Manual_Assistant_Galaxy_Tab_A9_Android_Rewrite_Plan_2026-08-24.txt`.
-Scope for this build: **sign in → pick an approved machine → ask one question →
-get a grounded answer → open a citation's evidence and page image**, running
-live against the existing FastAPI backend in `../backend`. Nothing here is
-production-ready; it exists to give technicians something real to react to.
+The native Android client for this system: sign in, pick an approved machine,
+ask a question, get a grounded answer, and open a citation's evidence and
+page image, running against the FastAPI + PostgreSQL backend in `../backend`.
 
-**Device scope (updated 2026-08-25):** the plan document above was written
-for the Galaxy Tab A9+ tablet fleet specifically — that's still the primary
-device this build has been physically tested on. The requirement has since
-widened: technicians will also use this app on their Android phones, so it
-needs to work correctly and look good on any Android device, not just that
-one tablet. The layout code was already written against Material 3
-window-size classes rather than any device-model check, so this was mostly
-already true; see "Material 3 Adaptive list-detail layout" under "Scope
-decisions" below for what that means concretely and what's actually been
-verified versus reasoned-through-but-unverified on real phone hardware.
+**Device scope:** built and tested against Material 3 window-size classes
+rather than any device-model check, so it targets both the Galaxy Tab A9+
+tablet fleet and technicians' Android phones rather than one specific device.
+See "Material 3 Adaptive list-detail layout" under "Scope decisions" below for
+what's been verified on real hardware versus reasoned-through-but-unverified.
 
 ## What this is NOT
 
-This is a one-day slice, not Phase 1 of the plan. Deliberately skipped for now
-(see "Scope decisions" below): Hilt, Room, DataStore, OpenAPI codegen, the new
-Node.js mobile API, Postgres, the transactional outbox/durable-attempt/SSE
-pipeline, and OIDC. The app talks directly to the current FastAPI backend's
-existing JSON endpoints. (Material 3 Adaptive's list-detail layout *was*
-added on 2026-08-24 — see "Scope decisions" below.)
+Not a full parity rewrite of every capability the backend exposes. Deliberately
+out of scope for now (see "Scope decisions" below): Hilt, Room, DataStore,
+OpenAPI codegen, a dedicated mobile API layer, the transactional
+outbox/durable-attempt/SSE pipeline, and OIDC. The app talks directly to the
+current FastAPI backend's existing JSON endpoints.
 
 ## Prerequisites
 
