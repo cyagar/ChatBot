@@ -78,6 +78,9 @@ interface ApiService {
     @POST("api/messages/{messageId}/save")
     suspend fun saveAnswer(@Path("messageId") messageId: Int): Response<Unit>
 
+    @POST("api/messages/{messageId}/unsave")
+    suspend fun unsaveAnswer(@Path("messageId") messageId: Int): Response<Unit>
+
     @POST("api/messages/{messageId}/feedback")
     suspend fun submitFeedback(
         @Path("messageId") messageId: Int,

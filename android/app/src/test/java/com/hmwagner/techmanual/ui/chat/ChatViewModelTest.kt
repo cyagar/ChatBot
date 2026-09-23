@@ -303,6 +303,45 @@ class ChatViewModelTest {
     }
 
     @Test
+    fun `a successful unsave call removes the message from saved state`() {
+        server.enqueue(jsonResponse(
+            """{"id": 10, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
+        ))
+        vm.onComposerChange("Why won't it start?")
+        vm.send()
+        awaitState { !it.sending }
+
+        server.enqueue(MockResponse().setResponseCode(200))
+        vm.saveAnswer(10)
+        awaitState { it.savedMessageIds.contains(10) }
+
+        server.enqueue(MockResponse().setResponseCode(200))
+        vm.unsaveAnswer(10)
+        awaitState { !it.savedMessageIds.contains(10) }
+        assertFalse(vm.state.value.savedMessageIds.contains(10))
+    }
+
+    @Test
+    fun `a network failure on unsave surfaces an error and leaves saved state unchanged`() {
+        server.enqueue(jsonResponse(
+            """{"id": 11, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
+        ).addHeader("Connection", "close"))
+        vm.onComposerChange("Why won't it start?")
+        vm.send()
+        awaitState { !it.sending }
+
+        server.enqueue(MockResponse().setResponseCode(200).addHeader("Connection", "close"))
+        vm.saveAnswer(11)
+        awaitState { it.savedMessageIds.contains(11) }
+
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+        vm.unsaveAnswer(11)
+        awaitState { it.error != null }
+        assertTrue(vm.state.value.error!!.contains("saved answer", ignoreCase = true))
+        assertTrue(vm.state.value.savedMessageIds.contains(11))
+    }
+
+    @Test
     fun `retryPendingSend reuses the original idempotency key instead of generating a new one`() {
         // Regression guard for the whole point of the key: a retry that used
         // a fresh UUID each time would be indistinguishable from the server

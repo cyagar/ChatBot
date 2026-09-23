@@ -424,6 +424,23 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
         }
     }
 
+    // P1-21 (external review, 2026-09-21): the Save button was permanently
+    // disabled once tapped, with no way to undo it from the chat screen.
+    fun unsaveAnswer(messageId: Int) {
+        viewModelScope.launch {
+            try {
+                val resp = ApiClient.service.unsaveAnswer(messageId)
+                if (resp.isSuccessful) {
+                    _state.value = _state.value.copy(savedMessageIds = _state.value.savedMessageIds - messageId, error = null)
+                } else {
+                    _state.value = _state.value.copy(error = "Couldn't remove that saved answer (code ${resp.code()}). Try again.")
+                }
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(error = "Couldn't remove that saved answer -- check your connection and try again.")
+            }
+        }
+    }
+
     fun submitFeedback(messageId: Int, rating: String, comment: String? = null) {
         viewModelScope.launch {
             try {

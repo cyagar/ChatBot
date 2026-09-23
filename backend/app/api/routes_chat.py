@@ -1237,6 +1237,28 @@ def save_answer(message_id: int, user: CurrentUser = Depends(get_current_user)):
     return {"ok": True}
 
 
+@router.post("/messages/{message_id}/unsave", status_code=status.HTTP_200_OK)
+def unsave_answer(message_id: int, user: CurrentUser = Depends(get_current_user)):
+    """Companion to save_answer above -- P1-21 (external review, 2026-09-21):
+    the saved-answers list had no way to remove an entry, even though a
+    technician's bookmark list is exactly the kind of thing that needs
+    tidying (a saved answer whose source was later withdrawn, or one saved
+    by mistake). POST, not DELETE, for consistency with every other
+    state-changing action in this API (/revoke, /deactivate, /reject, ...
+    -- deliberately not resource-verb-per-HTTP-method REST elsewhere in
+    this codebase, so this does not start doing that alone). Idempotent
+    like save_answer's own INSERT ... ON CONFLICT DO NOTHING: removing an
+    already-unsaved (or never-saved) message is a no-op, not a 404 -- the
+    end state ("not saved") is identical either way, and a client racing a
+    double-tap must not see a spurious error."""
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM saved_answers WHERE message_id = %s AND user_id = %s",
+            (message_id, user.id),
+        )
+    return {"ok": True}
+
+
 class SavedAnswerOut(BaseModel):
     conversation_id: int
     machine_label: str | None

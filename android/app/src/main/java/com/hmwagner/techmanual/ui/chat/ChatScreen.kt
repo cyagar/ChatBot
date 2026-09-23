@@ -162,7 +162,9 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                         items(state.messages, key = { it.id }) { msg ->
                             MessageBubble(msg, onCitationClick = vm::openCitation, onRetry = { vm.retry(msg.id) },
                                 onClarifyingSelect = vm::selectClarifyingMachine,
-                                onSave = { vm.saveAnswer(msg.id) },
+                                onSave = {
+                                    if (state.savedMessageIds.contains(msg.id)) vm.unsaveAnswer(msg.id) else vm.saveAnswer(msg.id)
+                                },
                                 saved = state.savedMessageIds.contains(msg.id),
                                 onFeedback = { rating -> vm.submitFeedback(msg.id, rating) },
                                 feedback = state.feedbackByMessageId[msg.id],
@@ -500,7 +502,7 @@ private fun MessageBubble(
                 // or no-answer response. Showing these buttons there would
                 // just produce a silent, confusing error on tap.
                 if (msg.role == "assistant" && !msg.is_clarifying_question && !isNoAnswer && msg.answer_status == "completed") {
-                    TextButton(onClick = onSave, enabled = !saved) { Text(if (saved) "Saved" else "Save") }
+                    TextButton(onClick = onSave) { Text(if (saved) "Saved" else "Save") }
                     // P1-02 (external review, 2026-09-21): the app had no way
                     // to submit answer feedback at all -- these three chips
                     // are a lightweight per-answer rating, kept re-tappable

@@ -489,6 +489,56 @@ def test_save_answer_twice_is_idempotent(test_env):
     assert len(rows) == 1
 
 
+def test_p1_21_unsave_removes_a_saved_answer(test_env):
+    """External review P1-21 (2026-09-21): the saved-answers list had no way
+    to remove an entry. save_answer's own idempotent ON CONFLICT DO NOTHING
+    is the model here -- unsave_answer is symmetric: a plain DELETE, no
+    existence check, so the end state ("not saved") is the same whether or
+    not it was saved to begin with."""
+    _seed_answerable_machine()
+    _register("tech21a@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": _ANSWERABLE_QUESTION}).json()
+
+    assert client.post(f"/api/messages/{msg['id']}/save").status_code == 201
+    saved = client.get("/api/saved-answers").json()
+    assert any(s["answer"]["id"] == msg["id"] for s in saved)
+
+    unsave_resp = client.post(f"/api/messages/{msg['id']}/unsave")
+    assert unsave_resp.status_code == 200
+
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id FROM saved_answers WHERE message_id = %s", (msg["id"],)).fetchall()
+    assert rows == []
+    still_listed = client.get("/api/saved-answers").json()
+    assert not any(s["answer"]["id"] == msg["id"] for s in still_listed)
+
+
+def test_p1_21_unsaving_a_never_saved_message_is_a_no_op_not_a_404(test_env):
+    _seed_answerable_machine()
+    _register("tech21b@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": _ANSWERABLE_QUESTION}).json()
+
+    resp = client.post(f"/api/messages/{msg['id']}/unsave")
+    assert resp.status_code == 200
+
+
+def test_p1_21_unsave_does_not_touch_another_users_saved_answer(test_env):
+    _seed_answerable_machine()
+    _register("tech21c@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": _ANSWERABLE_QUESTION}).json()
+    assert client.post(f"/api/messages/{msg['id']}/save").status_code == 201
+
+    _register("tech21d@example.com")
+    assert client.post(f"/api/messages/{msg['id']}/unsave").status_code == 200
+
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id FROM saved_answers WHERE message_id = %s", (msg["id"],)).fetchall()
+    assert len(rows) == 1, "another user's unsave call must not delete tech21c's saved answer"
+
+
 def test_duplicate_idempotency_key_returns_the_original_reply_not_a_new_turn(test_env):
     """Android Rewrite Plan sec 9/16/17: a client retry after an ambiguous
     dropped connection must return the original attempt's result, never

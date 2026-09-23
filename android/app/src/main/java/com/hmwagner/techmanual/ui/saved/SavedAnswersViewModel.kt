@@ -41,4 +41,24 @@ class SavedAnswersViewModel : ViewModel() {
             }
         }
     }
+
+    // P1-21 (external review, 2026-09-21): this list had no way to remove an
+    // entry -- see routes_chat.py's unsave_answer (POST .../unsave, added
+    // alongside this). Removes the row optimistically so the tap feels
+    // immediate; a failure restores it via a plain refresh() rather than
+    // trying to re-insert the row in the right spot by hand.
+    fun unsave(messageId: Int) {
+        val before = _state.value.answers
+        _state.value = _state.value.copy(answers = before.filterNot { it.answer.id == messageId })
+        viewModelScope.launch {
+            try {
+                val resp = ApiClient.service.unsaveAnswer(messageId)
+                if (!resp.isSuccessful) {
+                    _state.value = _state.value.copy(answers = before, error = "Couldn't remove that saved answer (code ${resp.code()}).")
+                }
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(answers = before, error = "Can't reach the server. Check your connection.")
+            }
+        }
+    }
 }

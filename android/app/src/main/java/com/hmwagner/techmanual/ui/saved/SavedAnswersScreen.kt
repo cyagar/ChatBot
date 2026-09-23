@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -95,6 +96,7 @@ fun SavedAnswersScreen(
                                 SavedAnswerRow(
                                     saved,
                                     onClick = { onConversationSelected(saved.conversation_id, saved.machine_label) },
+                                    onRemove = { vm.unsave(saved.answer.id) },
                                 )
                             }
                         }
@@ -107,9 +109,14 @@ fun SavedAnswersScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SavedAnswerRow(saved: SavedAnswerOut, onClick: () -> Unit) {
+private fun SavedAnswerRow(saved: SavedAnswerOut, onClick: () -> Unit, onRemove: () -> Unit) {
     ListItem(
         headlineContent = { Text(saved.question ?: "Saved answer") },
+        trailingContent = {
+            IconButton(onClick = onRemove) {
+                Icon(Icons.Filled.Delete, contentDescription = "Remove saved answer")
+            }
+        },
         supportingContent = {
             Column {
                 Text(saved.machine_label ?: "No machine selected", style = MaterialTheme.typography.labelMedium)
