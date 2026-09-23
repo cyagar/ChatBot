@@ -47,7 +47,7 @@ async def lifespan(_app: FastAPI):
     if applied:
         print(f"Applied migrations: {applied}")
 
-    # Automated corpus freshness (P1-4): only started when Drive is actually
+    # The automated corpus-freshness loop only starts when Drive is actually
     # configured -- get_document_source() itself would raise RuntimeError
     # otherwise, and this avoids that error firing on every tick in any
     # environment (including the test suite) that leaves Drive unconfigured.
@@ -77,7 +77,7 @@ _STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 class OriginCheckMiddleware(BaseHTTPMiddleware):
-    """Defense-in-depth CSRF mitigation (concern #20). Session auth is a
+    """Defense-in-depth CSRF mitigation. Session auth is a
     cookie, so any cross-site page can trigger a state-changing request with
     the technician's credentials attached unless something checks where the
     request actually came from -- SameSite=Lax cookies already block this in
@@ -112,12 +112,11 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
-    # P1-18 (independent follow-up review): no CSP/Permissions-Policy was set
-    # at all. The only served UI (admin.html -- the technician PWA was
-    # removed, Android-only per owner decision 2026-09-16) only ever loads
-    # same-origin external <script src="/static/..."> with no inline
-    # script/style anywhere in the template, so this can be strict --
-    # 'self' only, no 'unsafe-inline'.
+    # The only served UI (admin.html -- there is no technician-facing web
+    # UI; technicians use the Android app) only ever loads same-origin
+    # external <script src="/static/..."> with no inline script/style
+    # anywhere in the template, so this can be strict -- 'self' only, no
+    # 'unsafe-inline'.
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
         "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
@@ -133,7 +132,7 @@ async def security_headers(request: Request, call_next):
 
 @app.middleware("http")
 async def correlation_id_middleware(request: Request, call_next):
-    """Phase 1: every error body needs a correlation id. Set before any
+    """Every error body needs a correlation id. Set before any
     other middleware runs (this is the last @app.middleware("http") call,
     which Starlette makes the outermost layer) so even a request rejected
     by OriginCheckMiddleware above -- which never reaches a route handler --
@@ -174,11 +173,11 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
-    """P2-07 (external review, 2026-09-21): /healthz only proves the process
-    is running -- useful as a liveness probe, but says nothing about
-    whether this instance can actually serve a citation, which needs a
-    reachable database, readable object storage, and a corpus that has
-    synced recently enough to trust. Checked directly rather than assumed.
+    """/healthz only proves the process is running -- useful as a liveness
+    probe, but says nothing about whether this instance can actually serve a
+    citation, which needs a reachable database, readable object storage, and
+    a corpus that has synced recently enough to trust. Checked directly
+    rather than assumed.
 
     No auth, same as /healthz -- a deployment platform's readiness probe
     carries no credentials, and this deliberately reports only booleans/a
@@ -219,15 +218,9 @@ def admin_page(request: Request):
 
 @app.get("/invite")
 def invite_page(request: Request):
-    """P1-01 (external review, 2026-09-21): admin.js generated invitation
-    links pointing at "/?invite=..." -- left over from a removed technician
-    PWA that used to handle that query param client-side. There was no
-    route at "/" at all, so every invitation link 404'd; an admin could
-    create a token and the JSON API could redeem it, but a recipient had no
-    supported way to actually do that. This is the minimal HTML redemption
-    page the fix calls for (not a full PWA): reads token/email from the
-    query string and lets the recipient choose a password by calling the
-    existing POST /api/auth/register directly -- see invite.html. After
-    account creation, the technician signs in from the Android app; this
-    page does nothing beyond registration itself."""
+    """Minimal HTML redemption page for an admin-issued invitation link:
+    reads token/email from the query string and lets the recipient choose a
+    password by calling the existing POST /api/auth/register directly -- see
+    invite.html. After account creation, the technician signs in from the
+    Android app; this page does nothing beyond registration itself."""
     return templates.TemplateResponse(request, "invite.html")

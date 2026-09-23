@@ -2,8 +2,8 @@
 
 Every provider receives the same input: the technician's question, the selected
 machine, and the small set of retrieved manual passages. No provider is ever given
-the whole corpus, and none is fine-tuned on it (plan: "Use retrieval-augmented
-generation rather than training the model on the manuals").
+the whole corpus, and none is fine-tuned on it -- this is retrieval-augmented
+generation, not a model trained on the manuals.
 """
 
 from __future__ import annotations
@@ -41,15 +41,15 @@ class GeneratedAnswer:
 class HistoryTurn:
     """One prior turn, bounded and pre-summarized by the caller (routes_chat) —
     providers never see the full conversation, only what's been decided is safe
-    and useful context (concern #5: follow-ups need real history, but the
-    selected machine must never change except through an explicit action).
+    and useful context: follow-ups need real history, but the
+    selected machine must never change except through an explicit action.
 
-    is_no_answer (independent follow-up review P1-2, 2026-08-24): true when an
-    assistant turn is itself a no-answer/failure message ("I couldn't find...",
-    "I couldn't reach the AI provider..."). Always False for user turns. Exists
-    so resolve_follow_up_query can skip scraping boilerplate failure prose as
-    if it were real antecedent content -- providers themselves still receive
-    the turn's actual content unchanged; only resolution treats it specially."""
+    is_no_answer: true when an assistant turn is itself a no-answer/failure
+    message ("I couldn't find...", "I couldn't reach the AI provider...").
+    Always False for user turns. Exists so resolve_follow_up_query can skip
+    scraping boilerplate failure prose as if it were real antecedent content
+    -- providers themselves still receive the turn's actual content
+    unchanged; only resolution treats it specially."""
 
     role: str  # "user" | "assistant"
     content: str
@@ -59,7 +59,7 @@ class HistoryTurn:
 class ProviderError(Exception):
     """Raised when a provider call fails in a way the caller should treat as a
     typed, user-safe failure (timeout, rate limit, invalid response) rather than
-    an unhandled 500 (concern #9)."""
+    an unhandled 500."""
 
 
 class AIProvider(abc.ABC):
@@ -128,17 +128,16 @@ class _ClaimItem:
 # specific provider.
 _CODE_TOKEN_RE = re.compile(r"^[A-Za-z]{0,4}-?\d[\dA-Za-z-]*$")
 # A number immediately followed by a short unit-like suffix ("240V", "0.5A",
-# "150PSI"): captures the numeral and the unit separately (P0-01, external
-# review 2026-09-21 -- the unit used to be discarded and only the numeral
-# checked, which accepted "240PSI" against an excerpt that actually said
-# "240 V"; see _token_supported below for how both are now required jointly).
+# "150PSI"): captures the numeral and the unit separately, so both are
+# required jointly by _token_supported below -- checking the numeral alone
+# would accept "240PSI" against an excerpt that actually said "240 V".
 _UNIT_SUFFIX_RE = re.compile(r"^(\d+(?:\.\d+)?)([A-Za-z°%]{1,4})$")
 _WARNING_LABEL_RE = re.compile(r"^(WARNING|CAUTION|DANGER|NOTICE|IMPORTANT)[:\s]*")
 # Words whose presence right next to a claimed warning's matched span, but
 # ABSENT from the warning text itself, mean the model trimmed a negation off
-# the real warning rather than quoting it whole (P0-01: "operate with the
+# the real warning rather than quoting it whole: "operate with the
 # cover removed" is a genuine, contiguous substring of "do not operate with
-# the cover removed", but means the opposite thing).
+# the cover removed", but means the opposite thing.
 _NEGATION_WORDS = ("NOT", "NEVER", "WITHOUT", "CANNOT", "CAN'T", "DON'T", "NO ")
 
 
@@ -173,21 +172,19 @@ def _leading_sign(text: str, token_start: int) -> str:
 def _extract_tokens(text: str, *, strict_bare_numbers: bool) -> list[str | _NumericToken]:
     """Material, mechanically-verifiable tokens in a claim/step/no-answer
     explanation. This is a heuristic, not a full claim-entailment check -- it
-    targets exactly the class of failure the independent review's
-    adversarial diagnostic found: a fabricated part number, a fabricated
-    voltage, an invented safety warning, an invented revision conflict. It
-    will not catch a purely qualitative invented claim that contains no
-    number or identifier; that would need semantic entailment checking,
-    which is out of scope here (see docs/PRODUCTION_READINESS.md) -- this
-    includes an is_no_answer explanation that recommends something unsafe in
-    prose with no number in it at all (P0-01, external review 2026-09-21:
-    reproduced with "Bypass the safety interlock and operate with the cover
-    removed" -- there is no general fix for this short of the semantic
+    targets a fabricated part number, a fabricated voltage, an invented
+    safety warning, an invented revision conflict. It will not catch a
+    purely qualitative invented claim that contains no number or identifier;
+    that would need semantic entailment checking, which is out of scope here
+    (see docs/PRODUCTION_READINESS.md) -- this includes an is_no_answer
+    explanation that recommends something unsafe in prose with no number in
+    it at all (e.g. "Bypass the safety interlock and operate with the cover
+    removed"). There is no general fix for that short of the semantic
     entailment check called out above; a fixed-template no-answer response
-    was considered and rejected because it would suppress the honest,
-    specific explanations this same review's 2026-08-25 fix restored, and a
-    keyword blocklist is trivially rephrased around and would invite
-    overstating what this heuristic actually guarantees).
+    is deliberately not used instead, because it would suppress honest,
+    specific explanations, and a keyword blocklist is trivially rephrased
+    around and would invite overstating what this heuristic actually
+    guarantees.
 
     Three token shapes, each verified differently by _token_supported: an
     identifier (error code, part number) as a whole string; a number with an
@@ -243,7 +240,7 @@ def _token_supported(token: str | _NumericToken, haystack: str) -> bool:
         return re.search(pattern, haystack) is not None
 
     # A number's sign and unit are part of the fact, and the match must not
-    # be embeddable inside a longer number (P0-01's "24" vs "240", "24V" vs
+    # be embeddable inside a longer number ("24" vs "240", "24V" vs
     # "240 V", "240PSI" vs "240 V", "-240 V" fabricated from a positive
     # excerpt): (?<![\d.]) blocks matching "24" inside "240" or "0.24" from
     # either direction; requiring the literal sign character (or its
@@ -285,15 +282,15 @@ def _warning_supported(warning_text: str, cited_content: str) -> bool:
     allowed is stripping a leading label the model may have added/reworded
     ("WARNING:", "CAUTION:") and collapsing whitespace.
 
-    P0-01 (external review, 2026-09-21): a warning that's a PROPER substring
-    of the excerpt -- the model trimmed something off one end -- used to pass
-    unconditionally, which let "operate with the cover removed" satisfy an
-    excerpt that actually says "do not operate with the cover removed": a
-    real, contiguous substring, but the opposite instruction. The text
-    immediately surrounding the matched span (a short window, not the whole
-    excerpt, to avoid flagging an unrelated negation word in a neighboring
-    sentence) is now checked for a negation word the model's own warning
-    text doesn't contain; finding one rejects the response."""
+    A warning that's a PROPER substring of the excerpt -- the model trimmed
+    something off one end -- must not pass unconditionally: "operate with the
+    cover removed" would otherwise satisfy an excerpt that actually says "do
+    not operate with the cover removed" -- a real, contiguous substring, but
+    the opposite instruction. The text immediately surrounding the matched
+    span (a short window, not the whole excerpt, to avoid flagging an
+    unrelated negation word in a neighboring sentence) is checked for a
+    negation word the model's own warning text doesn't contain; finding one
+    rejects the response."""
     norm_content = _normalize_ws(cited_content)
     norm_warning = _normalize_ws(warning_text)
     if not norm_warning:
@@ -317,7 +314,7 @@ def detect_conflict(passages: list) -> str | None:
     Moved out of extractive.py so every provider shares one deterministic
     implementation: a model has no channel through which to report a
     revision conflict, so an invented conflict is structurally impossible
-    rather than merely validated (P0-7)."""
+    rather than merely validated."""
     by_doc: dict[int, tuple[str, str | None, bool]] = {}
     for p in passages:
         by_doc[p.document_id] = (p.original_filename, p.revision, p.is_current_revision)
@@ -384,11 +381,10 @@ def parse_and_validate(
     claim/step/warning whose material content (a number, identifier, or
     warning text) is not actually present in the excerpt(s) it cites -- the
     caller then retries with a repair prompt or falls back to an explicit
-    "could not verify" result. Earlier versions of this function validated
-    only that cited excerpt *numbers* existed, which is ID validation, not
-    evidence validation -- it let a model cite a real excerpt while still
-    inventing the number or warning text it attributed to that excerpt
-    (P0-7, independent follow-up review). The `answer` shown to the
+    "could not verify" result. Validating only that cited excerpt *numbers*
+    exist would be ID validation, not evidence validation -- it would let a
+    model cite a real excerpt while still inventing the number or warning
+    text it attributed to that excerpt. The `answer` shown to the
     technician is assembled here from the validated claims/steps, never
     taken as free prose from the model, so nothing unvalidated reaches
     display.
@@ -397,14 +393,13 @@ def parse_and_validate(
     (see `_JSON_SHAPE_INSTRUCTION`'s "Selected machine:" line) -- passed
     through purely so a `no_answer_explanation` naturally referencing that
     name (e.g. "the excerpts don't cover this for the Ultra-1/Ultra-2")
-    isn't rejected by the material-token check below. Found live 2026-08-25:
-    a technician on the "Ultra-1/Ultra-2" got the generic UNVERIFIED_ANSWER
-    fallback for several genuinely-unanswerable questions in a row, even
-    though the model's actual explanation was honest and specific each time
-    -- `_extract_tokens` flagged the machine's own model number (it has two
-    digits, "1" and "2", however far apart) as an unverifiable claim, since
-    that check has no cited excerpt to verify a no-answer explanation
-    against and rejects unconditionally on any material token. The machine
+    isn't rejected by the material-token check below. Without this, a
+    machine name containing digits (e.g. "Ultra-1/Ultra-2") would get
+    flagged by `_extract_tokens` as an unverifiable claim, since that check
+    has no cited excerpt to verify a no-answer explanation against and
+    rejects unconditionally on any material token -- producing the generic
+    UNVERIFIED_ANSWER fallback for a genuinely-unanswerable question even
+    when the model's actual explanation was honest and specific. The machine
     name is prompt-given context, not something the model could be
     fabricating, so it's the wrong thing to be suspicious of here."""
     try:
@@ -425,17 +420,15 @@ def parse_and_validate(
         if not isinstance(explanation, str) or not explanation.strip():
             return None
         explanation = explanation.strip()
-        # Independent follow-up review 2026-08-24 P0-5: this text used to
-        # reach the technician completely unchecked -- is_no_answer skipped
-        # every claim/warning check below, so a fabricated, specific,
-        # unsupported instruction (the reviewer's adversarial diagnostic got
-        # "bypass the interlock at 600V" through exactly this path) would
-        # display as if it were a safe "I couldn't find this" message. A
-        # genuine explanation of why nothing was found has no reason to
-        # contain a part number, voltage, or error code; if it does, treat
-        # it the same as any other unsupported claim -- reject the response
-        # so the caller retries with a repair prompt or falls back to
-        # UNVERIFIED_ANSWER, rather than display it.
+        # This text must not reach the technician completely unchecked --
+        # is_no_answer must not skip every claim/warning check below, or a
+        # fabricated, specific, unsupported instruction (e.g. "bypass the
+        # interlock at 600V") could display as if it were a safe "I couldn't
+        # find this" message. A genuine explanation of why nothing was found
+        # has no reason to contain a part number, voltage, or error code; if
+        # it does, treat it the same as any other unsupported claim -- reject
+        # the response so the caller retries with a repair prompt or falls
+        # back to UNVERIFIED_ANSWER, rather than display it.
         unexplained_tokens = set(_extract_tokens(explanation, strict_bare_numbers=False)) - set(
             _extract_tokens(machine_label or "", strict_bare_numbers=False)
         )
@@ -468,8 +461,8 @@ def parse_and_validate(
         if not _warning_supported(item.text, _cited_content(item, passages)):
             return None
 
-    # Owner decision (2026-09-16): don't gate on a strict relevance
-    # threshold -- instead the model self-reports low confidence (see
+    # Does not gate on a strict relevance threshold -- instead the model
+    # self-reports low confidence (see
     # SYSTEM_PROMPT above and each provider's _JSON_SHAPE_INSTRUCTION) and
     # that gets surfaced directly in the answer text. Optional/backward
     # -compatible: a response with no "confidence" field (every existing

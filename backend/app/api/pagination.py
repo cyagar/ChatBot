@@ -1,10 +1,7 @@
-"""Phase 1 (narrowed scope, 2026-08-26): "Add stable cursor pagination for
-machines, history, messages, and saved answers."
+"""Stable cursor pagination for machines, history, messages, and saved answers.
 
-Response BODIES stay exactly the plain JSON arrays they always were --
-Android's Retrofit interfaces and the web UI's JS both already parse these
-endpoints as a flat list, and neither is being changed for this (see
-docs/OWNER_DECISION_GATE.md section 9: no Android refactor). Pagination
+Response BODIES stay plain JSON arrays -- Android's Retrofit interfaces and
+the web UI's JS both parse these endpoints as a flat list. Pagination
 metadata instead rides on response headers (`X-Next-Cursor`, `X-Has-More`),
 GitHub-API-style: a client that doesn't know about them still gets the same
 first page it always did; a client that does can page through the rest.
@@ -12,7 +9,7 @@ first page it always did; a client that does can page through the rest.
 The cursor itself is an opaque, base64-encoded JSON array of the last row's
 sort-key values -- never a raw offset, so a row inserted or deleted between
 two page fetches can't shift every subsequent page by one (the classic
-LIMIT/OFFSET instability this item's "stable" is asking to avoid).
+LIMIT/OFFSET instability problem).
 """
 
 from __future__ import annotations
@@ -44,17 +41,13 @@ def encode_cursor(*parts) -> str:
     ).decode("ascii")
 
 
-# P2-01 (external review, 2026-09-21): decode_cursor used to accept any
-# scalar type (str, int, float, bool, or null) in any position, as long as
-# the tuple LENGTH matched -- a crafted cursor could put "not-a-date" where
-# a timestamp comparison was expected, or `true`/`false` where an integer id
-# was (bool is a subtype of int in Python, so it passed an isinstance(int)
-# check and would have been silently accepted as 1/0). Either handed
-# PostgreSQL a value it can't cast for that comparison, surfacing an
-# unhandled 500 instead of a clean 400 -- reproduced by decoding
-# ['not-a-date', 'not-an-id'] straight through the old check. Every caller
-# now declares a per-position TYPE, not just a count, and int positions
-# explicitly reject bool.
+# decode_cursor validates a per-position TYPE, not just a count -- a crafted
+# cursor putting "not-a-date" where a timestamp comparison is expected, or
+# `true`/`false` where an integer id is expected (bool is a subtype of int in
+# Python, so a bare isinstance(int) check would silently accept it as 1/0),
+# would otherwise hand PostgreSQL a value it can't cast for that comparison,
+# surfacing an unhandled 500 instead of a clean 400. Int positions explicitly
+# reject bool.
 CURSOR_INT = "int"
 CURSOR_STR = "str"
 CURSOR_BOOL = "bool"
@@ -86,13 +79,11 @@ def _matches_cursor_type(value, kind: str) -> bool:
 
 
 def decode_cursor(cursor: str, schema: list[str]) -> list:
-    """P1-10 (independent follow-up review): decoding used to accept any
-    valid base64/JSON and hand it straight to the caller's tuple-unpack --
-    a well-formed cursor with the wrong shape (too few/many elements, or a
-    nested list/dict where a scalar SQL parameter is expected) raised an
-    unhandled ValueError/TypeError instead of a clean 400. `schema` is a
-    list of CURSOR_* constants, one per expected position (see P2-01's note
-    above for why a count alone isn't enough)."""
+    """A well-formed cursor with the wrong shape (too few/many elements, or a
+    nested list/dict where a scalar SQL parameter is expected) must raise a
+    clean 400, not an unhandled ValueError/TypeError from the caller's
+    tuple-unpack. `schema` is a list of CURSOR_* constants, one per expected
+    position -- a count alone isn't enough, see _matches_cursor_type above."""
     if len(cursor) > _MAX_CURSOR_LENGTH:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid pagination cursor.")
     try:

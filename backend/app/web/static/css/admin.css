@@ -52,15 +52,12 @@
 .machine-option { display: flex; align-items: center; gap: 6px; padding: 4px 6px; font-weight: 400; min-height: auto; }
 .machine-option input { width: auto; }
 
-/* P1-06 (external review, 2026-09-21): admin.js used to build up markup
-   with inline style="..." attributes (and one onclick="...") -- CSP here is
-   style-src 'self'/script-src 'self' with no unsafe-inline, so a
-   CSP-enforcing browser silently drops every one of them. Worst case: the
-   edit-row/report-row toggle rows relied on an inline style="display:none"
-   ever having applied, so under real CSP enforcement they rendered visible
-   on every page load instead of hidden until toggled. These utility
-   classes replace every inline style; .hidden replaces every inline
-   display:none (JS toggles it via classList, not .style.display). */
+/* CSP here is style-src 'self'/script-src 'self' with no unsafe-inline, so
+   admin.js must never build markup with inline style="..." attributes (or
+   onclick="...") -- a CSP-enforcing browser silently drops those. These
+   utility classes cover every style admin.js needs; .hidden in particular
+   is what JS toggles via classList (not .style.display) to show/hide
+   edit-row/report-row toggle rows. */
 .hidden { display: none !important; }
 .text-dim { color: var(--text-dim); }
 .text-danger { color: var(--danger); }

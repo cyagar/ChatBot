@@ -63,33 +63,28 @@ def search_machines(
     machines that actually have at least one indexed, approved, current
     document (with an approved link) are returned -- otherwise the picker
     would offer a machine that then dead-ends into "no manuals" the moment
-    retrieval applies its own approval/revision filters (independent
-    follow-up review P0-6, P1-6). The eligibility rules here are deliberately
-    the same set retrieval enforces, including the current-revision rule
-    (P1-11): a machine whose only manual is superseded has nothing
-    retrievable and must not appear.
+    retrieval applies its own approval/revision filters. The eligibility
+    rules here are deliberately the same set retrieval enforces, including
+    the current-revision rule: a machine whose only manual is superseded has
+    nothing retrievable and must not appear.
 
-    Requires auth: the equipment catalog is proprietary to the deployment
-    (concern #20 -- this endpoint leaked it to unauthenticated requests)."""
+    Requires auth: the equipment catalog is proprietary to the deployment."""
     # (manufacturer, model_name, id) -- id as the tiebreaker for stable
-    # cursor pagination (Phase 1, narrowed scope), same reasoning as
-    # routes_chat.py's list_conversations.
+    # cursor pagination, same reasoning as routes_chat.py's list_conversations.
     before_mf, before_model, before_id = (
         decode_cursor(cursor, [CURSOR_STR, CURSOR_STR, CURSOR_INT]) if cursor else (None, None, None)
     )
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
                COUNT(DISTINCT d.id) AS document_count,
-               -- P1-12 (external review, 2026-09-21): this query had no join
-               -- to recent_machines at all, so _row_to_machine's
-               -- "is_favorite" key was always absent and defaulted to False
-               -- -- a favorited machine always drew an empty star in search
-               -- results, and the Android client's optimistic toggle (which
-               -- flips !machine.is_favorite) would then send the WRONG
-               -- direction on first tap. bool_or (not a plain column) so no
-               -- new GROUP BY column is needed -- the r.user_id join
-               -- condition already guarantees at most one recent_machines
-               -- row per machine.
+               -- Joins to recent_machines so is_favorite reflects real state
+               -- instead of always defaulting to false -- without it, a
+               -- favorited machine draws an empty star here, and the
+               -- Android client's optimistic toggle (which flips
+               -- !machine.is_favorite) sends the WRONG direction on first
+               -- tap. bool_or (not a plain column) so no new GROUP BY column
+               -- is needed -- the r.user_id join condition already
+               -- guarantees at most one recent_machines row per machine.
                COALESCE(bool_or(r.is_favorite), false) AS is_favorite
         FROM machines m
         JOIN manufacturers mf ON mf.id = m.manufacturer_id
@@ -144,14 +139,10 @@ def recent_machines(
     """Applies the exact same eligibility rules and `HAVING document_count > 0`
     as `search_machines()` above -- a machine a technician favorited or
     recently used, whose only manual has since been deactivated/unapproved/
-    superseded, is dropped rather than shown with `document_count: 0`
-    (independent follow-up review P1-6's "apply the rules consistently to
-    search and recent machines": found, during this pass, that this endpoint
-    was missing the `HAVING` clause `search_machines()` already had, so a
-    dead manual could resurface here even though the picker correctly hid
-    it). The tradeoff is explicit: a favorited-but-now-empty machine
-    disappears from recents instead of dead-ending into "no manuals" --
-    consistent with what the picker already does, not a new UX decision."""
+    superseded, is dropped rather than shown with `document_count: 0`. The
+    tradeoff is explicit: a favorited-but-now-empty machine disappears from
+    recents instead of dead-ending into "no manuals" -- consistent with what
+    the picker already does, not a new UX decision."""
     before_fav, before_last_used, before_id = (
         decode_cursor(cursor, [CURSOR_BOOL, CURSOR_TIMESTAMP, CURSOR_INT]) if cursor else (None, None, None)
     )
@@ -198,10 +189,9 @@ def recent_machines(
 
 
 def _require_machine(conn, machine_id: int) -> None:
-    """P1-11 (independent follow-up review): touching recent/favorite state
-    for a nonexistent machine_id used to hit recent_machines' foreign key
-    directly and surface as an unhandled 500 -- validate up front and return
-    a normal 404 instead."""
+    """Validate machine_id up front and return a normal 404 for a nonexistent
+    one, rather than letting it hit recent_machines' foreign key directly and
+    surface as an unhandled 500."""
     if conn.execute("SELECT 1 FROM machines WHERE id = %s", (machine_id,)).fetchone() is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Machine not found.")
 

@@ -15,15 +15,12 @@ from app.config import get_settings
 
 
 def embedding_fingerprint() -> str:
-    """P1-15 (external review, 2026-09-21): embeddings.model_name used to
-    store only settings.embedding_model (e.g. "BAAI/bge-small-en-v1.5"),
-    never the revision -- bumping embedding_model_revision to a different
-    commit of the same repo (different weights, a different vector space)
-    left every existing row's model_name identical, so nothing detected
-    that its vectors were now incompatible with fresh ones, and
-    vector_search() compared them anyway. This fingerprint is what actually
-    gets written and filtered on now: same model name AND revision, not
-    just the name."""
+    """Embeddings must be compared only against other embeddings from the same
+    model AND revision -- a different commit of the same model repo has
+    different weights and lives in a different vector space, so comparing
+    across revisions would be meaningless even though the model name is
+    unchanged. This fingerprint is what gets written to embeddings.model_name
+    and filtered on in vector_search()."""
     settings = get_settings()
     return f"{settings.embedding_model}@{settings.embedding_model_revision}"
 
@@ -39,8 +36,8 @@ def get_model():
         # Surface this as a clear, actionable failure rather than whatever
         # huggingface_hub/urllib raises three layers down -- the Docker image
         # bakes this model in at build time specifically so this path is only
-        # ever hit by a misconfigured/offline deployment, not normal use
-        # (independent review concern #18: no silent first-use download).
+        # ever hit by a misconfigured/offline deployment, not normal use.
+        # Never silently fall back to a first-use download.
         raise RuntimeError(
             f"Could not load embedding model {settings.embedding_model!r} "
             f"(revision {settings.embedding_model_revision!r}). If this is a fresh "

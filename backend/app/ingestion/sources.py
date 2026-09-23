@@ -1,11 +1,11 @@
 """Document sources.
 
 Manuals live in a shared Google Drive folder -- that's the only source of
-record (2026-08-21: the local-directory corpus/upload path was retired
-entirely, so there is exactly one place the corpus can live). Ingestion talks
-only to the `DocumentSource` interface below; tests exercise the pipeline
-against a small directory-scanning fake (`tests/ingestion/fakes.py`), not
-against this module or a live Drive connection.
+record; there is no local-directory corpus/upload path, so there is exactly
+one place the corpus can live. Ingestion talks only to the `DocumentSource`
+interface below; tests exercise the pipeline against a small
+directory-scanning fake (`tests/ingestion/fakes.py`), not against this
+module or a live Drive connection.
 """
 
 from __future__ import annotations
@@ -37,19 +37,17 @@ class SourceFile:
 @dataclass(frozen=True)
 class SkippedFile:
     """An item a DocumentSource noticed but did not include in list_files()'s
-    result, with a human-readable reason -- independent follow-up review
-    P1-3: "apply file count/size/type limits and report every skipped item."
-    Skips used to only reach a server log, invisible to an admin; pipeline.py
-    now records one of these as a normal ingestion_events row per skip, the
-    same visibility every other outcome (indexed/duplicate/failed/...) gets.
+    result, with a human-readable reason. pipeline.py records one of these as
+    a normal ingestion_events row per skip -- the same visibility every other
+    outcome (indexed/duplicate/failed/...) gets, rather than only reaching a
+    server log invisible to an admin.
 
-    is_error (P1-05, external review 2026-09-21) distinguishes a genuine
-    failure (a download that errored out -- the file may well be a manual
-    the corpus is now silently missing) from an intentional, by-design skip
-    (a subfolder, a shortcut, a Workspace-native file with no binary, an
-    oversized file, a permissions gap) that isn't evidence of anything
-    broken. Only the former should make a run's overall health reflect a
-    problem -- see pipeline.py's had_error handling."""
+    is_error distinguishes a genuine failure (a download that errored out --
+    the file may well be a manual the corpus is now silently missing) from an
+    intentional, by-design skip (a subfolder, a shortcut, a Workspace-native
+    file with no binary, an oversized file, a permissions gap) that isn't
+    evidence of anything broken. Only the former should make a run's overall
+    health reflect a problem -- see pipeline.py's had_error handling."""
 
     filename: str
     reason: str
@@ -113,9 +111,7 @@ class GoogleDriveSource(DocumentSource):
     can't download (capabilities.canDownload = false) are skipped the same
     way.
 
-    Contract decision (independent follow-up review P1-3, "file-type, folder,
-    and download-capability policy is undefined"): this is a FLAT,
-    binary-only source. The query only ever sees the configured folder's
+    This is a FLAT, binary-only source. The query only ever sees the configured folder's
     immediate children -- subfolders are not recursed into, shortcuts are not
     followed, and Google Workspace documents are not exported (export_media
     would need a new extraction path for each Workspace type; nothing in
@@ -132,9 +128,8 @@ class GoogleDriveSource(DocumentSource):
 
     Deliberately NOT limited: file COUNT. A cap here would make list_files()
     return a partial listing whenever a folder grows past it, with no way to
-    tell that apart from files having actually disappeared -- exactly the
-    ambiguity the review (P0-2, lines 191/410) warns must never feed removal
-    reconciliation once that's built. The size limit doesn't have this
+    tell that apart from files having actually disappeared -- an ambiguity
+    that must never feed removal reconciliation once that's built. The size limit doesn't have this
     problem (it rejects individual files, not the listing itself) so it's
     kept; an unbounded folder is bounded by the size limit on each of its
     files, not by how many there are.
@@ -213,29 +208,28 @@ class GoogleDriveSource(DocumentSource):
         """Downloads to a temp file in the cache dir and atomically renames it into
         place, retrying transient failures a few times before giving up.
 
-        Independent follow-up review 2026-08-24 P0-4, three separate defects
-        fixed together here:
-        (1) The old version buffered the whole file in an io.BytesIO() before
-        ever writing a byte to disk -- for a file near the 200MB default cap
-        that's 200MB held in the ingestion process's memory on top of
-        whatever else it's doing, on a container with a 2GB limit. Bytes now
-        stream directly to the temp file one chunk at a time via a thin
-        file-like wrapper (MediaIoBaseDownload only ever calls .write() on
-        what it's given -- see googleapiclient.http.MediaIoBaseDownload.next_chunk,
-        no .tell()/.seek() needed).
+        Three invariants held together here:
+        (1) Bytes stream directly to the temp file one chunk at a time via a
+        thin file-like wrapper (MediaIoBaseDownload only ever calls .write()
+        on what it's given -- see
+        googleapiclient.http.MediaIoBaseDownload.next_chunk, no
+        .tell()/.seek() needed), rather than buffering the whole file in
+        memory first -- for a file near the 200MB default cap, buffering
+        would hold 200MB in the ingestion process's memory on top of
+        whatever else it's doing, on a container with a 2GB limit.
         (2) That same wrapper enforces max_bytes DURING the download, not
-        just via the pre-download `reported_size > max_file_size_bytes`
-        check in list_files() -- which used `int(f.get("size") or 0)` and so
-        silently treated a missing/zero Drive-reported size as "0 bytes,
-        always under the cap", bypassing it entirely. The cap is now
-        authoritatively enforced on bytes actually received, regardless of
-        what (or whether) Drive reported for size.
-        (3) Nothing previously verified the downloaded bytes against Drive's
-        own md5Checksum -- a truncated or corrupted transfer that still
-        completed without an HTTP error would be cached and fed to the
-        pipeline as if it were the real file, discovered (if ever) only much
-        later via a garbled extraction. The MD5 of what was actually written
-        is now computed while streaming and compared against Drive's
+        just via a pre-download `reported_size > max_file_size_bytes` check
+        in list_files() -- Drive's reported size can be missing or zero, and
+        trusting `int(f.get("size") or 0)` alone would treat that as "0
+        bytes, always under the cap", bypassing the limit entirely. The cap
+        is authoritatively enforced on bytes actually received, regardless
+        of what (or whether) Drive reported for size.
+        (3) The downloaded bytes are verified against Drive's own
+        md5Checksum -- a truncated or corrupted transfer that still
+        completes without an HTTP error would otherwise be cached and fed to
+        the pipeline as if it were the real file, discoverable (if ever) only
+        much later via a garbled extraction. The MD5 of what was actually
+        written is computed while streaming and compared against Drive's
         advertised checksum before the temp file is promoted into the cache.
         """
         from googleapiclient.http import MediaIoBaseDownload
@@ -320,9 +314,9 @@ class GoogleDriveSource(DocumentSource):
                 name = f["name"]
                 mime_type = f.get("mimeType", "")
 
-                # Flat, binary-only contract (P1-3): subfolders and shortcuts
-                # get their own explicit, actionable reasons rather than being
-                # lumped into the generic Workspace-export message below.
+                # Subfolders and shortcuts get their own explicit, actionable
+                # reasons rather than being lumped into the generic
+                # Workspace-export message below.
                 if mime_type == self._FOLDER_MIME:
                     logger.info("Skipping Drive item %s (%r): subfolders are not scanned.", file_id, name)
                     self._pending_skips.append(SkippedFile(

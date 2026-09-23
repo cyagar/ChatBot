@@ -1,10 +1,9 @@
 "use strict";
 
-// P1-01 (external review, 2026-09-21): kept as an external file, not an
-// inline <script>, because app/main.py's CSP is script-src 'self' with no
-// 'unsafe-inline' (P1-18, independent follow-up review) -- an inline script
-// on this page would be silently blocked by any CSP-respecting browser,
-// breaking the redemption flow it exists to fix.
+// Kept as an external file, not an inline <script>, because app/main.py's
+// CSP is script-src 'self' with no 'unsafe-inline' -- an inline script on
+// this page would be silently blocked by any CSP-respecting browser,
+// breaking the redemption flow it exists to power.
 (function () {
   const params = new URLSearchParams(window.location.search);
   const token = params.get("token");

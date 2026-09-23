@@ -17,17 +17,16 @@ from app.ingestion.extracted import ExtractedDocument
 TARGET_CHARS = 1200
 MIN_CHARS = 150
 
-# Independent follow-up review 2026-08-24 P0-7: bump this whenever chunking
-# logic changes materially (boundary detection, size caps, table handling).
-# documents.chunking_version records which version actually produced a
-# document's current chunks -- see extractors.py's CURRENT_EXTRACTION_VERSION
-# for the matching mechanism on the extraction side.
+# Bump this whenever chunking logic changes materially (boundary detection,
+# size caps, table handling). documents.chunking_version records which
+# version actually produced a document's current chunks -- see extractors.py's
+# CURRENT_EXTRACTION_VERSION for the matching mechanism on the extraction side.
 CURRENT_CHUNKING_VERSION = 1
 
-# Independent review concern #16: 40 chunks in the corpus exceeded 2,000
-# characters (largest over 11,000), all table/error-code chunks -- and an
-# embedding model typically truncates its input, so rows past the truncation
-# point are invisible to semantic search even though they were "indexed".
+# An embedding model typically truncates its input, so a chunk that grows too
+# large has rows past the truncation point invisible to semantic search even
+# though they were "indexed". Keeps table/error-code chunks (the chunk types
+# most prone to growing large) bounded well under that risk.
 MAX_TABLE_CHUNK_CHARS = 1800
 
 WARNING_RE = re.compile(r"^(WARNING|CAUTION|DANGER|NOTICE|IMPORTANT|LOCKOUT[/ ]TAGOUT)\b", re.IGNORECASE)
@@ -92,15 +91,14 @@ def _chunk_page_text(page_number: int, text: str, headings: list[tuple[str, int]
             continue
 
         line_type = _classify_line(stripped)
-        # P1-16 (external review, 2026-09-21): _classify_line only recognizes
-        # the FIRST line of a warning or numbered step -- "WARNING: ..." or
-        # "1. ..." -- by its leading marker. Every line after it (the actual
-        # warning body, or a step's explanatory continuation) has no such
-        # marker and classified as plain "text", which used to flush() here
-        # on every single one: a warning's own content chunk was detached
-        # from its "WARNING" label into a separate chunk one line later.
-        # A "text" line inside an open warning/procedure buffer is now kept
-        # as part of it instead of ending the block.
+        # _classify_line only recognizes the FIRST line of a warning or
+        # numbered step -- "WARNING: ..." or "1. ..." -- by its leading
+        # marker. Every line after it (the actual warning body, or a step's
+        # explanatory continuation) has no such marker and classifies as
+        # plain "text"; flushing on every one of those would detach a
+        # warning's own content from its "WARNING" label into a separate
+        # chunk one line later. A "text" line inside an open warning/procedure
+        # buffer is kept as part of it instead of ending the block.
         if buffer_type in ("warning", "procedure") and line_type == "text":
             line_type = buffer_type
         elif buffer and buffer_type != line_type:
@@ -165,21 +163,20 @@ def _split_oversized_row(header: list[str], row: list[str]) -> list[list[str]]:
 
     Cells are kept whole and their text is never truncated -- an exact part
     number or measured value must survive verbatim or the chunk is worse than
-    useless (independent follow-up review P1-13: "preserving headers, page,
-    row identity, and exact values"). A single cell that alone exceeds the
-    budget is still emitted whole, on its own: truncating it would silently
-    corrupt the value, and an over-budget chunk merely risks embedding
-    truncation for that one cell rather than losing data outright.
+    useless: headers, page, row identity, and exact values must all be
+    preserved. A single cell that alone exceeds the budget is still emitted
+    whole, on its own: truncating it would silently corrupt the value, and an
+    over-budget chunk merely risks embedding truncation for that one cell
+    rather than losing data outright.
 
-    P1-16 (external review, 2026-09-21): the row's first cell -- in every
-    real table this pipeline splits (error-code, part-number, measured-value
-    listings), the row's identifier -- used to land in whichever piece
-    happened to hold column 0. A long remedy/description in a LATER column
-    could push the split into a second (or third) piece with an EMPTY
-    identifier column, so a retrieved chunk for that piece carried an error
-    code's remedy with no way to tell which code it was for. The first cell
-    is now repeated in every piece, mirroring the header-repeat-per-window
-    fix already applied one level up in _split_table_rows."""
+    The row's first cell -- in every real table this pipeline splits
+    (error-code, part-number, measured-value listings), the row's identifier
+    -- is repeated in EVERY piece, mirroring the header-repeat-per-window
+    behavior one level up in _split_table_rows. Without that, a long
+    remedy/description in a LATER column could push the split into a second
+    (or third) piece with an EMPTY identifier column, so a retrieved chunk
+    for that piece would carry an error code's remedy with no way to tell
+    which code it was for."""
     if len(row) <= 1:
         return [[c or "" for c in row]] if row else []
 
@@ -213,15 +210,13 @@ def _split_oversized_row(header: list[str], row: list[str]) -> list[list[str]]:
 def _split_table_rows(table: ExtractedTable) -> list[str]:
     """Bound each table chunk by row windows, not raw character count alone --
     a split must never land mid-row. The header row is repeated in every
-    window (independent review: 'repeat the table title and column headers')
-    so each chunk is independently understandable by retrieval and by a
-    reader, instead of relying on an earlier chunk's now-truncated header.
+    window so each chunk is independently understandable by retrieval and by
+    a reader, instead of relying on an earlier chunk's now-truncated header.
 
     A row that is itself over the budget is split across cells rather than
-    emitted whole: the previous `max(1, ...)` row-window floor guaranteed at
-    least one row per window, so a single huge row silently produced an
-    over-limit chunk whose tail the embedding model would truncate away
-    (independent follow-up review P1-13)."""
+    emitted whole: a `max(1, ...)` row-window floor guarantees at least one
+    row per window, so without this a single huge row would produce an
+    over-limit chunk whose tail the embedding model truncates away."""
     if not table.rows:
         return []
     header = table.rows[0]

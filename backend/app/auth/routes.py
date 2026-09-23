@@ -31,12 +31,11 @@ class RegisterRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def _password_fits_bcrypt(cls, v: str) -> str:
-        """P0-5 (independent follow-up review): max_length=72 above counts
-        *characters*, but bcrypt's hard limit is 72 UTF-8 *bytes* -- a
-        40-emoji password can be under 72 characters yet well over 72 bytes,
-        which used to reach app.auth.security.hash_password's own byte check
-        and raise an uncaught ValueError (an unhandled 500) instead of a
-        normal 422 naming the problem."""
+        """max_length=72 above counts *characters*, but bcrypt's hard limit is
+        72 UTF-8 *bytes* -- a 40-emoji password can be under 72 characters yet
+        well over 72 bytes. Checked here so it raises a normal 422 naming the
+        problem, rather than reaching app.auth.security.hash_password's own
+        byte check and raising an uncaught ValueError (an unhandled 500)."""
         if len(v.encode("utf-8")) > 72:
             raise ValueError("Password must be at most 72 bytes when UTF-8 encoded.")
         return v
@@ -52,8 +51,7 @@ class UserOut(BaseModel):
     email: str
     role: str
     display_name: str | None
-    # Phase 1 (narrowed scope, 2026-08-26): "role/capabilities". Mechanical,
-    # not a new permission system -- every technician-facing capability is
+    # Mechanical, not a new permission system -- every technician-facing capability is
     # available to any authenticated user (there's no per-technician
     # variation), and the administrator-only ones are exactly the routes
     # app.auth.deps.require_admin actually gates (routes_admin.py). This
@@ -100,33 +98,31 @@ def _set_session_cookie(response: Response, user_id: int, role: str, token_versi
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 @limiter.limit(AUTH_RATE_LIMIT, key_func=auth_key_func)
 def register(payload: RegisterRequest, request: Request, response: Response):
-    """Independent follow-up review P0-5: public self-registration used to let
-    anyone become administrator by winning a race to register first, and any
-    other email through unconditionally once domain-restricted. Registration
-    now requires a valid, unexpired, unused, email-bound invitation issued by
-    an existing administrator (POST /api/admin/invitations) -- there is no
-    path from an anonymous request to an account anymore. The very first
-    administrator is created by scripts/bootstrap_admin.py, not this endpoint.
+    """Registration requires a valid, unexpired, unused, email-bound
+    invitation issued by an existing administrator (POST
+    /api/admin/invitations) -- there is no path from an anonymous request to
+    an account. This closes off both winning a race to become the first
+    (and therefore administrator) account and open registration on any
+    domain-allowed email. The very first administrator is created by
+    scripts/bootstrap_admin.py, not this endpoint.
 
-    P1-6 (2026-08-24 independent follow-up review, "concurrent ...
-    invitation ... tests"): the invite used to be consumed with a
-    check-then-act read (the `used_at is not None` check below) followed by
-    an unconditional UPDATE at the end -- two requests racing on the SAME
-    invite token both read used_at=NULL and both proceeded to INSERT a user,
-    relying entirely on users.email's UNIQUE constraint to stop the second
-    one. That constraint does stop a duplicate account, but the loser's
-    INSERT raised an unhandled sqlite3.IntegrityError instead of the same
-    clean 403 every other invitation-rejection path returns. The invite is
-    now claimed atomically, before any user row is touched, via the same
-    claim-UPDATE pattern used everywhere else in this codebase for exactly
-    this reason (conversations.pending_message_id, messages.answer_status):
-    only a request that flips used_at from NULL to non-NULL proceeds.
+    The invite is claimed atomically, before any user row is touched, via
+    the same claim-UPDATE pattern used everywhere else in this codebase for
+    exactly this reason (conversations.pending_message_id,
+    messages.answer_status): only a request that flips used_at from NULL to
+    non-NULL proceeds. A check-then-act read (a plain `used_at is not None`
+    check) followed by an unconditional UPDATE at the end would let two
+    requests racing on the SAME invite token both read used_at=NULL and both
+    proceed to INSERT a user, relying entirely on users.email's UNIQUE
+    constraint to stop the second one -- which does stop the duplicate
+    account, but as an unhandled IntegrityError instead of the same clean 403
+    every other invitation-rejection path returns.
     """
     token_hash = hash_invitation_token(payload.invite_token)
-    # P1-20 (external review, 2026-09-21): every read/write of this address
-    # from here on uses the normalized form -- see normalize_email's
-    # docstring. Stored this way (not as-entered), so a technician who typed
-    # mixed case at registration can still log in with any casing later.
+    # Every read/write of this address from here on uses the normalized form
+    # -- see normalize_email's docstring. Stored this way (not as-entered),
+    # so a technician who typed mixed case at registration can still log in
+    # with any casing later.
     email = normalize_email(payload.email)
     # invitations.expires_at is TIMESTAMPTZ -- psycopg hands it back as a
     # real tz-aware datetime (unlike SQLite's TEXT column, which forced an

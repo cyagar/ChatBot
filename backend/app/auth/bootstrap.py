@@ -1,18 +1,16 @@
 """Creates the very first administrator account, out-of-band from any public
 HTTP endpoint.
 
-Independent follow-up review P0-5: the previous design let anyone who won the
-race to register first on a fresh deployment become administrator. Public
-self-registration no longer grants that role at all -- an administrator can
-only be created here, and only while the users table is empty, so this can
-never mint a second uncontrolled admin by accident.
+Public self-registration does not grant the administrator role at all -- an
+administrator can only be created here, and only while the users table is
+empty, so this can never mint a second uncontrolled admin by accident
+(letting anyone who won a race to register first on a fresh deployment
+become administrator would be the alternative failure mode).
 
-Independent follow-up review 2026-08-24 P0-8: this function accepted any
-string as an email and any password, including an empty one, so a rushed or
-scripted bootstrap could mint an administrator with no working credential.
-Email/password are now validated with the same rules as public registration
+Email/password are validated with the same rules as public registration
 (`app.auth.routes.RegisterRequest`), enforced here rather than only at the
-CLI layer, so no future caller can bypass them.
+CLI layer, so no future caller can bypass them and mint an administrator
+with no working credential (an empty password, or an unparseable email).
 """
 
 from __future__ import annotations
@@ -34,8 +32,7 @@ def bootstrap_admin(email: str, password: str, display_name: str | None = None) 
         creds = _BootstrapCredentials(email=email, password=password)
     except ValidationError as exc:
         raise ValueError(f"Invalid administrator credentials: {exc}") from exc
-    # P1-20 (external review, 2026-09-21): stored as-entered, unnormalized --
-    # see normalize_email's docstring.
+    # Must be normalized before storing -- see normalize_email's docstring.
     email = normalize_email(creds.email)
     password = creds.password
 

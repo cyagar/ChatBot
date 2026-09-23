@@ -42,16 +42,15 @@ def split_sql_statements(script: str) -> list[str]:
     comments, and $$.../$tag$...$tag$ dollar-quoted bodies, splitting only
     on a ';' outside all of them.
 
-    P2-06 (external review, 2026-09-21): run_migrations() below no longer
-    uses this for real execution -- it sends each migration file to
-    Postgres as a single multi-statement script instead, which lets
-    Postgres's own parser (not a hand-rolled one) handle every one of these
-    cases correctly, including a future PL/pgSQL function/trigger body
-    (routine semicolons inside $$...$$) that a naive split(';') would have
-    silently mangled. This function is now purely a TEST helper (see
+    run_migrations() below does not use this for real execution -- it sends
+    each migration file to Postgres as a single multi-statement script
+    instead, which lets Postgres's own parser (not a hand-rolled one) handle
+    every one of these cases correctly, including a PL/pgSQL function/trigger
+    body (routine semicolons inside $$...$$) that a naive split(';') would
+    silently mangle. This function exists purely as a TEST helper (see
     test_migrations.py's rollback sweep, which needs "this migration's
     statements minus its last one" to construct a deliberately-broken
-    migration) -- production correctness no longer depends on it."""
+    migration) -- production correctness does not depend on it."""
     statements: list[str] = []
     buf: list[str] = []
     i, n = 0, len(script)
@@ -161,20 +160,16 @@ def run_migrations() -> list[str]:
     part-way through rolls the whole migration back and leaves no record --
     the next start retries it cleanly from the original schema.
 
-    P2-06 (external review, 2026-09-21): each migration file used to be
-    split on a naive ';'.split() before execution, correct only because
-    every migration so far happens to avoid a semicolon inside a string
-    literal or comment -- a real, easy-to-violate-by-accident constraint on
-    every future migration author, enforced by nothing but a proxy test.
-    Each file is now sent to Postgres as ONE multi-statement script via a
-    single parameterless execute() call (confirmed: psycopg3 falls back to
-    libpq's simple query protocol for a parameterless execute(), the same
-    protocol psql itself uses, which supports a full multi-statement script
-    and correctly stops at the first failing statement -- verified this
-    still rolls back atomically inside `with conn.transaction():` and that
-    a semicolon inside a string literal survives intact). This removes the
-    splitting step from the trusted-execution path entirely rather than
-    trying to make a hand-rolled splitter perfect."""
+    Each migration file is sent to Postgres as ONE multi-statement script via
+    a single parameterless execute() call -- psycopg3 falls back to libpq's
+    simple query protocol for a parameterless execute(), the same protocol
+    psql itself uses, which supports a full multi-statement script, correctly
+    stops at the first failing statement, and still rolls back atomically
+    inside `with conn.transaction():`, with a semicolon inside a string
+    literal surviving intact. This keeps statement-splitting entirely out of
+    the trusted-execution path rather than relying on a hand-rolled splitter
+    to be perfect: a migration author who puts a semicolon inside a string
+    literal or comment does not need to think about it."""
     settings = get_settings()
     applied = []
     conn = psycopg.connect(settings.database_url_unpooled, row_factory=dict_row, autocommit=True)

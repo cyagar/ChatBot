@@ -3,11 +3,6 @@ AI_PROVIDER=anthropic (see app/providers/factory.py) -- the `anthropic`
 package itself is already an unconditional requirements.txt dependency, no
 separate install step needed. Kept separate from extractive.py so switching
 AI_PROVIDER is a one-line .env change, never a code change.
-
-P2-04 (external review, 2026-09-21): this docstring used to tell readers to
-"uncomment [anthropic] in requirements.txt" -- stale advice from before it
-became an always-installed dependency; corrected rather than left to mislead
-the next person setting this up.
 """
 
 from __future__ import annotations
@@ -29,24 +24,18 @@ from app.providers.base import (
 )
 
 MODEL = "claude-sonnet-5"
-# P1-19 (external review, 2026-09-21): the SDK's own default max_retries is
-# 2, layered UNDER generate()'s own application-level "repair" retry (a
-# second full _call() when the first response fails parse_and_validate --
-# not a substitute for this, since a transport-level exception from _call()
-# propagates straight out of generate() with no repair attempt). Worst case
-# was 2 calls x 3 attempts (1 original + 2 SDK retries) x 30s = up to 180s
-# against Android's 90-second read timeout (ApiClient.kt) -- the technician
-# could see "connection lost" while the server was still working, or the
-# app's own timeout could fire mid-provider-call. Tightened so the true
-# worst case fits with margin: 2 calls x 2 attempts (1 original + 1 SDK
-# retry) x 20s = 80s. Kept at 1 retry, not 0 -- a single transient
-# blip (the common case a retry actually helps with) still self-heals
-# instead of failing the whole request on the first hiccup. These exact
-# numbers are a reasoned bound, not measured against live traffic (the
-# review flagged this item as "conditional, verify with actual
-# model/network" -- no live Anthropic call was exercised here either);
-# revisit under real latency data before assuming 20s is generous rather
-# than tight.
+# The SDK's own max_retries is layered UNDER generate()'s application-level
+# "repair" retry (a second full _call() when the first response fails
+# parse_and_validate) -- not a substitute for it, since a transport-level
+# exception from _call() propagates straight out of generate() with no
+# repair attempt. Worst-case wall time is 2 calls x (1 + MAX_RETRIES)
+# attempts x REQUEST_TIMEOUT_SECONDS, which must stay comfortably under
+# Android's own read timeout (ApiClient.kt) or the technician sees
+# "connection lost" while the server is still working. Kept at 1 retry, not
+# 0, so a single transient blip still self-heals instead of failing the
+# whole request on the first hiccup. These numbers are a reasoned bound, not
+# measured against live traffic -- revisit under real latency data before
+# assuming they're generous rather than tight.
 REQUEST_TIMEOUT_SECONDS = 20
 MAX_RETRIES = 1
 
@@ -115,8 +104,8 @@ class AnthropicProvider(AIProvider):
             return result
 
         # One repair attempt: tell the model exactly what was wrong with its own
-        # output instead of silently trusting a malformed/unsupported response
-        # (concern #8 -- never widen citations on a parse failure).
+        # output instead of silently trusting a malformed/unsupported response.
+        # Never widen citations on a parse failure.
         repair_messages = messages + [
             {"role": "assistant", "content": raw_text},
             {
@@ -141,13 +130,9 @@ class AnthropicProvider(AIProvider):
         # responses server-side (never shown to the technician) so an
         # administrator investigating a run of UNVERIFIED_ANSWER replies (the
         # message's own advice) has something to look at instead of a dead
-        # end. Added 2026-08-25 after exactly that: a technician hit this
-        # fallback for several honestly-unanswerable questions in a row, and
-        # diagnosing it required temporarily adding this logging and
-        # reproducing live -- it turned out to be a validator false positive
-        # (see parse_and_validate's docstring), not a provider problem, but
-        # nothing before this let anyone tell the difference without
-        # instrumenting the code by hand.
+        # end. This is the only way to tell a genuine validator false
+        # positive (see parse_and_validate's docstring) apart from an actual
+        # provider problem without instrumenting the code by hand.
         logger.warning(
             "Both attempts failed validation for conversation; provider=%s\n--- attempt 1 ---\n%s\n--- attempt 2 ---\n%s",
             self.name, raw_text, raw_text_2,
@@ -162,20 +147,16 @@ class AnthropicProvider(AIProvider):
                 model=MODEL,
                 max_tokens=1200,
                 system=SYSTEM_PROMPT,
-                # Found live 2026-09-16: without this, the API enables
-                # extended thinking on its own for claude-sonnet-5 -- no
-                # `thinking` param was ever requested here. For a genuinely
-                # answerable question ("How do I replace the burrs on this
-                # grinder?") thinking consumed 1006 of the 1200-token budget,
-                # so stop_reason came back "max_tokens" with either a
-                # truncated (invalid) JSON text block or, worse, zero text
-                # block at all -- both attempts (the original call and the
-                # repair retry) failed parse_and_validate identically and
-                # produced the generic UNVERIFIED_ANSWER for a question the
-                # excerpts fully supported. This task is grounded extraction
-                # against excerpts already handed to the model, not open
-                # reasoning, so thinking isn't needed here; disabling it
-                # guarantees the whole budget goes to the actual JSON answer.
+                # Without this, the API can enable extended thinking on its own
+                # even though no `thinking` param was requested. Thinking tokens
+                # draw from the same max_tokens budget as the answer, so a large
+                # thinking block can leave stop_reason="max_tokens" with a
+                # truncated (invalid) or missing JSON text block, failing
+                # parse_and_validate on an otherwise fully-answerable question.
+                # This task is grounded extraction against excerpts already
+                # handed to the model, not open reasoning, so thinking isn't
+                # needed here; disabling it guarantees the whole budget goes to
+                # the actual JSON answer.
                 thinking={"type": "disabled"},
                 messages=messages,
             )

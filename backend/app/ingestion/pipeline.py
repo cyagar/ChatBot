@@ -30,13 +30,12 @@ logger = logging.getLogger(__name__)
 
 # Guards against two ingestion runs (e.g. an upload-triggered reindex and a
 # manual "Run re-index now" click) racing through the module-level dedup
-# caches and database writes at the same time (independent review concern
-# #14). Process-local only -- cheap, and still worth keeping as the fast
-# path for the common same-process case, but P1-14 (external review,
-# 2026-09-21) pointed out it does nothing against a SECOND process (another
-# gunicorn worker, or two app instances briefly overlapping during a
-# rolling deploy) starting a concurrent run -- see _try_acquire_db_lock
-# below for the cross-process guard that actually closes that gap.
+# caches and database writes at the same time. Process-local only -- cheap,
+# and still worth keeping as the fast path for the common same-process case,
+# but it does nothing against a SECOND process (another gunicorn worker, or
+# two app instances briefly overlapping during a rolling deploy) starting a
+# concurrent run -- see _try_acquire_db_lock below for the cross-process
+# guard that actually closes that gap.
 _INGEST_LOCK = threading.Lock()
 
 # Arbitrary fixed key identifying "an ingestion run is in progress" as a
@@ -167,17 +166,16 @@ def ingest_all(
     source: DocumentSource | None = None, embed: bool = True, trigger: str = "manual",
     run_id: int | None = None,
 ) -> IngestionReport:
-    """run_id: independent follow-up review 2026-08-24 P0-6: an admin's "run
-    re-index now" click returns 202 before this function ever executes (it
-    runs as a FastAPI BackgroundTask). If the process restarted in that gap
-    -- before this function created its own ingestion_runs row -- a run the
-    admin was told had started would leave no trace at all. routes_admin.py's
-    trigger_reindex now creates that row synchronously, inside the request
-    handler, before responding, and passes its id through here so this
-    function updates that same row instead of creating a second one. The
-    scheduler's own timer-triggered calls (trigger='scheduled') pass no
-    run_id and keep creating their own row exactly as before -- there's no
-    HTTP response for that path to race against."""
+    """run_id: an admin's "run re-index now" click returns 202 before this
+    function ever executes (it runs as a FastAPI BackgroundTask). If the
+    process restarted in that gap -- before this function created its own
+    ingestion_runs row -- a run the admin was told had started would leave no
+    trace at all. routes_admin.py's trigger_reindex creates that row
+    synchronously, inside the request handler, before responding, and passes
+    its id through here so this function updates that same row instead of
+    creating a second one. The scheduler's own timer-triggered calls
+    (trigger='scheduled') pass no run_id and create their own row -- there's
+    no HTTP response for that path to race against."""
     if not _INGEST_LOCK.acquire(blocking=False):
         _record_lock_failure(run_id, trigger, "Could not start: another ingestion run was already in progress.")
         raise RuntimeError(
@@ -207,14 +205,13 @@ def _ingest_all_locked(
     settings = get_settings()
     source = source or get_document_source(settings)
 
-    # Run row created BEFORE the source is listed (independent review P0-3):
-    # listing a Google Drive folder does live auth + API calls and can fail
-    # (bad credentials, revoked access, quota, network). If that happens
-    # before any run row exists, the reindex endpoint returns 202 and the
-    # admin UI shows nothing -- no evidence an ingestion was even attempted.
-    # `trigger` ('manual' | 'scheduled', P1-4) records who started this run,
-    # so an admin can see the scheduler is actually running rather than
-    # taking it on faith.
+    # Run row created BEFORE the source is listed: listing a Google Drive
+    # folder does live auth + API calls and can fail (bad credentials,
+    # revoked access, quota, network). If that happens before any run row
+    # exists, the reindex endpoint returns 202 and the admin UI shows nothing
+    # -- no evidence an ingestion was even attempted. `trigger` ('manual' |
+    # 'scheduled') records who started this run, so an admin can see the
+    # scheduler is actually running rather than taking it on faith.
     if run_id is None:
         with get_conn() as conn:
             cur = conn.execute(
@@ -228,17 +225,15 @@ def _ingest_all_locked(
     try:
         files = source.list_files()
 
-        # Items the source noticed but couldn't/wouldn't include (P1-3: "report
-        # every skipped item") get the same visibility as every other outcome
-        # -- an ingestion_events row and a FileOutcome -- instead of only ever
-        # reaching a server log.
+        # Items the source noticed but couldn't/wouldn't include get the same
+        # visibility as every other outcome -- an ingestion_events row and a
+        # FileOutcome -- instead of only ever reaching a server log.
         for skipped in source.pop_skipped():
-            # P1-05 (external review, 2026-09-21): a genuine failure reported
-            # via pop_skipped() (e.g. a download that errored out) used to be
-            # visually indistinguishable from an intentional skip (subfolder,
-            # shortcut, oversized file) AND didn't affect the run's overall
-            # status -- an all-failed-download run still finished
-            # status='completed'. See SkippedFile.is_error.
+            # A genuine failure reported via pop_skipped() (e.g. a download
+            # that errored out) must be visually distinguishable from an
+            # intentional skip (subfolder, shortcut, oversized file) AND must
+            # affect the run's overall status -- an all-failed-download run
+            # must not finish status='completed'. See SkippedFile.is_error.
             if skipped.is_error:
                 had_error = True
             with get_conn() as conn:
@@ -250,8 +245,7 @@ def _ingest_all_locked(
 
         # Per-file isolation: one file raising (a corrupt PDF, an OCR crash,
         # ...) must not abort every other file in the run, and must not leave
-        # the run stuck at status='running' forever (independent review
-        # concern #14 -- this is exactly the gap it names).
+        # the run stuck at status='running' forever.
         for sf in files:
             try:
                 outcome = _ingest_one(run_id, source, sf)
@@ -261,15 +255,15 @@ def _ingest_all_locked(
                 with get_conn() as conn:
                     _record_event(conn, run_id, sf.filename, "failed", f"Unhandled error: {e}", None)
                 outcome = FileOutcome(sf.filename, "failed", f"Unhandled error: {e}")
-            # P1-05 (external review, 2026-09-21): a HANDLED extraction
-            # failure (extract() returning status="failed" rather than
-            # raising) never flipped had_error -- only an unhandled
-            # exception did. An all-failed synthetic run (every file a
-            # corrupt/unreadable PDF, none of them raising) finished
-            # status='completed', identical to a clean run. "unsupported" is
-            # deliberately NOT included here: it's an intentional, expected
-            # classification (a file type this pipeline will never parse),
-            # not a failure -- see test_unsupported_file_retried_after_....
+            # A HANDLED extraction failure (extract() returning
+            # status="failed" rather than raising) must flip had_error just
+            # like an unhandled exception does -- otherwise an all-failed
+            # synthetic run (every file a corrupt/unreadable PDF, none of
+            # them raising) would finish status='completed', identical to a
+            # clean run. "unsupported" is deliberately NOT included here:
+            # it's an intentional, expected classification (a file type this
+            # pipeline will never parse), not a failure -- see
+            # test_unsupported_file_retried_after_....
             if outcome.status == "failed":
                 had_error = True
             report.outcomes.append(outcome)
@@ -322,9 +316,8 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
     # unsupported file (e.g. .indd) doesn't accumulate a new row every run.
     # superseded_candidate_id: the currently-active row at this source_ref,
     # when the incoming bytes differ from it. Deliberately NOT deactivated
-    # here, and NOT deactivated once extraction/chunking succeeds either
-    # (independent review P0-2, both the original claim and the 2026-08-24
-    # follow-up): retiring a working, *approved* manual as soon as its
+    # here, and NOT deactivated once extraction/chunking succeeds either:
+    # retiring a working, *approved* manual as soon as its
     # replacement merely parses is still not safe -- the replacement's
     # review_status defaults to 'pending' (migration 0003), so a technician
     # could be left with zero approved manuals for this machine for however
@@ -341,14 +334,14 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
     # since. The idempotency/resume check below always compares against the
     # most recently ingested one, not an arbitrary one, and matches on it by
     # id explicitly rather than assuming source_ref alone is unique.
-    # needs_reprocessing (independent follow-up review 2026-08-24 P0-7):
-    # unchanged bytes used to be skipped unconditionally -- so a document
-    # extracted/chunked before a pipeline-logic fix shipped would never
-    # receive it, silently, forever, since nothing ever re-examined it once
-    # its content stopped changing. 'indexed'/'partial' rows now also compare
-    # extraction_version/chunking_version against the code's current
-    # versions; a mismatch is reported (not skipped_unchanged) so the gap is
-    # visible instead of invisible. Not auto-reprocessed this run -- see
+    # needs_reprocessing: unchanged bytes must not be skipped
+    # unconditionally -- a document extracted/chunked before a pipeline-logic
+    # fix shipped would otherwise never receive it, silently, forever, since
+    # nothing would re-examine it once its content stopped changing.
+    # 'indexed'/'partial' rows compare extraction_version/chunking_version
+    # against the code's current versions; a mismatch is reported (not
+    # skipped_unchanged) so the gap is visible instead of invisible. Not
+    # auto-reprocessed this run -- see
     # DocumentOut.needs_reprocessing in routes_admin.py and
     # docs/PRODUCTION_READINESS.md for what's built and what isn't.
     stable_retry_id: int | None = None
@@ -403,7 +396,7 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
             elif superseded_candidate_id is not None:
                 # The replacement failed validation -- record the attempt, but
                 # insert it already deactivated so the still-good active row
-                # at this source_ref is left untouched (P0-2).
+                # at this source_ref is left untouched.
                 reason = (f"Replacement for document {superseded_candidate_id} failed validation "
                           f"and did not replace it: {extracted.reason}")
                 cur = conn.execute(
@@ -611,9 +604,9 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
 def _embed_pending_chunks(batch_size: int = 64) -> int:
     """Embed every chunk with no embedding for the CURRENTLY configured model
     fingerprint (model name + revision -- see embedding_fingerprint's
-    docstring, P1-15). Resumable: re-running only processes what's missing --
-    which now includes a chunk whose only embedding row is from a since
-    -changed model/revision, not just one with no row at all."""
+    docstring). Resumable: re-running only processes what's missing --
+    including a chunk whose only embedding row is from a since-changed
+    model/revision, not just one with no row at all."""
     from app.retrieval.embeddings import embed_texts, embedding_fingerprint, vector_to_blob
 
     fingerprint = embedding_fingerprint()

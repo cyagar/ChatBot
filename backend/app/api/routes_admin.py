@@ -40,14 +40,13 @@ class DocumentOut(BaseModel):
     is_current_revision: bool
     machines: list[str]
     machine_ids: list[int]
-    # P0-03 (external review, 2026-09-21): the admin editor's machine picker
-    # pre-checks every existing link regardless of review_status, with no
-    # visual distinction between approved/pending/rejected -- an admin had no
-    # way to tell a rejected link apart from an approved one before deciding
-    # whether to touch it. Keyed by machine_id (Pydantic serializes int dict
-    # keys as JSON strings automatically) so the editor can show each link's
-    # actual state and an admin re-affirming a rejected link is an informed
-    # choice, not an accident.
+    # Distinguishes each existing machine link's review_status
+    # (approved/pending/rejected), so the admin editor's machine picker can
+    # show that state rather than pre-checking every link identically -- an
+    # admin needs to be able to tell a rejected link apart from an approved
+    # one before deciding whether to touch it. Keyed by machine_id (Pydantic
+    # serializes int dict keys as JSON strings automatically) so an admin
+    # re-affirming a rejected link is an informed choice, not an accident.
     machine_link_review_status: dict[int, str] = {}
     # Postgres TIMESTAMPTZ columns come back from psycopg as real datetimes,
     # not strings -- iso_utc() (app/api/common.py) accepts either.
@@ -79,10 +78,10 @@ def _row_to_document(conn, row) -> DocumentOut:
         ingested_at=row["ingested_at"],
         review_status=row["review_status"],
         reviewed_at=row["reviewed_at"],
-        # Independent follow-up review 2026-08-24 P0-7: surfaces documents
-        # whose content is unchanged but were extracted/chunked at an older
-        # pipeline version -- see the needs_reprocessing outcome in
-        # pipeline.py._ingest_one for how this is detected at ingest time.
+        # Surfaces documents whose content is unchanged but were
+        # extracted/chunked at an older pipeline version -- see the
+        # needs_reprocessing outcome in pipeline.py._ingest_one for how this
+        # is detected at ingest time.
         needs_reprocessing=(
             row["status"] in ("indexed", "partial")
             and (row["extraction_version"] != CURRENT_EXTRACTION_VERSION
@@ -195,10 +194,10 @@ def correct_metadata(document_id: int, payload: MetadataCorrection, admin: Curre
             )
 
         if payload.machine_ids is not None:
-            # P1-11 (independent follow-up review): machine_ids used to reach
-            # document_machines' INSERT unvalidated -- an admin typo/stale ID
-            # hit the foreign key and surfaced as an unhandled 500 instead of
-            # a clean 4xx naming the bad id.
+            # machine_ids must be validated before document_machines' INSERT
+            # -- an admin typo/stale ID would otherwise hit the foreign key
+            # and surface as an unhandled 500 instead of a clean 4xx naming
+            # the bad id.
             if payload.machine_ids:
                 found = {
                     r["id"] for r in conn.execute(
@@ -213,9 +212,9 @@ def correct_metadata(document_id: int, payload: MetadataCorrection, admin: Curre
                     )
             _log("machine_links", None, payload.machine_ids)
             # An admin setting links here IS the human review those links get
-            # (independent follow-up review P0-6) -- insert them pre-approved
-            # rather than 'pending', or this endpoint would silently remove a
-            # document from retrieval every time an admin corrected it.
+            # -- insert them pre-approved rather than 'pending', or this
+            # endpoint would silently remove a document from retrieval every
+            # time an admin corrected it.
             # Deliberately clears any prior 'rejected' rows for this document
             # too: the admin is explicitly overriding whatever review state
             # existed before, not appending to it.
@@ -252,11 +251,11 @@ def deactivate_document(document_id: int, reason: str = "Deactivated by administ
 
 
 # ---------------------------------------------------------------------------
-# Document/link review queue (independent follow-up review P0-6: heuristic
-# metadata proposes machine associations, but a Drive edit alone must never be
-# enough to make a document retrievable -- retrieval only ever uses documents
-# and document_machines links with review_status='approved', enforced in
-# app/retrieval/search.py, not just displayed here.)
+# Document/link review queue: heuristic metadata proposes machine
+# associations, but a Drive edit alone must never be enough to make a
+# document retrievable -- retrieval only ever uses documents and
+# document_machines links with review_status='approved', enforced in
+# app/retrieval/search.py, not just displayed here.
 # ---------------------------------------------------------------------------
 
 class PendingLinkOut(BaseModel):
@@ -290,15 +289,14 @@ def review_queue(admin: CurrentUser = Depends(require_admin)):
     matters even for an already-approved document, since a re-index can
     propose a *new* link on an existing approved document at any time.
 
-    P1-12 (independent follow-up review): an approved document with ZERO
-    machine links used to disappear from this queue even though it's
-    unretrievable (retrieval requires an approved link too) -- the LEFT JOIN
-    leaves dm.review_status NULL for such a document, and plain
+    An approved document with ZERO machine links is unretrievable (retrieval
+    requires an approved link too) but must still surface in this queue. The
+    LEFT JOIN leaves dm.review_status NULL for such a document, and plain
     `dm.review_status != 'approved'` evaluates to NULL (not TRUE) against a
-    NULL, so `d.review_status != 'approved' OR dm.review_status != 'approved'`
-    was FALSE OR NULL = NULL, which WHERE treats as excluded. IS DISTINCT FROM
-    is NULL-safe: NULL IS DISTINCT FROM 'approved' is TRUE, so a zero-link
-    approved document is correctly included."""
+    NULL, so a bare `d.review_status != 'approved' OR dm.review_status !=
+    'approved'` would evaluate to FALSE OR NULL = NULL, which WHERE treats as
+    excluded. IS DISTINCT FROM is NULL-safe: NULL IS DISTINCT FROM 'approved'
+    is TRUE, so a zero-link approved document is correctly included."""
     with get_conn() as conn:
         docs = conn.execute(
             "SELECT DISTINCT d.id, d.original_filename, d.doc_type, mf.name AS manufacturer, "
@@ -339,34 +337,30 @@ class DocumentReviewRequest(BaseModel):
 
 @router.post("/documents/{document_id}/review")
 def review_document(document_id: int, payload: DocumentReviewRequest, admin: CurrentUser = Depends(require_admin)):
-    """Independent follow-up review P0-2 (2026-08-24 follow-up): approving a
-    replacement is the cutover point, not ingestion. `_ingest_one` deliberately
-    leaves the document a replacement is superseding active (deactivated_at
-    IS NULL) so a pending or rejected replacement never takes a manual away
-    from technicians. Approving the replacement here is what atomically
-    retires whatever else is still active at the same source_ref -- one
-    SQLite transaction, so there's never a moment with either zero or two
-    approved documents live at that source_ref.
+    """Approving a replacement is the cutover point, not ingestion.
+    `_ingest_one` deliberately leaves the document a replacement is
+    superseding active (deactivated_at IS NULL) so a pending or rejected
+    replacement never takes a manual away from technicians. Approving the
+    replacement here is what atomically retires whatever else is still
+    active at the same source_ref -- one transaction, so there's never a
+    moment with either zero or two approved documents live at that
+    source_ref.
 
-    P1-6 (2026-08-24 independent follow-up review, "concurrent ... approval
-    ... and promotion tests"): the review_status UPDATE below used to carry
-    no WHERE-clause guard against a concurrent supersession, relying only on
-    the SELECT above -- a separate, unguarded read -- to have already
-    confirmed `deactivated_at IS NULL`. Two admins approving two DIFFERENT
-    pending replacement candidates at the SAME source_ref concurrently could
-    both pass that initial SELECT before either committed, then both writes
-    would proceed: the second admin's UPDATE would set
-    review_status='approved' on a document the FIRST admin's supersede step
-    had just deactivated, producing an "approved but deactivated" row, and
-    that second admin's own supersede step would then deactivate the FIRST
-    admin's candidate too -- leaving ZERO active approved documents at that
-    source_ref, the exact failure mode P0-2 already fixed for the
-    ingestion-time deactivation, reintroduced here at the approval layer
-    instead. The UPDATE now re-checks `deactivated_at IS NULL` as part of
-    the same atomic write (the same claim-UPDATE pattern used everywhere
-    else in this codebase): the losing concurrent approval sees rowcount 0
-    and gets a clean 404, exactly as if it had raced the SELECT and lost
-    there."""
+    The review_status UPDATE below carries a WHERE-clause guard against a
+    concurrent supersession -- it re-checks `deactivated_at IS NULL` as part
+    of the same atomic write, rather than relying only on the SELECT above (a
+    separate, unguarded read) to have already confirmed it. Without that
+    guard, two admins approving two DIFFERENT pending replacement candidates
+    at the SAME source_ref concurrently could both pass that initial SELECT
+    before either committed, and then both writes would proceed: the second
+    admin's UPDATE would set review_status='approved' on a document the FIRST
+    admin's supersede step had just deactivated, producing an "approved but
+    deactivated" row, and that second admin's own supersede step would then
+    deactivate the FIRST admin's candidate too -- leaving ZERO active
+    approved documents at that source_ref. The same claim-UPDATE pattern used
+    everywhere else in this codebase closes that gap: the losing concurrent
+    approval sees rowcount 0 and gets a clean 404, exactly as if it had raced
+    the SELECT and lost there."""
     with get_conn() as conn:
         doc = conn.execute(
             "SELECT id, source_ref, status FROM documents WHERE id = %s AND deactivated_at IS NULL", (document_id,)
@@ -376,35 +370,34 @@ def review_document(document_id: int, payload: DocumentReviewRequest, admin: Cur
 
         if payload.decision == "approved":
             # Lock every active document at this source_ref up front, in a
-            # single fixed global order (ascending id) -- discovered as a
-            # genuine deadlock while adding the P0-02 readiness checks just
-            # below, which delay how soon this transaction reaches the claim
+            # single fixed global order (ascending id). The readiness checks
+            # just below delay how soon this transaction reaches the claim
             # UPDATE relative to a concurrent approval of a DIFFERENT
-            # candidate at the same source_ref. Without this, two concurrent
-            # approvals can each hold their own row (from the claim UPDATE
-            # further down) while waiting on a row the other holds -- a real
-            # lock-ordering cycle (Postgres reports it as DeadlockDetected),
-            # not just one request blocking behind the other. Acquiring every
-            # row's lock here, in the same order every transaction uses,
-            # makes that cycle impossible: whichever transaction gets here
-            # first locks the lowest id first and the other simply queues
-            # behind it, exactly as the P1-6 concurrency test intends.
+            # candidate at the same source_ref -- without this upfront lock,
+            # two concurrent approvals can each hold their own row (from the
+            # claim UPDATE further down) while waiting on a row the other
+            # holds: a real lock-ordering cycle (Postgres reports it as
+            # DeadlockDetected), not just one request blocking behind the
+            # other. Acquiring every row's lock here, in the same order every
+            # transaction uses, makes that cycle impossible: whichever
+            # transaction gets here first locks the lowest id first and the
+            # other simply queues behind it.
             conn.execute(
                 "SELECT id FROM documents WHERE source_ref = %s AND deactivated_at IS NULL ORDER BY id FOR UPDATE",
                 (doc["source_ref"],),
             )
 
-            # P0-02 (external review, 2026-09-21): "Approve document" and
-            # "Approve link" are two independent buttons on the same review-
-            # queue card (admin.js renderReviewQueue) -- nothing stopped an
-            # admin clicking the former first. Approving the document alone
-            # used to be enough to retire the prior working revision below,
-            # even when this document failed ingestion, extracted zero
-            # chunks, or has no approved machine link yet -- leaving
-            # technicians with nothing retrievable at this source_ref until
-            # the admin came back and separately approved a link. Promotion
-            # must be a single atomic transition: verify the replacement is
-            # actually ready before retiring the revision that still works.
+            # "Approve document" and "Approve link" are two independent
+            # buttons on the same review-queue card (admin.js
+            # renderReviewQueue) -- nothing stops an admin clicking the
+            # former first. Approving the document alone must not be enough
+            # to retire the prior working revision below when this document
+            # failed ingestion, extracted zero chunks, or has no approved
+            # machine link yet -- that would leave technicians with nothing
+            # retrievable at this source_ref until the admin came back and
+            # separately approved a link. Promotion must be a single atomic
+            # transition: verify the replacement is actually ready before
+            # retiring the revision that still works.
             chunk_count = conn.execute(
                 "SELECT COUNT(*) AS n FROM chunks WHERE document_id = %s", (document_id,)
             ).fetchone()["n"]
@@ -476,10 +469,10 @@ def review_document_machine_link(document_id: int, machine_id: int, payload: Lin
 
 
 # ---------------------------------------------------------------------------
-# Invitations + account management (independent follow-up review P0-5: public
-# self-registration is closed -- an account can only be created by consuming
-# an admin-issued invitation. See app/auth/routes.py:register and
-# scripts/bootstrap_admin.py for the very first administrator.)
+# Invitations + account management: public self-registration is closed -- an
+# account can only be created by consuming an admin-issued invitation. See
+# app/auth/routes.py:register and scripts/bootstrap_admin.py for the very
+# first administrator.
 # ---------------------------------------------------------------------------
 
 DEFAULT_INVITE_TTL_HOURS = 72
@@ -524,11 +517,10 @@ def _check_invite_domain_allowed(email: str) -> None:
 @router.post("/invitations", response_model=InvitationOut, status_code=status.HTTP_201_CREATED)
 def create_invitation(payload: InvitationCreate, admin: CurrentUser = Depends(require_admin)):
     _check_invite_domain_allowed(payload.email)
-    # P1-20 (external review, 2026-09-21): stored/compared as-entered,
-    # unnormalized -- see normalize_email's docstring. Two invitations
-    # differing only in case could each pass the "no existing account" check
-    # below and later mint two separate user rows for what a human would
-    # consider the same address.
+    # Must be normalized before storing/comparing -- see normalize_email's
+    # docstring. Two invitations differing only in case could otherwise each
+    # pass the "no existing account" check below and later mint two separate
+    # user rows for what a human would consider the same address.
     email = normalize_email(payload.email)
     raw_token, token_hash = generate_invitation_token()
     # A real datetime, not .isoformat() -- psycopg adapts TIMESTAMPTZ params
@@ -614,8 +606,8 @@ def disable_user(user_id: int, admin: CurrentUser = Depends(require_admin)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="You cannot disable your own account.")
     with get_conn() as conn:
         # Bumping token_version invalidates every session token already issued
-        # to this user, even ones that haven't expired yet (P0-5's "session
-        # revocation" requirement) -- see app/auth/deps.py's tv check.
+        # to this user, even ones that haven't expired yet -- see
+        # app/auth/deps.py's tv check.
         result = conn.execute(
             "UPDATE users SET is_disabled = true, disabled_at = now(), "
             "token_version = token_version + 1 WHERE id = %s AND is_disabled = false",
@@ -650,12 +642,12 @@ def enable_user(user_id: int, admin: CurrentUser = Depends(require_admin)):
 
 @router.post("/ingestion/reindex", status_code=status.HTTP_202_ACCEPTED)
 def trigger_reindex(background_tasks: BackgroundTasks, admin: CurrentUser = Depends(require_admin)):
-    """Independent follow-up review 2026-08-24 P0-6: the ingestion_runs row
-    used to be created inside ingest_all(), which only executes once this
-    BackgroundTask actually runs -- after this response is already sent. If
-    the process restarted in that gap, an admin who was told a run started
-    would see no evidence one ever was. The row is now created here,
-    synchronously, before the 202 goes out."""
+    """The ingestion_runs row must be created here, synchronously, before the
+    202 goes out -- ingest_all() itself only executes once the BackgroundTask
+    actually runs, after this response is already sent. Creating the row
+    inside ingest_all() instead would mean that if the process restarted in
+    that gap, an admin who was told a run started would see no evidence one
+    ever was."""
     if _INGEST_LOCK.locked():
         raise HTTPException(status.HTTP_409_CONFLICT, detail="An ingestion run is already in progress.")
     with get_conn() as conn:
@@ -686,9 +678,9 @@ def list_ingestion_runs(admin: CurrentUser = Depends(require_admin), limit: int 
 
 @router.get("/ingestion/status")
 def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
-    """P1-4: "visible last-success timestamp/source snapshot" and a
-    stale-corpus alert against the configured operational SLA, so freshness
-    doesn't depend on an admin remembering to check the run list and do the
+    """A visible last-success timestamp/source snapshot and a stale-corpus
+    alert against the configured operational SLA, so freshness doesn't
+    depend on an admin remembering to check the run list and do the
     staleness math themselves."""
     settings = get_settings()
     with get_conn() as conn:
@@ -708,13 +700,12 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
         active_document_count = conn.execute(
             "SELECT COUNT(*) c FROM documents WHERE deactivated_at IS NULL"
         ).fetchone()["c"]
-        # P1-15 (external review, 2026-09-21): a model/revision change makes
-        # every existing embedding stale (see embedding_fingerprint's
-        # docstring) with no error anywhere -- search just quietly falls
-        # back to lexical-only for the affected chunks. Surfaced here so an
-        # admin who bumps EMBEDDING_MODEL_REVISION has a way to notice a
-        # re-index is needed, instead of only ever finding out by search
-        # quality silently degrading.
+        # A model/revision change makes every existing embedding stale (see
+        # embedding_fingerprint's docstring) with no error anywhere -- search
+        # just quietly falls back to lexical-only for the affected chunks.
+        # Surfaced here so an admin who bumps EMBEDDING_MODEL_REVISION has a
+        # way to notice a re-index is needed, instead of only ever finding
+        # out by search quality silently degrading.
         chunks_needing_reembedding = conn.execute(
             "SELECT COUNT(*) c FROM chunks c "
             "LEFT JOIN embeddings e ON e.chunk_id = c.id AND e.model_name = %s "
@@ -736,12 +727,11 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
         "last_success_run_id": last_success["id"] if last_success else None,
         "last_success_at": iso_utc(last_success["finished_at"]) if last_success else None,
         "last_success_trigger": last_success["trigger"] if last_success else None,
-        # Independent follow-up review 2026-08-24 P0-6: "completed_with_errors
-        # treated as unconditional success" -- staleness correctly still
-        # counts it (see test_completed_with_errors_still_counts_as_a_successful_sync),
-        # but this response used to give no way to tell a clean success from
-        # one where individual files failed without a second call to
-        # /ingestion/runs. Surfaced here instead of only implied.
+        # completed_with_errors counts as a success for staleness purposes
+        # (see test_completed_with_errors_still_counts_as_a_successful_sync),
+        # but this response must still give a way to tell a clean success
+        # from one where individual files failed, rather than requiring a
+        # second call to /ingestion/runs.
         "last_success_status": last_success["status"] if last_success else None,
         "hours_since_last_success": hours_since_last_success,
         "last_attempt_run_id": last_attempt["id"] if last_attempt else None,
@@ -758,8 +748,8 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
 
 @router.get("/ingestion/runs/{run_id}/report")
 def get_ingestion_report(run_id: int, admin: CurrentUser = Depends(require_admin)):
-    """The plan's required ingestion report: every source file as indexed,
-    duplicate, partially processed, failed, or unsupported, with a reason."""
+    """The ingestion report: every source file as indexed, duplicate,
+    partially processed, failed, or unsupported, with a reason."""
     with get_conn() as conn:
         run = conn.execute("SELECT * FROM ingestion_runs WHERE id = %s", (run_id,)).fetchone()
         if not run:
@@ -805,10 +795,10 @@ class QueryTestRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     machine_id: int | None = None
     top_k: int = Field(default=6, ge=1, le=20)
-    # Superseded revisions are excluded from technician retrieval entirely
-    # (P1-11). This is the "explicit admin/audit flow" that can still see
-    # them -- off by default so the tester shows what a technician would
-    # actually get unless an admin deliberately asks to look wider.
+    # Superseded revisions are excluded from technician retrieval entirely.
+    # This is the "explicit admin/audit flow" that can still see them -- off
+    # by default so the tester shows what a technician would actually get
+    # unless an admin deliberately asks to look wider.
     include_superseded: bool = False
 
 
@@ -836,15 +826,13 @@ def query_test(payload: QueryTestRequest, admin: CurrentUser = Depends(require_a
 
 @router.get("/feedback")
 def list_feedback(admin: CurrentUser = Depends(require_admin), limit: int = Query(default=100, ge=1, le=500)):
-    """P1-02 (external review, 2026-09-21): this used to return only
-    rating/comment/user/conversation_id -- an admin triaging an "incorrect"
-    report had no machine, model, or citation context and had to separately
-    open the conversation (if they could even find it) to see what the
-    technician was actually asking about. Now also reports message_id
-    (feedback is per-answer, not per-conversation -- P1-11 already scoped
-    submission that way), the machine the answer was generated for, and
-    every citation the answer actually used, batched in one extra query
-    rather than N+1 per row."""
+    """An admin triaging an "incorrect" report needs machine, model, and
+    citation context, not just rating/comment/user/conversation_id, or they'd
+    have to separately open the conversation (if they could even find it) to
+    see what the technician was actually asking about. Reports message_id
+    (feedback is per-answer, not per-conversation), the machine the answer
+    was generated for, and every citation the answer actually used, batched
+    in one extra query rather than N+1 per row."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT f.id, f.message_id, f.rating, f.comment, f.created_at, u.email AS user_email, "

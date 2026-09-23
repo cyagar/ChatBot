@@ -1,12 +1,10 @@
-"""Phase 1 (narrowed scope, 2026-08-26): "Add GET /config ... with
-maintenance state, feature flags, minimum supported version, ... support
-link, and safe status text." Deliberately public (no auth) -- a client
-needs this before it can know whether logging in is even worth trying
-(maintenance mode) and what version it needs to be.
+"""GET /config: maintenance state, feature flags, minimum supported version,
+support link, and safe status text. Deliberately public (no auth) -- a
+client needs this before it can know whether logging in is even worth
+trying (maintenance mode) and what version it needs to be.
 
-Role/capabilities (the other half of the plan's item) live on GET
-/api/auth/me instead, alongside the rest of the caller's own identity --
-see app/auth/routes.py.
+Role/capabilities live on GET /api/auth/me instead, alongside the rest of
+the caller's own identity -- see app/auth/routes.py.
 """
 
 from __future__ import annotations
@@ -51,14 +49,12 @@ def _corpus_status(settings) -> tuple[str, str]:
             ).fetchone()
         if last_success is None:
             return "ok", ""
-        # P1-04 (external review, 2026-09-21): finished_at is a TIMESTAMPTZ
-        # column -- psycopg already hands it back as a real, aware datetime,
-        # not a string (see docs on the Postgres migration's dialect
-        # gotchas). datetime.fromisoformat() on an already-datetime value
-        # raised TypeError every time, which the blanket `except Exception`
-        # below silently turned into ("ok", "") -- so a corpus that hadn't
-        # synced in days, or ever, always reported healthy. Reproduced
-        # directly against this function before the fix.
+        # finished_at is a TIMESTAMPTZ column -- psycopg hands it back as a
+        # real, aware datetime, not a string. Calling
+        # datetime.fromisoformat() on it would raise TypeError every time,
+        # which the blanket `except Exception` below would silently turn
+        # into ("ok", "") -- so a corpus that hadn't synced in days, or
+        # ever, would always report healthy.
         finished = last_success["finished_at"]
         if finished.tzinfo is None:
             finished = finished.replace(tzinfo=timezone.utc)

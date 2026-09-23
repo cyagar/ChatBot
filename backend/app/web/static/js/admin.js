@@ -17,11 +17,11 @@ async function api(path, options = {}) {
       detail = body.detail || detail;
       correlationId = body.correlation_id || null;
     } catch (_) {}
-    // P1-08 (external review, 2026-09-21): an expired/revoked admin session
-    // used to just 401 on whatever action was in flight, with no visible
-    // error and no path back to a usable state -- the only recovery was a
-    // manual page reload. state.user !== null means this wasn't boot()'s
-    // own initial, expected-to-401-when-signed-out /api/auth/me probe.
+    // An expired/revoked admin session must not just 401 on whatever action
+    // was in flight with no visible error and no path back to a usable
+    // state (the only recovery would be a manual page reload). state.user
+    // !== null means this wasn't boot()'s own initial,
+    // expected-to-401-when-signed-out /api/auth/me probe.
     if (resp.status === 401 && state.user !== null) {
       state.user = null;
       renderLogin();
@@ -34,8 +34,8 @@ async function api(path, options = {}) {
   return resp.json();
 }
 
-// P1-08: every admin action reachable from here shows its own error instead
-// of failing silently -- see guardedClick/guardedSubmit below, which route
+// Every admin action reachable from here shows its own error instead of
+// failing silently -- see guardedClick/guardedSubmit below, which route
 // every thrown api() error here.
 function showError(message) {
   const banner = document.getElementById("admin-error-banner");
@@ -82,13 +82,10 @@ async function boot() {
       return;
     }
   } catch (_) {
-    // No valid session cookie. There used to be a technician PWA at "/" whose
-    // login form doubled as the only way a browser could authenticate at all
-    // -- removing that PWA (the technician client is Android-only now) left
-    // this admin UI with no way in. Found live 2026-09-16: /admin always
-    // rendered, but a signed-out visitor redirected to "/", which no longer
-    // exists. Renders its own login form instead of assuming one exists
-    // elsewhere.
+    // No valid session cookie. There is no other browser-based login form
+    // (the technician client is Android-only) for a signed-out visitor to
+    // land on, so /admin renders its own login form instead of assuming one
+    // exists elsewhere.
     renderLogin();
     return;
   }
@@ -155,13 +152,12 @@ async function loadTab() {
     state.unanswered = await api("/api/admin/unanswered");
   }
   if (state.tab === "query" && state.machines.length === 0) {
-    // P1-03 (external review, 2026-09-21): this used to call the
-    // technician-facing /api/machines?limit=500, but that endpoint caps
-    // limit at 100 (routes_machines.py) -- any corpus with >100 machines
-    // made this request fail with 422 before the Query tab could even
-    // render, hiding the primary retrieval-inspection tool. Switched to
-    // /api/admin/machines, which has no such cap and already backs the
-    // metadata editor on the Documents tab (same MachineOut response shape).
+    // Uses /api/admin/machines, not the technician-facing
+    // /api/machines?limit=500 -- that endpoint caps limit at 100
+    // (routes_machines.py), which would fail with 422 on any corpus with
+    // >100 machines before the Query tab could even render. The admin
+    // endpoint has no such cap and already backs the metadata editor on the
+    // Documents tab (same MachineOut response shape).
     state.machines = await api("/api/admin/machines");
   }
 }
@@ -331,13 +327,11 @@ function renderDocuments() {
                 <label>Revision <input name="revision" value="${escAttr(d.revision || "")}" /></label>
                 <label><input type="checkbox" name="is_current_revision" ${d.is_current_revision ? "checked" : ""} /> Current revision (preferred in search)</label>
                 <label>Machine association(s) — retrieval only ever returns a document for a machine linked here
-                  <!-- P0-03 (external review, 2026-09-21): this picker used to pre-check every existing
-                       link (approved, pending, AND rejected) with no visual distinction, and every Save
-                       sent the full checked set regardless of whether the admin touched it at all -- a
-                       pure title/revision correction silently re-approved a previously-rejected link. The
-                       review-status badge below makes a rejected link visible before an admin decides to
-                       touch it; the "machine-picker-touched" flag set by the change listener further down
-                       is what actually gates whether machine_ids is sent in the PATCH payload at all. -->
+                  <!-- The review-status badge below makes a rejected link visible before an admin decides
+                       to touch it, and the "machine-picker-touched" flag set by the change listener further
+                       down gates whether machine_ids is sent in the PATCH payload at all -- otherwise a pure
+                       title/revision correction would silently re-approve a previously-rejected link, since
+                       every Save would send the full checked set regardless of whether the admin touched it. -->
                   <input type="text" class="machine-filter" data-doc="${d.id}" placeholder="Filter machines…" />
                   <div class="machine-picker" data-doc="${d.id}">
                     ${state.allMachines.map((m) => {
@@ -478,9 +472,8 @@ function renderFeedback() {
     <h1>Feedback &amp; unanswered questions</h1>
     <h2 class="h2-inline">Technician feedback</h2>
     <table class="admin-table">
-      <!-- P1-02 (external review, 2026-09-21): machine, provider, citations,
-           and the message/conversation ids used to be missing here entirely
-           -- an admin triaging an "incorrect" report had no way to see what
+      <!-- Machine, provider, citations, and the message/conversation ids are
+           shown here so an admin triaging an "incorrect" report can see what
            the technician was actually asking about without separately
            hunting down the conversation. -->
       <thead><tr><th>When</th><th>User</th><th>Machine</th><th>Rating</th><th>Comment</th><th>Answer</th><th>Citations</th><th>IDs</th></tr></thead>
@@ -510,9 +503,8 @@ function renderFeedback() {
 // --- Event wiring ---
 
 function wireTabEvents() {
-  // P1-06/P1-07 (external review, 2026-09-21): the invite-link input used
-  // to carry an inline this.select() event-handler attribute -- CSP's
-  // script-src 'self' (no unsafe-inline) silently drops that kind of
+  // Wired here, not as an inline this.select() event-handler attribute --
+  // CSP's script-src 'self' (no unsafe-inline) silently drops that kind of
   // attribute.
   const inviteLinkInput = document.getElementById("invite-link-input");
   if (inviteLinkInput) inviteLinkInput.addEventListener("click", () => inviteLinkInput.select());
@@ -560,12 +552,9 @@ function wireTabEvents() {
         expires_in_hours: parseInt(fd.get("expires_in_hours"), 10) || 72,
       }),
     });
-    // P1-01 (external review, 2026-09-21): this used to link to
-    // "/?invite=..." -- leftover from a removed technician PWA that
-    // handled that query param client-side. There was no route there at
-    // all, so every invitation link 404'd. /invite is a real route
-    // (app/main.py) serving a minimal HTML redemption page
-    // (invite.html) that calls POST /api/auth/register directly.
+    // /invite is a real route (app/main.py) serving a minimal HTML
+    // redemption page (invite.html) that calls POST /api/auth/register
+    // directly.
     const link = `${window.location.origin}/invite?token=${encodeURIComponent(invite.token)}&email=${encodeURIComponent(invite.email)}`;
     state.lastInvite = { email: invite.email, link };
     state.invitations = await api("/api/admin/invitations");
@@ -595,10 +584,10 @@ function wireTabEvents() {
     });
   });
   root.querySelectorAll(".edit-form[data-id]").forEach((form) => {
-    // P0-03: only a genuine interaction with the machine picker marks it
-    // touched -- programmatic pre-checking on render (see renderDocuments)
-    // never fires a "change" event, so this stays false for an edit that
-    // never went near the machine list at all.
+    // Only a genuine interaction with the machine picker marks it touched --
+    // programmatic pre-checking on render (see renderDocuments) never fires
+    // a "change" event, so this stays false for an edit that never went near
+    // the machine list at all.
     const picker = form.querySelector(".machine-picker");
     picker?.addEventListener("change", () => { form.dataset.machinesTouched = "true"; }, { once: true });
 
@@ -610,17 +599,15 @@ function wireTabEvents() {
         title: fd.get("title") || null,
         revision: fd.get("revision") || null,
         is_current_revision: fd.get("is_current_revision") === "on",
-        // P0-03 (external review, 2026-09-21): omit machine_ids entirely
-        // unless the admin actually touched the picker this session --
-        // sending it unconditionally turned every metadata-only correction
-        // (title, revision, doc type) into an implicit re-approval of
-        // whatever happened to be checked, including previously-rejected
-        // links (the picker pre-checks every existing link, rejected ones
-        // included). The backend's PATCH handler already treats a present
-        // machine_ids as "this IS the admin's deliberate human review" --
-        // that's correct when the admin actually meant it, so the fix
-        // belongs here, in when this field is sent, not in the backend's
-        // handling of it.
+        // machine_ids is omitted entirely unless the admin actually touched
+        // the picker this session -- sending it unconditionally would turn
+        // every metadata-only correction (title, revision, doc type) into
+        // an implicit re-approval of whatever happened to be checked,
+        // including previously-rejected links (the picker pre-checks every
+        // existing link, rejected ones included). The backend's PATCH
+        // handler treats a present machine_ids as "this IS the admin's
+        // deliberate human review" -- correct when the admin actually meant
+        // it, so this field must only be sent when they did.
         machine_ids: form.dataset.machinesTouched === "true"
           ? fd.getAll("machine_ids").map((v) => parseInt(v, 10))
           : null,
@@ -679,9 +666,9 @@ function esc(str) {
   return div.innerHTML;
 }
 
-// P1-07 (external review, 2026-09-21): esc() escapes text-node content
-// (&, <, >) but not quote characters, because a text node never needs them
-// escaped -- an ATTRIBUTE value does. Used everywhere esc()'s result is
+// esc() escapes text-node content (&, <, >) but not quote characters,
+// because a text node never needs them escaped -- an ATTRIBUTE value does.
+// Used everywhere esc()'s result is
 // interpolated inside a "..." HTML attribute (value=, data-search=), where
 // an unescaped double quote in admin/PDF-derived data (title, revision,
 // manufacturer, machine family) truncates the attribute and lets the rest

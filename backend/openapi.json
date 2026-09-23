@@ -1614,7 +1614,7 @@
     },
     "/api/admin/documents/{document_id}/review": {
       "post": {
-        "description": "Independent follow-up review P0-2 (2026-08-24 follow-up): approving a\nreplacement is the cutover point, not ingestion. `_ingest_one` deliberately\nleaves the document a replacement is superseding active (deactivated_at\nIS NULL) so a pending or rejected replacement never takes a manual away\nfrom technicians. Approving the replacement here is what atomically\nretires whatever else is still active at the same source_ref -- one\nSQLite transaction, so there's never a moment with either zero or two\napproved documents live at that source_ref.\n\nP1-6 (2026-08-24 independent follow-up review, \"concurrent ... approval\n... and promotion tests\"): the review_status UPDATE below used to carry\nno WHERE-clause guard against a concurrent supersession, relying only on\nthe SELECT above -- a separate, unguarded read -- to have already\nconfirmed `deactivated_at IS NULL`. Two admins approving two DIFFERENT\npending replacement candidates at the SAME source_ref concurrently could\nboth pass that initial SELECT before either committed, then both writes\nwould proceed: the second admin's UPDATE would set\nreview_status='approved' on a document the FIRST admin's supersede step\nhad just deactivated, producing an \"approved but deactivated\" row, and\nthat second admin's own supersede step would then deactivate the FIRST\nadmin's candidate too -- leaving ZERO active approved documents at that\nsource_ref, the exact failure mode P0-2 already fixed for the\ningestion-time deactivation, reintroduced here at the approval layer\ninstead. The UPDATE now re-checks `deactivated_at IS NULL` as part of\nthe same atomic write (the same claim-UPDATE pattern used everywhere\nelse in this codebase): the losing concurrent approval sees rowcount 0\nand gets a clean 404, exactly as if it had raced the SELECT and lost\nthere.",
+        "description": "Approving a replacement is the cutover point, not ingestion.\n`_ingest_one` deliberately leaves the document a replacement is\nsuperseding active (deactivated_at IS NULL) so a pending or rejected\nreplacement never takes a manual away from technicians. Approving the\nreplacement here is what atomically retires whatever else is still\nactive at the same source_ref -- one transaction, so there's never a\nmoment with either zero or two approved documents live at that\nsource_ref.\n\nThe review_status UPDATE below carries a WHERE-clause guard against a\nconcurrent supersession -- it re-checks `deactivated_at IS NULL` as part\nof the same atomic write, rather than relying only on the SELECT above (a\nseparate, unguarded read) to have already confirmed it. Without that\nguard, two admins approving two DIFFERENT pending replacement candidates\nat the SAME source_ref concurrently could both pass that initial SELECT\nbefore either committed, and then both writes would proceed: the second\nadmin's UPDATE would set review_status='approved' on a document the FIRST\nadmin's supersede step had just deactivated, producing an \"approved but\ndeactivated\" row, and that second admin's own supersede step would then\ndeactivate the FIRST admin's candidate too -- leaving ZERO active\napproved documents at that source_ref. The same claim-UPDATE pattern used\neverywhere else in this codebase closes that gap: the losing concurrent\napproval sees rowcount 0 and gets a clean 404, exactly as if it had raced\nthe SELECT and lost there.",
         "operationId": "review_document_api_admin_documents__document_id__review_post",
         "parameters": [
           {
@@ -1728,7 +1728,7 @@
     },
     "/api/admin/feedback": {
       "get": {
-        "description": "P1-02 (external review, 2026-09-21): this used to return only\nrating/comment/user/conversation_id -- an admin triaging an \"incorrect\"\nreport had no machine, model, or citation context and had to separately\nopen the conversation (if they could even find it) to see what the\ntechnician was actually asking about. Now also reports message_id\n(feedback is per-answer, not per-conversation -- P1-11 already scoped\nsubmission that way), the machine the answer was generated for, and\nevery citation the answer actually used, batched in one extra query\nrather than N+1 per row.",
+        "description": "An admin triaging an \"incorrect\" report needs machine, model, and\ncitation context, not just rating/comment/user/conversation_id, or they'd\nhave to separately open the conversation (if they could even find it) to\nsee what the technician was actually asking about. Reports message_id\n(feedback is per-answer, not per-conversation), the machine the answer\nwas generated for, and every citation the answer actually used, batched\nin one extra query rather than N+1 per row.",
         "operationId": "list_feedback_api_admin_feedback_get",
         "parameters": [
           {
@@ -1788,7 +1788,7 @@
     },
     "/api/admin/ingestion/reindex": {
       "post": {
-        "description": "Independent follow-up review 2026-08-24 P0-6: the ingestion_runs row\nused to be created inside ingest_all(), which only executes once this\nBackgroundTask actually runs -- after this response is already sent. If\nthe process restarted in that gap, an admin who was told a run started\nwould see no evidence one ever was. The row is now created here,\nsynchronously, before the 202 goes out.",
+        "description": "The ingestion_runs row must be created here, synchronously, before the\n202 goes out -- ingest_all() itself only executes once the BackgroundTask\nactually runs, after this response is already sent. Creating the row\ninside ingest_all() instead would mean that if the process restarted in\nthat gap, an admin who was told a run started would see no evidence one\never was.",
         "operationId": "trigger_reindex_api_admin_ingestion_reindex_post",
         "parameters": [
           {
@@ -1895,7 +1895,7 @@
     },
     "/api/admin/ingestion/runs/{run_id}/report": {
       "get": {
-        "description": "The plan's required ingestion report: every source file as indexed,\nduplicate, partially processed, failed, or unsupported, with a reason.",
+        "description": "The ingestion report: every source file as indexed, duplicate,\npartially processed, failed, or unsupported, with a reason.",
         "operationId": "get_ingestion_report_api_admin_ingestion_runs__run_id__report_get",
         "parameters": [
           {
@@ -1952,7 +1952,7 @@
     },
     "/api/admin/ingestion/status": {
       "get": {
-        "description": "P1-4: \"visible last-success timestamp/source snapshot\" and a\nstale-corpus alert against the configured operational SLA, so freshness\ndoesn't depend on an admin remembering to check the run list and do the\nstaleness math themselves.",
+        "description": "A visible last-success timestamp/source snapshot and a stale-corpus\nalert against the configured operational SLA, so freshness doesn't\ndepend on an admin remembering to check the run list and do the\nstaleness math themselves.",
         "operationId": "get_ingestion_status_api_admin_ingestion_status_get",
         "parameters": [
           {
@@ -2289,7 +2289,7 @@
     },
     "/api/admin/review-queue": {
       "get": {
-        "description": "Every active document that either isn't approved itself, or has at\nleast one non-approved (pending/rejected) machine link -- the second half\nmatters even for an already-approved document, since a re-index can\npropose a *new* link on an existing approved document at any time.\n\nP1-12 (independent follow-up review): an approved document with ZERO\nmachine links used to disappear from this queue even though it's\nunretrievable (retrieval requires an approved link too) -- the LEFT JOIN\nleaves dm.review_status NULL for such a document, and plain\n`dm.review_status != 'approved'` evaluates to NULL (not TRUE) against a\nNULL, so `d.review_status != 'approved' OR dm.review_status != 'approved'`\nwas FALSE OR NULL = NULL, which WHERE treats as excluded. IS DISTINCT FROM\nis NULL-safe: NULL IS DISTINCT FROM 'approved' is TRUE, so a zero-link\napproved document is correctly included.",
+        "description": "Every active document that either isn't approved itself, or has at\nleast one non-approved (pending/rejected) machine link -- the second half\nmatters even for an already-approved document, since a re-index can\npropose a *new* link on an existing approved document at any time.\n\nAn approved document with ZERO machine links is unretrievable (retrieval\nrequires an approved link too) but must still surface in this queue. The\nLEFT JOIN leaves dm.review_status NULL for such a document, and plain\n`dm.review_status != 'approved'` evaluates to NULL (not TRUE) against a\nNULL, so a bare `d.review_status != 'approved' OR dm.review_status !=\n'approved'` would evaluate to FALSE OR NULL = NULL, which WHERE treats as\nexcluded. IS DISTINCT FROM is NULL-safe: NULL IS DISTINCT FROM 'approved'\nis TRUE, so a zero-link approved document is correctly included.",
         "operationId": "review_queue_api_admin_review_queue_get",
         "parameters": [
           {
@@ -2677,7 +2677,7 @@
     },
     "/api/auth/register": {
       "post": {
-        "description": "Independent follow-up review P0-5: public self-registration used to let\nanyone become administrator by winning a race to register first, and any\nother email through unconditionally once domain-restricted. Registration\nnow requires a valid, unexpired, unused, email-bound invitation issued by\nan existing administrator (POST /api/admin/invitations) -- there is no\npath from an anonymous request to an account anymore. The very first\nadministrator is created by scripts/bootstrap_admin.py, not this endpoint.\n\nP1-6 (2026-08-24 independent follow-up review, \"concurrent ...\ninvitation ... tests\"): the invite used to be consumed with a\ncheck-then-act read (the `used_at is not None` check below) followed by\nan unconditional UPDATE at the end -- two requests racing on the SAME\ninvite token both read used_at=NULL and both proceeded to INSERT a user,\nrelying entirely on users.email's UNIQUE constraint to stop the second\none. That constraint does stop a duplicate account, but the loser's\nINSERT raised an unhandled sqlite3.IntegrityError instead of the same\nclean 403 every other invitation-rejection path returns. The invite is\nnow claimed atomically, before any user row is touched, via the same\nclaim-UPDATE pattern used everywhere else in this codebase for exactly\nthis reason (conversations.pending_message_id, messages.answer_status):\nonly a request that flips used_at from NULL to non-NULL proceeds.",
+        "description": "Registration requires a valid, unexpired, unused, email-bound\ninvitation issued by an existing administrator (POST\n/api/admin/invitations) -- there is no path from an anonymous request to\nan account. This closes off both winning a race to become the first\n(and therefore administrator) account and open registration on any\ndomain-allowed email. The very first administrator is created by\nscripts/bootstrap_admin.py, not this endpoint.\n\nThe invite is claimed atomically, before any user row is touched, via\nthe same claim-UPDATE pattern used everywhere else in this codebase for\nexactly this reason (conversations.pending_message_id,\nmessages.answer_status): only a request that flips used_at from NULL to\nnon-NULL proceeds. A check-then-act read (a plain `used_at is not None`\ncheck) followed by an unconditional UPDATE at the end would let two\nrequests racing on the SAME invite token both read used_at=NULL and both\nproceed to INSERT a user, relying entirely on users.email's UNIQUE\nconstraint to stop the second one -- which does stop the duplicate\naccount, but as an unhandled IntegrityError instead of the same clean 403\nevery other invitation-rejection path returns.",
         "operationId": "register_api_auth_register_post",
         "requestBody": {
           "content": {
@@ -2878,7 +2878,7 @@
     },
     "/api/conversations/{conversation_id}": {
       "get": {
-        "description": "P1-13 (external review, 2026-09-21): the Android client had no way to\nre-fetch a single conversation's authoritative, current state -- only\nthe list endpoint above (a full reload of every conversation, wrong\ntool for \"did this one's machine change\") and the machine-selection\nendpoint's response (only reachable via that one action). ChatScreen's\ntoolbar used the label passed through navigation instead, which never\nupdates when the server resolves a machine mention in an answer or a\nclarification is answered through a path other than\nselectClarifyingMachine -- it could keep saying \"No machine selected\"\nindefinitely. This is the single-resource fetch the client polls after\nevery reload to keep the toolbar honest.",
+        "description": "The single-resource fetch for one conversation's authoritative,\ncurrent state -- distinct from the list endpoint above (a full reload of\nevery conversation, wrong tool for \"did this one's machine change\") and\nfrom the machine-selection endpoint's response (only reachable via that\none action). The client polls this after every reload so its toolbar\nlabel stays accurate even when the server resolves a machine mention in\nan answer, or a clarification is answered through a path other than the\nclient's own machine-selection UI.",
         "operationId": "get_conversation_api_conversations__conversation_id__get",
         "parameters": [
           {
@@ -2937,7 +2937,7 @@
     },
     "/api/conversations/{conversation_id}/machine": {
       "post": {
-        "description": "The ONLY way a conversation's machine is set once clarification is\nneeded, or changed later (\"Change machine\"). This is always an explicit,\nconfirmed technician action -- never inferred from a later message body,\nwhich is what let a conversation's machine silently drift in the reviewed\nversion (concern #5/#6).\n\nIf a clarifying question is pending (the technician asked something\nbefore the machine was known), confirming the machine here resumes and\nanswers that ORIGINAL stored question -- it does not require the caller\nto resubmit it as a new user turn (P1-8). The resumed answer is\ngenerated and persisted as usual; this endpoint's own response stays\nConversationOut either way, so the caller reloads\nGET /conversations/{id}/messages to see it, the same as after any other\nanswer.",
+        "description": "The ONLY way a conversation's machine is set once clarification is\nneeded, or changed later (\"Change machine\"). This is always an explicit,\nconfirmed technician action -- never inferred from a later message body,\nwhich would let a conversation's machine silently drift.\n\nIf a clarifying question is pending (the technician asked something\nbefore the machine was known), confirming the machine here resumes and\nanswers that ORIGINAL stored question -- it does not require the caller\nto resubmit it as a new user turn. The resumed answer is\ngenerated and persisted as usual; this endpoint's own response stays\nConversationOut either way, so the caller reloads\nGET /conversations/{id}/messages to see it, the same as after any other\nanswer.",
         "operationId": "set_conversation_machine_api_conversations__conversation_id__machine_post",
         "parameters": [
           {
@@ -3178,7 +3178,7 @@
     },
     "/api/conversations/{conversation_id}/messages/{message_id}/retry": {
       "post": {
-        "description": "Independent follow-up review 2026-08-24 P1-1: \"Retry still resends the\nprevious user question as a new message... creating another user turn\nand provider/retrieval attempt.\" app.js's retry button used to call\nsendQuestion() with the original question text, which is exactly that --\na second user turn plus a second, unrelated assistant message, doubling\nboth the visible history and the billable provider call for what the\ntechnician experiences as one logical retry.\n\nThis regenerates and updates the SAME failed assistant message in place\n(no new user turn, no new assistant message) -- the original question is\nlooked up server-side from the preceding user message, never resent by\nthe client, the same \"resume the stored question\" pattern P1-8 already\nuses for pending-clarification resumption. Idempotent via the same\nclaim-UPDATE pattern as conversations.pending_message_id: only a request\nthat successfully flips answer_status from 'failed' to 'retrying'\nproceeds to call the provider, so a double-tap on the retry button can\ntrigger at most one provider call, not two concurrent ones.",
+        "description": "A retry must not resend the previous user question as a new message --\nthat would create a second user turn plus a second, unrelated assistant\nmessage, doubling both the visible history and the billable provider call\nfor what the technician experiences as one logical retry.\n\nThis regenerates and updates the SAME failed assistant message in place\n(no new user turn, no new assistant message) -- the original question is\nlooked up server-side from the preceding user message, never resent by\nthe client, the same \"resume the stored question\" pattern\nset_conversation_machine uses for pending-clarification resumption.\nIdempotent via the same\nclaim-UPDATE pattern as conversations.pending_message_id: only a request\nthat successfully flips answer_status from 'failed' to 'retrying'\nproceeds to call the provider, so a double-tap on the retry button can\ntrigger at most one provider call, not two concurrent ones.",
         "operationId": "retry_answer_api_conversations__conversation_id__messages__message_id__retry_post",
         "parameters": [
           {
@@ -3246,7 +3246,7 @@
     },
     "/api/machines": {
       "get": {
-        "description": "Autocomplete search across model name, family, and manufacturer. Only\nmachines that actually have at least one indexed, approved, current\ndocument (with an approved link) are returned -- otherwise the picker\nwould offer a machine that then dead-ends into \"no manuals\" the moment\nretrieval applies its own approval/revision filters (independent\nfollow-up review P0-6, P1-6). The eligibility rules here are deliberately\nthe same set retrieval enforces, including the current-revision rule\n(P1-11): a machine whose only manual is superseded has nothing\nretrievable and must not appear.\n\nRequires auth: the equipment catalog is proprietary to the deployment\n(concern #20 -- this endpoint leaked it to unauthenticated requests).",
+        "description": "Autocomplete search across model name, family, and manufacturer. Only\nmachines that actually have at least one indexed, approved, current\ndocument (with an approved link) are returned -- otherwise the picker\nwould offer a machine that then dead-ends into \"no manuals\" the moment\nretrieval applies its own approval/revision filters. The eligibility\nrules here are deliberately the same set retrieval enforces, including\nthe current-revision rule: a machine whose only manual is superseded has\nnothing retrievable and must not appear.\n\nRequires auth: the equipment catalog is proprietary to the deployment.",
         "operationId": "search_machines_api_machines_get",
         "parameters": [
           {
@@ -3338,7 +3338,7 @@
     },
     "/api/machines/recent": {
       "get": {
-        "description": "Applies the exact same eligibility rules and `HAVING document_count > 0`\nas `search_machines()` above -- a machine a technician favorited or\nrecently used, whose only manual has since been deactivated/unapproved/\nsuperseded, is dropped rather than shown with `document_count: 0`\n(independent follow-up review P1-6's \"apply the rules consistently to\nsearch and recent machines\": found, during this pass, that this endpoint\nwas missing the `HAVING` clause `search_machines()` already had, so a\ndead manual could resurface here even though the picker correctly hid\nit). The tradeoff is explicit: a favorited-but-now-empty machine\ndisappears from recents instead of dead-ending into \"no manuals\" --\nconsistent with what the picker already does, not a new UX decision.",
+        "description": "Applies the exact same eligibility rules and `HAVING document_count > 0`\nas `search_machines()` above -- a machine a technician favorited or\nrecently used, whose only manual has since been deactivated/unapproved/\nsuperseded, is dropped rather than shown with `document_count: 0`. The\ntradeoff is explicit: a favorited-but-now-empty machine disappears from\nrecents instead of dead-ending into \"no manuals\" -- consistent with what\nthe picker already does, not a new UX decision.",
         "operationId": "recent_machines_api_machines_recent_get",
         "parameters": [
           {
@@ -3542,7 +3542,7 @@
     },
     "/api/manuals/{document_id}/chunks/{chunk_id}/evidence": {
       "get": {
-        "description": "Backs the 'View manual evidence' expandable panel: the exact excerpt text\nplus (for PDFs) a link to the rendered page image.\n\nGated on review_status='approved' for everyone except administrators, same\nas get_manual_file -- this is a second path to full chunk content (concern #6).",
+        "description": "Backs the 'View manual evidence' expandable panel: the exact excerpt text\nplus (for PDFs) a link to the rendered page image.\n\nGated on review_status='approved' for everyone except administrators, same\nas get_manual_file -- this is a second path to full chunk content.",
         "operationId": "get_evidence_api_manuals__document_id__chunks__chunk_id__evidence_get",
         "parameters": [
           {
@@ -3608,7 +3608,7 @@
     },
     "/api/manuals/{document_id}/file": {
       "get": {
-        "description": "Serves the raw file. The frontend appends #page=N (browser-native PDF\nnavigation, supported by Chrome/Edge/Safari, including iPadOS) to deep-link\nto the cited page without needing a bundled PDF.js viewer.\n\nGated on review_status='approved' for everyone except administrators --\nthe raw file and evidence endpoints are a second path to document content\nthat must honor the same P0-6 approval boundary as retrieval, not just be\nreachable via an old citation or a guessed document id (concern #6).",
+        "description": "Serves the raw file. The frontend appends #page=N (browser-native PDF\nnavigation, supported by Chrome/Edge/Safari, including iPadOS) to deep-link\nto the cited page without needing a bundled PDF.js viewer.\n\nGated on review_status='approved' for everyone except administrators --\nthe raw file and evidence endpoints are a second path to document content\nthat must honor the same approval boundary as retrieval, not just be\nreachable via an old citation or a guessed document id.",
         "operationId": "get_manual_file_api_manuals__document_id__file_get",
         "parameters": [
           {
@@ -3730,7 +3730,7 @@
     },
     "/api/messages/{message_id}/feedback": {
       "post": {
-        "description": "P1-11 (independent follow-up review): used to accept feedback against\nany owned message row -- the user's own question, a clarifying prompt, a\nfailed/retrying answer, or a no-answer response -- none of which is a\nreal \"was this answer helpful\" target. Restricted to completed,\nsubstantive assistant answers.",
+        "description": "Feedback is only valid against a completed, substantive assistant\nanswer -- the user's own question, a clarifying prompt, a\nfailed/retrying answer, or a no-answer response is not a real \"was this\nanswer helpful\" target.",
         "operationId": "submit_feedback_api_messages__message_id__feedback_post",
         "parameters": [
           {
@@ -3797,7 +3797,7 @@
     },
     "/api/messages/{message_id}/save": {
       "post": {
-        "description": "P1-11: same eligibility restriction as submit_feedback above -- only a\ncompleted, substantive assistant answer is a meaningful \"saved answer\";\na clarifying question, failed attempt, or no-answer row is not.",
+        "description": "Same eligibility restriction as submit_feedback above -- only a\ncompleted, substantive assistant answer is a meaningful \"saved answer\";\na clarifying question, failed attempt, or no-answer row is not.",
         "operationId": "save_answer_api_messages__message_id__save_post",
         "parameters": [
           {
@@ -3854,7 +3854,7 @@
     },
     "/api/messages/{message_id}/unsave": {
       "post": {
-        "description": "Companion to save_answer above -- P1-21 (external review, 2026-09-21):\nthe saved-answers list had no way to remove an entry, even though a\ntechnician's bookmark list is exactly the kind of thing that needs\ntidying (a saved answer whose source was later withdrawn, or one saved\nby mistake). POST, not DELETE, for consistency with every other\nstate-changing action in this API (/revoke, /deactivate, /reject, ...\n-- deliberately not resource-verb-per-HTTP-method REST elsewhere in\nthis codebase, so this does not start doing that alone). Idempotent\nlike save_answer's own INSERT ... ON CONFLICT DO NOTHING: removing an\nalready-unsaved (or never-saved) message is a no-op, not a 404 -- the\nend state (\"not saved\") is identical either way, and a client racing a\ndouble-tap must not see a spurious error.",
+        "description": "Companion to save_answer above -- removes an entry from a technician's\nbookmark list (e.g. a saved answer whose source was later withdrawn, or\none saved by mistake). POST, not DELETE, for consistency with every other\nstate-changing action in this API (/revoke, /deactivate, /reject, ...\n-- deliberately not resource-verb-per-HTTP-method REST elsewhere in\nthis codebase, so this does not start doing that alone). Idempotent\nlike save_answer's own INSERT ... ON CONFLICT DO NOTHING: removing an\nalready-unsaved (or never-saved) message is a no-op, not a 404 -- the\nend state (\"not saved\") is identical either way, and a client racing a\ndouble-tap must not see a spurious error.",
         "operationId": "unsave_answer_api_messages__message_id__unsave_post",
         "parameters": [
           {
@@ -3911,7 +3911,7 @@
     },
     "/api/saved-answers": {
       "get": {
-        "description": "P1-3 (2026-08-24 independent follow-up review): a saved-answer view is\nuseless without knowing which conversation/machine/question it came from\n-- MessageOut alone (the old response shape) carries none of that. Each\nentry now also names which conversation it can be resumed from, so the\nUI can offer \"Open conversation\" rather than showing an orphaned answer.",
+        "description": "A saved-answer view is useless without knowing which\nconversation/machine/question it came from -- MessageOut alone carries\nnone of that. Each entry also names which conversation it can be resumed\nfrom, so the UI can offer \"Open conversation\" rather than showing an\norphaned answer.",
         "operationId": "list_saved_answers_api_saved_answers_get",
         "parameters": [
           {
@@ -4009,7 +4009,7 @@
     },
     "/invite": {
       "get": {
-        "description": "P1-01 (external review, 2026-09-21): admin.js generated invitation\nlinks pointing at \"/?invite=...\" -- left over from a removed technician\nPWA that used to handle that query param client-side. There was no\nroute at \"/\" at all, so every invitation link 404'd; an admin could\ncreate a token and the JSON API could redeem it, but a recipient had no\nsupported way to actually do that. This is the minimal HTML redemption\npage the fix calls for (not a full PWA): reads token/email from the\nquery string and lets the recipient choose a password by calling the\nexisting POST /api/auth/register directly -- see invite.html. After\naccount creation, the technician signs in from the Android app; this\npage does nothing beyond registration itself.",
+        "description": "Minimal HTML redemption page for an admin-issued invitation link:\nreads token/email from the query string and lets the recipient choose a\npassword by calling the existing POST /api/auth/register directly -- see\ninvite.html. After account creation, the technician signs in from the\nAndroid app; this page does nothing beyond registration itself.",
         "operationId": "invite_page_invite_get",
         "responses": {
           "200": {
@@ -4026,7 +4026,7 @@
     },
     "/readyz": {
       "get": {
-        "description": "P2-07 (external review, 2026-09-21): /healthz only proves the process\nis running -- useful as a liveness probe, but says nothing about\nwhether this instance can actually serve a citation, which needs a\nreachable database, readable object storage, and a corpus that has\nsynced recently enough to trust. Checked directly rather than assumed.\n\nNo auth, same as /healthz -- a deployment platform's readiness probe\ncarries no credentials, and this deliberately reports only booleans/a\ntimestamp, never a filename or manual title, so it stays safe to expose\npublicly. Reuses routes_config.py's own _corpus_status rather than a\nthird copy of the same staleness math (routes_admin.py's ingestion\nstatus endpoint is the second).",
+        "description": "/healthz only proves the process is running -- useful as a liveness\nprobe, but says nothing about whether this instance can actually serve a\ncitation, which needs a reachable database, readable object storage, and\na corpus that has synced recently enough to trust. Checked directly\nrather than assumed.\n\nNo auth, same as /healthz -- a deployment platform's readiness probe\ncarries no credentials, and this deliberately reports only booleans/a\ntimestamp, never a filename or manual title, so it stays safe to expose\npublicly. Reuses routes_config.py's own _corpus_status rather than a\nthird copy of the same staleness math (routes_admin.py's ingestion\nstatus endpoint is the second).",
         "operationId": "readyz_readyz_get",
         "responses": {
           "200": {

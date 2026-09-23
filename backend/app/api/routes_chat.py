@@ -62,11 +62,10 @@ class CitationOut(BaseModel):
     section_heading: str | None
     revision: str | None
     excerpt: str
-    # P0-13 (external review, 2026-09-21): computed fresh at hydration time
-    # from the source document's CURRENT status, not stored on the message --
-    # an emergency withdrawal or re-review must retroactively flag every
-    # historical answer/saved answer that cited this document, not just
-    # future ones.
+    # Computed fresh at hydration time from the source document's CURRENT
+    # status, not stored on the message -- an emergency withdrawal or
+    # re-review must retroactively flag every historical answer/saved answer
+    # that cited this document, not just future ones.
     source_withdrawn: bool = False
 
 
@@ -92,11 +91,11 @@ class MessageOut(BaseModel):
     # the MOST RECENT rating, not "whether any feedback exists".
     feedback_rating: str | None = None
     is_saved: bool = False
-    # P0-13 (external review, 2026-09-21): true when ANY citation's source
-    # document has since been withdrawn (deactivated) or lost its approval --
-    # an emergency withdrawal must retroactively flag every historical answer
-    # and saved answer built on that document, in the technician's live
-    # history and bookmarks alike, not just block new retrieval. The client
+    # True when ANY citation's source document has since been withdrawn
+    # (deactivated) or lost its approval -- an emergency withdrawal must
+    # retroactively flag every historical answer and saved answer built on
+    # that document, in the technician's live history and bookmarks alike,
+    # not just block new retrieval. The client
     # is expected to suppress the answer's action-oriented styling (e.g. "do
     # this") and show a clear warning instead when this is true; the raw
     # content and citations stay intact underneath for admin investigation.
@@ -121,8 +120,8 @@ def _machine_label(conn, machine_id: int | None) -> str | None:
 def _machine_name_variants(model_name: str) -> list[str]:
     """'AJ/AJX Series' -> ['AJ/AJX Series', 'AJ', 'AJX Series'] so a mention of
     just 'AJ' (a real model designator, not a random substring) still resolves
-    unambiguously -- the exact-substring-only match this replaced couldn't
-    handle a phrase like 'the AJ machine' (independent review concern #6)."""
+    unambiguously, unlike a bare exact-substring match, which can't handle a
+    phrase like 'the AJ machine'."""
     parts = re.split(r"[/,]", model_name)
     variants = [model_name] + [p.strip() for p in parts]
     return [v for v in variants if len(v) >= 2]
@@ -132,7 +131,7 @@ def _resolve_machine_mention(question: str) -> tuple[int | None, list[dict]]:
     """Used only when a conversation has no machine selected yet. Never called
     again once a machine is set for a conversation -- a machine change must go
     through the explicit /machine endpoint below, never be inferred from a
-    later message (independent review concern #5/#6: no silent machine switch).
+    later message. No silent machine switch, ever.
 
     Tries an exact, word-bounded match first (on the full model name or any
     '/'-separated component, plus any curated alias); falls back to
@@ -198,12 +197,10 @@ def create_conversation(payload: CreateConversationRequest, user: CurrentUser = 
 
 
 def _conversation_title(conn, conversation_id: int, stored_title: str | None) -> str | None:
-    """P1-3 (2026-08-24 independent follow-up review): nothing writes
-    conversations.title -- it has always been NULL for every conversation
-    that exists, which would make a history list unusable (every row blank).
-    Derive one from the first user message when no stored title exists,
-    rather than building a title-generation feature that isn't what this
-    item asked for."""
+    """Nothing writes conversations.title -- it is NULL for every
+    conversation, which would make a history list unusable (every row
+    blank) if left as-is. Derive one from the first user message when no
+    stored title exists."""
     if stored_title:
         return stored_title
     row = conn.execute(
@@ -224,12 +221,11 @@ def list_conversations(
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = None,
 ):
-    # Cursor pagination (Phase 1, narrowed scope): (updated_at, id) rather
-    # than updated_at alone, since two conversations can share an
-    # updated_at (same-second activity) -- id as a tiebreaker is what makes
-    # this "stable" (a page boundary can't land mid-tie and skip/repeat a
-    # row) rather than plain LIMIT/OFFSET, which also shifts under
-    # concurrent inserts.
+    # Cursor pagination on (updated_at, id) rather than updated_at alone,
+    # since two conversations can share an updated_at (same-second activity)
+    # -- id as a tiebreaker is what makes this "stable" (a page boundary
+    # can't land mid-tie and skip/repeat a row) rather than plain
+    # LIMIT/OFFSET, which also shifts under concurrent inserts.
     before_updated_at, before_id = (
         decode_cursor(cursor, [CURSOR_TIMESTAMP, CURSOR_INT]) if cursor else (None, None)
     )
@@ -240,8 +236,7 @@ def list_conversations(
         # anything. Every real question always inserts the user's message
         # first (ask_question, above), so "has at least one message" is
         # exactly "a question was actually asked" -- excluding conversations
-        # with none keeps abandoned/empty ones out of History (reported live
-        # on the tablet, 2026-08-25).
+        # with none keeps abandoned/empty ones out of History.
         rows = conn.execute(
             "SELECT id, machine_id, title, started_at, updated_at FROM conversations "
             "WHERE user_id = %s AND EXISTS ("
@@ -265,17 +260,14 @@ def list_conversations(
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationOut)
 def get_conversation(conversation_id: int, user: CurrentUser = Depends(get_current_user)):
-    """P1-13 (external review, 2026-09-21): the Android client had no way to
-    re-fetch a single conversation's authoritative, current state -- only
-    the list endpoint above (a full reload of every conversation, wrong
-    tool for "did this one's machine change") and the machine-selection
-    endpoint's response (only reachable via that one action). ChatScreen's
-    toolbar used the label passed through navigation instead, which never
-    updates when the server resolves a machine mention in an answer or a
-    clarification is answered through a path other than
-    selectClarifyingMachine -- it could keep saying "No machine selected"
-    indefinitely. This is the single-resource fetch the client polls after
-    every reload to keep the toolbar honest."""
+    """The single-resource fetch for one conversation's authoritative,
+    current state -- distinct from the list endpoint above (a full reload of
+    every conversation, wrong tool for "did this one's machine change") and
+    from the machine-selection endpoint's response (only reachable via that
+    one action). The client polls this after every reload so its toolbar
+    label stays accurate even when the server resolves a machine mention in
+    an answer, or a clarification is answered through a path other than the
+    client's own machine-selection UI."""
     with get_conn() as conn:
         _require_own_conversation(conn, conversation_id, user.id)
         row = conn.execute(
@@ -301,18 +293,17 @@ def _require_own_conversation(conn, conversation_id: int, user_id: int):
 
 
 PROCESSING_LEASE_SECONDS = 120
-# P0-04 (external review, 2026-09-21): the plain is_processing boolean this
-# replaces was cleared only in a Python `finally` -- a killed worker, a lost
-# DB connection during release, or a process shutdown between claim and
-# `finally` left it true forever, rejecting every future question/retry with
-# 409 with no way out (the 409 copy even said "stop it", but no stop/cancel
-# endpoint existed). A claim now also records WHEN it was taken
-# (processing_claimed_at) and a random fencing token identifying WHICH
-# attempt holds it (processing_attempt_id, migration 0003): a claim older
-# than PROCESSING_LEASE_SECONDS is treated as abandoned and can be reclaimed
-# by a later request instead of blocking forever, and a slow "zombie" worker
-# whose provider call finally returns after its lease already expired and
-# was reclaimed by someone else is told, via its fencing token no longer
+# A plain is_processing boolean cleared only in a Python `finally` is fragile:
+# a killed worker, a lost DB connection during release, or a process shutdown
+# between claim and `finally` would leave it true forever, rejecting every
+# future question/retry with 409 and no way out (there is no stop/cancel
+# endpoint). A claim also records WHEN it was taken (processing_claimed_at)
+# and a random fencing token identifying WHICH attempt holds it
+# (processing_attempt_id, migration 0003): a claim older than
+# PROCESSING_LEASE_SECONDS is treated as abandoned and can be reclaimed by a
+# later request instead of blocking forever, and a slow "zombie" worker whose
+# provider call finally returns after its lease already expired and was
+# reclaimed by someone else is told, via its fencing token no longer
 # matching, not to persist its answer -- see _generate_and_persist_answer's
 # fenced write below.
 _LEASE_AVAILABLE_SQL = (
@@ -322,18 +313,17 @@ _LEASE_AVAILABLE_SQL = (
 
 
 def _claim_conversation_processing(conn, conversation_id: int) -> str | None:
-    """Owner decision (2026-09-16): concurrent questions in one conversation
-    are not supported -- a technician must wait for the in-flight question to
-    finish (or retry it, since a retry also calls the provider) before
-    sending another, and this must be enforced server-side rather than only
-    by disabling a client button. Same claim-UPDATE pattern used throughout
-    this file (pending_message_id, retry's answer_status, idempotency keys):
-    only the request that successfully claims the lease may proceed -- now
-    either because it was free, or because the previous claim's lease had
-    expired (P0-04). Returns the new attempt's fencing token on success
-    (the caller must thread it through to _release_conversation_processing
-    and _generate_and_persist_answer), or None if someone else currently
-    holds a live lease."""
+    """Concurrent questions in one conversation are not supported -- a
+    technician must wait for the in-flight question to finish (or retry it,
+    since a retry also calls the provider) before sending another, and this
+    is enforced server-side rather than only by disabling a client button.
+    Same claim-UPDATE pattern used throughout this file (pending_message_id,
+    retry's answer_status, idempotency keys): only the request that
+    successfully claims the lease may proceed -- either because it was free,
+    or because the previous claim's lease had expired. Returns the new
+    attempt's fencing token on success (the caller must thread it through to
+    _release_conversation_processing and _generate_and_persist_answer), or
+    None if someone else currently holds a live lease."""
     attempt_id = str(uuid.uuid4())
     result = conn.execute(
         "UPDATE conversations SET is_processing = true, processing_attempt_id = %s, "
@@ -351,7 +341,7 @@ def _release_conversation_processing(conversation_id: int, attempt_id: str) -> N
     _generate_and_persist_answer raises, or the conversation would be stuck
     rejecting every future question until the lease naturally expires.
 
-    Fenced on attempt_id (P0-04): only clears the lease if THIS attempt still
+    Fenced on attempt_id: only clears the lease if THIS attempt still
     owns it. Without this, a slow zombie worker's delayed release could clear
     a DIFFERENT, later attempt's live claim -- the exact bug fencing exists
     to prevent, just on the release path instead of the write path.
@@ -380,7 +370,7 @@ def _fetch_history(conn, conversation_id: int, *, before_message_id: int | None 
     (set_conversation_machine) compute exactly the history that existed at
     the moment the pending question was originally asked, the same way the
     normal ask_question path computes history before inserting its new
-    question (concern #5, P1-8)."""
+    question."""
     if before_message_id is not None:
         rows = conn.execute(
             "SELECT role, content, is_no_answer FROM messages WHERE conversation_id = %s AND id < %s "
@@ -414,22 +404,21 @@ def _generate_and_persist_answer(
     attempt_id: str | None = None,
 ) -> MessageOut:
     """Shared by ask_question (a freshly-asked question), set_conversation_machine's
-    pending-message resumption (P1-8: "confirming a machine must resume the
-    existing pending message" rather than the caller re-submitting the same
-    question as a new user turn), and retry_answer (P1-1, 2026-08-24 independent
-    follow-up review: "retry must not resend the question as a new message").
-    Retrieval uses the resolved standalone query; the provider still sees the
-    question's original wording plus `history` -- an LLM can resolve a
-    pronoun like "it" from conversational context the same way a human
-    would, so only retrieval (which has no such reasoning) needs the
-    resolved query.
+    pending-message resumption (confirming a machine must resume the existing
+    pending message rather than the caller re-submitting the same question as
+    a new user turn), and retry_answer (a retry must not resend the question
+    as a new message). Retrieval uses the resolved standalone query; the
+    provider still sees the question's original wording plus `history` -- an
+    LLM can resolve a pronoun like "it" from conversational context the same
+    way a human would, so only retrieval (which has no such reasoning) needs
+    the resolved query.
 
     retry_message_id: when set, this is a retry -- the existing assistant
     message at that id is UPDATED in place (its old message_sources rows
     replaced) instead of a new message being INSERTed, so a retry never adds
     a second assistant turn or a duplicate user turn to the conversation.
 
-    attempt_id: P0-04's fencing token for the processing lease this call is
+    attempt_id: the fencing token for the processing lease this call is
     running under. The provider call above can run long enough for the
     lease to expire and be reclaimed by a LATER attempt (a genuinely new
     question, or a retry, claimed after this one's lease lapsed) -- if that
@@ -450,18 +439,18 @@ def _generate_and_persist_answer(
 
     # Retrieval itself can fail independently of the provider call below.
     # vector_search() already skips embed_query() entirely when there are no
-    # eligible chunks (P1-5's first half), and separately swallows an
-    # embed_query() failure (e.g. the embedding model not loading -- a
-    # misconfigured or offline deployment; see get_model()'s docstring) to
-    # degrade to lexical-only results rather than raising, so that specific
-    # case never reaches here at all. This is the backstop for retrieval
-    # failing more fundamentally than that (e.g. the FTS index itself, or an
-    # unexpected bug in fusion/hydration) -- it must not become an unhandled
-    # 500 that leaves the technician's question answered by nothing. It gets
-    # the same honest, no-answer treatment as a provider failure below, not a
+    # eligible chunks, and separately swallows an embed_query() failure (e.g.
+    # the embedding model not loading -- a misconfigured or offline
+    # deployment; see get_model()'s docstring) to degrade to lexical-only
+    # results rather than raising, so that specific case never reaches here
+    # at all. This is the backstop for retrieval failing more fundamentally
+    # than that (e.g. the FTS index itself, or an unexpected bug in
+    # fusion/hydration) -- it must not become an unhandled 500 that leaves
+    # the technician's question answered by nothing. It gets the same
+    # honest, no-answer treatment as a provider failure below, not a
     # misleading "no relevant passages were found" (that specific wording
     # would claim a search concluded when one never ran) and not a stack
-    # trace (concern #9).
+    # trace.
     try:
         passages = hybrid_search(resolved_query, machine_id=machine_id, top_k=6)
     except Exception:
@@ -487,7 +476,7 @@ def _generate_and_persist_answer(
                 is_no_answer=True, provider=getattr(provider, "name", "unknown"),
             )
         except Exception:
-            # Never leak internals (concern #9) -- but do log server-side so an
+            # Never leak internals -- but do log server-side so an
             # admin can actually diagnose what happened.
             logger.exception("Unexpected error generating an answer for conversation %s", conversation_id)
             answer_status = "failed"
@@ -497,7 +486,7 @@ def _generate_and_persist_answer(
             )
 
     # Order-preservingly deduplicate citations before BOTH the response and
-    # persistence (P1-7). The built-in providers already dedupe, but a
+    # persistence. The built-in providers already dedupe, but a
     # duplicate chunk_id from any provider would otherwise collapse silently
     # on the persistence side (dict keyed by chunk_id) while still appearing
     # twice in the live response -- i.e. live and reload would disagree.
@@ -511,7 +500,7 @@ def _generate_and_persist_answer(
     result.citations = deduped_citations
 
     with get_conn() as conn:
-        # P0-04: the fencing check happens INSIDE the same write statement
+        # The fencing check happens INSIDE the same write statement
         # (EXISTS subquery), not as a separate read beforehand -- a
         # read-then-write here would itself be a TOCTOU race against a
         # concurrent reclaim. Fencing is skipped only when attempt_id wasn't
@@ -611,7 +600,7 @@ def _generate_and_persist_answer(
         # retrieval rank (for retrieval-quality auditing); citation_ordinal
         # records the order the provider actually cited them so a reloaded
         # conversation reproduces exactly what was displayed live -- these two
-        # orders differ, which is what P1-7 flagged.
+        # orders differ.
         citation_ordinal_by_chunk = {c.chunk_id: i for i, c in enumerate(result.citations)}
         for rank, p in enumerate(passages):
             is_citation = p.chunk_id in citation_excerpt_by_chunk
@@ -627,8 +616,8 @@ def _generate_and_persist_answer(
         conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (conversation_id,))
         # pending_message_id is already cleared by the caller before this runs
         # -- ask_question clears it unconditionally on any new user turn, and
-        # set_conversation_machine claims it atomically before resuming (P1-8)
-        # -- so there is nothing left to clear here.
+        # set_conversation_machine claims it atomically before resuming --
+        # so there is nothing left to clear here.
         row = conn.execute(
             "SELECT created_at, retry_count FROM messages WHERE id=%s", (msg_id,)
         ).fetchone()
@@ -661,13 +650,12 @@ def set_conversation_machine(
     """The ONLY way a conversation's machine is set once clarification is
     needed, or changed later ("Change machine"). This is always an explicit,
     confirmed technician action -- never inferred from a later message body,
-    which is what let a conversation's machine silently drift in the reviewed
-    version (concern #5/#6).
+    which would let a conversation's machine silently drift.
 
     If a clarifying question is pending (the technician asked something
     before the machine was known), confirming the machine here resumes and
     answers that ORIGINAL stored question -- it does not require the caller
-    to resubmit it as a new user turn (P1-8). The resumed answer is
+    to resubmit it as a new user turn. The resumed answer is
     generated and persisted as usual; this endpoint's own response stays
     ConversationOut either way, so the caller reloads
     GET /conversations/{id}/messages to see it, the same as after any other
@@ -681,23 +669,23 @@ def set_conversation_machine(
         pending_id = conv["pending_message_id"]
 
         if pending_id is None:
-            # P0-05 (external review, 2026-09-21): this used to update
-            # machine_id unconditionally, even for a deliberate "Change
-            # machine" switch with no pending clarification -- an answer
-            # already in flight for the OLD machine would finish and persist
-            # under a conversation now pointed at a DIFFERENT machine,
-            # producing cross-machine context/mismatched headers on the next
-            # question. When there IS a pending clarification the switch is
-            # exactly what resumes that stored question below and must
-            # proceed; only the "already answering, now switch anyway" case
-            # is illegal. Same claim-UPDATE pattern as everywhere else in
-            # this file: rowcount 0 means a concurrent ask_question/retry
-            # holds a LIVE lease between the read above and this write. Uses
-            # the same _LEASE_AVAILABLE_SQL predicate as the processing
-            # claim itself (P0-04) -- an is_processing=true row whose lease
-            # has since expired must be treated as switchable here too, or a
-            # conversation stuck by a dead worker becomes reclaimable for
-            # questions/retries but permanently stuck for machine switches.
+            # Switching machine_id unconditionally, even for a deliberate
+            # "Change machine" switch with no pending clarification, is
+            # illegal while an answer is in flight for the OLD machine: it
+            # would finish and persist under a conversation now pointed at a
+            # DIFFERENT machine, producing cross-machine context/mismatched
+            # headers on the next question. When there IS a pending
+            # clarification the switch is exactly what resumes that stored
+            # question below and must proceed; only the "already answering,
+            # now switch anyway" case is illegal. Same claim-UPDATE pattern
+            # as everywhere else in this file: rowcount 0 means a concurrent
+            # ask_question/retry holds a LIVE lease between the read above
+            # and this write. Uses the same _LEASE_AVAILABLE_SQL predicate as
+            # the processing claim itself -- an is_processing=true row whose
+            # lease has since expired must be treated as switchable here too,
+            # or a conversation stuck by a dead worker becomes reclaimable
+            # for questions/retries but permanently stuck for machine
+            # switches.
             claim = conn.execute(
                 "UPDATE conversations SET machine_id = %s, updated_at = now() "
                 f"WHERE id = %s AND {_LEASE_AVAILABLE_SQL}",
@@ -733,9 +721,9 @@ def set_conversation_machine(
                 (conversation_id, pending_id),
             )
             if claim.rowcount == 1:
-                # Owner decision (2026-09-16): this resume also does
-                # retrieval/provider work, so it must hold the same
-                # conversation-level processing lock ask_question does -- an
+                # This resume also does retrieval/provider work, so it must
+                # hold the same conversation-level processing lock
+                # ask_question does -- an
                 # ask_question racing in at exactly this moment must not be
                 # able to start a second concurrent provider call. If the
                 # lock is already held (shouldn't happen in practice, but
@@ -785,14 +773,13 @@ def set_conversation_machine(
 
 
 def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
-    """Batched hydration for a page of messages. P2-02 (external review,
-    2026-09-21): the old per-message _hydrate_message ran 3 queries per
-    message (citations, feedback, saved-status) -- a page of N messages was
-    ~3N+1 round trips to the Neon network, not counting whatever the caller
+    """Batched hydration for a page of messages: fetches citations, feedback,
+    and saved-status for every id in `rows` in exactly 3 queries total, keyed
+    by message_id, then assembles each MessageOut from those already-fetched
+    dicts -- a per-message query loop here would be ~3N+1 round trips to the
+    Neon network for a page of N messages, not counting whatever the caller
     itself does per row (e.g. list_saved_answers' question/machine-label
-    lookups, batched separately below). Fetches all three sets for every id
-    in `rows` in exactly 3 queries total, keyed by message_id, then
-    assembles each MessageOut from those already-fetched dicts."""
+    lookups, batched separately below)."""
     if not rows:
         return []
     message_ids = [r["id"] for r in rows]
@@ -800,7 +787,7 @@ def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
     # Only rows the provider actually selected (is_citation=1) -- every
     # retrieved passage is still kept in message_sources for retrieval-quality
     # auditing, but reload must reproduce exactly what the technician saw, not
-    # every candidate that was merely retrieved (concern #7).
+    # every candidate that was merely retrieved.
     citations_by_message: dict[int, list[CitationOut]] = {mid: [] for mid in message_ids}
     src_rows = conn.execute(
         "SELECT ms.message_id, ms.chunk_id, ms.excerpt, c.document_id, d.original_filename, d.title, "
@@ -808,17 +795,17 @@ def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
         "FROM message_sources ms "
         "JOIN chunks c ON c.id = ms.chunk_id "
         "JOIN documents d ON d.id = c.document_id "
-        # Provider citation order (P1-7), NOT retrieval rank -- reload must
+        # Provider citation order, NOT retrieval rank -- reload must
         # reproduce exactly the order the technician originally saw, so the
         # citation numbering still lines up with the answer's own claims.
-        # COALESCE keeps pre-0004 rows (citation_ordinal NULL) ordering by
-        # rank, their historical behavior, rather than arbitrarily.
+        # COALESCE keeps rows with no citation_ordinal (from before migration
+        # 0004 added the column) ordering by rank rather than arbitrarily.
         "WHERE ms.message_id = ANY(%s) AND ms.is_citation = true "
         "ORDER BY ms.message_id, COALESCE(ms.citation_ordinal, ms.rank), ms.rank",
         (message_ids,),
     ).fetchall()
     for s in src_rows:
-        # P0-13: the document's CURRENT state, evaluated fresh on every
+        # The document's CURRENT state, evaluated fresh on every
         # hydration -- not what it was when this answer was generated.
         withdrawn = s["deactivated_at"] is not None or s["review_status"] != "approved"
         citations_by_message[s["message_id"]].append(CitationOut(
@@ -936,16 +923,15 @@ def _reply_to_user_message(conn, conversation_id: int, user_message_id: int):
 
 def _idempotent_replay(conn, conversation_id: int, user_message_id: int, user_id: int) -> MessageOut:
     """Called once a duplicate Idempotency-Key has been identified (either by
-    the pre-check or by losing the UNIQUE-index race on insert). Plan sec 9:
-    "A duplicate key ... returns the original result, not another user
-    message." If the original attempt hasn't produced a reply yet -- still
-    generating, or the process died mid-attempt -- there is nothing to
-    replay; 409 rather than silently starting a second provider call for the
-    same question (that second call is exactly the hazard this exists to
-    prevent). This is a known, accepted gap versus the plan's full durable
-    -attempt design (sec 5.1/9), which would let the client resume the
-    original attempt instead of dead-ending here -- that needs the
-    Postgres/queue migration and is out of scope for this change."""
+    the pre-check or by losing the UNIQUE-index race on insert). A duplicate
+    key returns the original result, not another user message. If the
+    original attempt hasn't produced a reply yet -- still generating, or the
+    process died mid-attempt -- there is nothing to replay; 409 rather than
+    silently starting a second provider call for the same question (that
+    second call is exactly the hazard this exists to prevent). A fuller
+    durable-attempt design, letting the client resume the original attempt
+    instead of dead-ending here, would need a durable job queue/outbox and is
+    out of scope for this endpoint today."""
     reply = _reply_to_user_message(conn, conversation_id, user_message_id)
     if reply is not None:
         return _hydrate_message(conn, reply, user_id)
@@ -981,27 +967,26 @@ def ask_question(
             if existing is not None:
                 return _idempotent_replay(conn, conversation_id, existing["id"], user.id)
 
-        # Owner decision (2026-09-16): concurrent questions in one
-        # conversation are not supported -- a technician must wait for (or
-        # stop) an in-flight question before asking another, and this must be
-        # enforced server-side, not only by a disabled client button. Claimed
-        # before the user message is even inserted, so a rejected second
-        # question never creates a turn.
+        # Concurrent questions in one conversation are not supported -- a
+        # technician must wait for (or stop) an in-flight question before
+        # asking another, and this is enforced server-side, not only by a
+        # disabled client button. Claimed before the user message is even
+        # inserted, so a rejected second question never creates a turn.
         attempt_id = _claim_conversation_processing(conn, conversation_id)
         if not attempt_id:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                # P0-04: there is no stop/cancel endpoint -- don't imply one
-                # exists. A stuck claim (dead worker, lost connection) is
-                # reclaimable automatically after PROCESSING_LEASE_SECONDS,
-                # so "wait" is the honest, complete recovery instruction.
+                # There is no stop/cancel endpoint -- don't imply one exists.
+                # A stuck claim (dead worker, lost connection) is reclaimable
+                # automatically after PROCESSING_LEASE_SECONDS, so "wait" is
+                # the honest, complete recovery instruction.
                 detail="Another question is still being answered in this conversation. "
                 "Wait for it to finish before asking another.",
             )
 
         # Bounded prior turns, captured before this question is inserted, so
         # follow-ups like "what about replacing it?" have real context instead
-        # of only ever seeing the latest question in isolation (concern #5).
+        # of only ever seeing the latest question in isolation.
         history = _fetch_history(conn, conversation_id)
 
         try:
@@ -1024,9 +1009,8 @@ def ask_question(
             # mechanism; the UNIQUE index on (conversation_id,
             # idempotency_key) is. The winner's user message is now visible.
             # (In practice the processing-lock claim above already serializes
-            # same-conversation requests, so this branch is now mostly a
-            # defensive fallback rather than the primary safety net it used
-            # to be.)
+            # same-conversation requests, so this branch is mostly a
+            # defensive fallback rather than the primary safety net.)
             # Same-connection release (not _release_conversation_processing --
             # see the comment on that helper): this except block runs inside
             # the still-open outer transaction that claimed the lock, which
@@ -1047,8 +1031,8 @@ def ask_question(
             )
             return _idempotent_replay(conn, conversation_id, existing["id"], user.id)
 
-        # A new user turn always supersedes any earlier pending clarification
-        # (P1-8): if the technician typed a fresh question instead of picking
+        # A new user turn always supersedes any earlier pending clarification:
+        # if the technician typed a fresh question instead of picking
         # a machine from the clarifying options, the old pending question is
         # abandoned, not silently resumed later. If THIS question also fails
         # to resolve a machine, the branch below sets pending_message_id to
@@ -1120,19 +1104,17 @@ def retry_answer(
     request: Request,
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Independent follow-up review 2026-08-24 P1-1: "Retry still resends the
-    previous user question as a new message... creating another user turn
-    and provider/retrieval attempt." app.js's retry button used to call
-    sendQuestion() with the original question text, which is exactly that --
-    a second user turn plus a second, unrelated assistant message, doubling
-    both the visible history and the billable provider call for what the
-    technician experiences as one logical retry.
+    """A retry must not resend the previous user question as a new message --
+    that would create a second user turn plus a second, unrelated assistant
+    message, doubling both the visible history and the billable provider call
+    for what the technician experiences as one logical retry.
 
     This regenerates and updates the SAME failed assistant message in place
     (no new user turn, no new assistant message) -- the original question is
     looked up server-side from the preceding user message, never resent by
-    the client, the same "resume the stored question" pattern P1-8 already
-    uses for pending-clarification resumption. Idempotent via the same
+    the client, the same "resume the stored question" pattern
+    set_conversation_machine uses for pending-clarification resumption.
+    Idempotent via the same
     claim-UPDATE pattern as conversations.pending_message_id: only a request
     that successfully flips answer_status from 'failed' to 'retrying'
     proceeds to call the provider, so a double-tap on the retry button can
@@ -1156,16 +1138,15 @@ def retry_answer(
                                      detail="A retry is already in progress for this answer.")
             raise HTTPException(status.HTTP_409_CONFLICT, detail="Only a failed answer can be retried.")
 
-        # Owner decision (2026-09-16): a retry also calls the provider, so it
-        # shares ask_question's conversation-level processing lock -- a fresh
-        # question must not be askable while a retry is in flight either.
+        # A retry also calls the provider, so it shares ask_question's
+        # conversation-level processing lock -- a fresh question must not be
+        # askable while a retry is in flight either.
         attempt_id = _claim_conversation_processing(conn, conversation_id)
         if not attempt_id:
             conn.execute("UPDATE messages SET answer_status = 'failed' WHERE id = %s", (message_id,))
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                # P0-04: no stop/cancel endpoint exists -- see ask_question's
-                # matching 409 for why this no longer says "or stop it".
+                # No stop/cancel endpoint exists -- don't imply one does.
                 detail="Another question is still being answered in this conversation. "
                 "Wait for it to finish before retrying.",
             )
@@ -1175,15 +1156,14 @@ def retry_answer(
             "ORDER BY id DESC LIMIT 1",
             (conversation_id, message_id),
         ).fetchone()
-        # P0-05 (external review, 2026-09-21): this used to read
-        # conv["machine_id"] -- the conversation's CURRENT machine -- rather
-        # than the machine this failed answer was actually generated against.
-        # If the technician switches machines (a legal action now that a
-        # switch is blocked only while an answer is in flight, not
-        # afterward) and then retries an OLDER failed answer, retrying under
-        # the new machine would silently apply wrong-model advice to a
-        # question that was about the old one. Every assistant message
-        # already stores its own machine_id at generation time (see
+        # Retry must use the machine this failed answer was actually
+        # generated against, not the conversation's CURRENT machine_id. If
+        # the technician switches machines (a legal action, since a switch is
+        # blocked only while an answer is in flight, not afterward) and then
+        # retries an OLDER failed answer, retrying under the new machine
+        # would silently apply wrong-model advice to a question that was
+        # about the old one. Every assistant message already stores its own
+        # machine_id at generation time (see
         # _generate_and_persist_answer below); retry must use THAT, falling
         # back to the conversation's machine only for pre-existing rows from
         # before this column was populated.
@@ -1229,11 +1209,10 @@ _ELIGIBLE_FOR_FEEDBACK_SQL = (
 
 @router.post("/messages/{message_id}/feedback", status_code=status.HTTP_201_CREATED)
 def submit_feedback(message_id: int, payload: FeedbackRequest, user: CurrentUser = Depends(get_current_user)):
-    """P1-11 (independent follow-up review): used to accept feedback against
-    any owned message row -- the user's own question, a clarifying prompt, a
-    failed/retrying answer, or a no-answer response -- none of which is a
-    real "was this answer helpful" target. Restricted to completed,
-    substantive assistant answers."""
+    """Feedback is only valid against a completed, substantive assistant
+    answer -- the user's own question, a clarifying prompt, a
+    failed/retrying answer, or a no-answer response is not a real "was this
+    answer helpful" target."""
     with get_conn() as conn:
         msg = conn.execute(_ELIGIBLE_FOR_FEEDBACK_SQL, (message_id, user.id)).fetchone()
         if not msg:
@@ -1247,7 +1226,7 @@ def submit_feedback(message_id: int, payload: FeedbackRequest, user: CurrentUser
 
 @router.post("/messages/{message_id}/save", status_code=status.HTTP_201_CREATED)
 def save_answer(message_id: int, user: CurrentUser = Depends(get_current_user)):
-    """P1-11: same eligibility restriction as submit_feedback above -- only a
+    """Same eligibility restriction as submit_feedback above -- only a
     completed, substantive assistant answer is a meaningful "saved answer";
     a clarifying question, failed attempt, or no-answer row is not."""
     with get_conn() as conn:
@@ -1259,9 +1238,8 @@ def save_answer(message_id: int, user: CurrentUser = Depends(get_current_user)):
         # information -- it's always either a genuine repeat click or a
         # client that lost track of already-saved state (e.g. a rehydrated
         # ChatViewModel that hasn't loaded is_saved yet). ON CONFLICT DO
-        # NOTHING against the UNIQUE(user_id, message_id) index (SQLite's
-        # INSERT OR IGNORE, ported) makes a duplicate save a no-op instead of
-        # a second saved_answers row.
+        # NOTHING against the UNIQUE(user_id, message_id) index makes a
+        # duplicate save a no-op instead of a second saved_answers row.
         conn.execute(
             "INSERT INTO saved_answers (user_id, message_id) VALUES (%s, %s) "
             "ON CONFLICT (user_id, message_id) DO NOTHING",
@@ -1272,11 +1250,9 @@ def save_answer(message_id: int, user: CurrentUser = Depends(get_current_user)):
 
 @router.post("/messages/{message_id}/unsave", status_code=status.HTTP_200_OK)
 def unsave_answer(message_id: int, user: CurrentUser = Depends(get_current_user)):
-    """Companion to save_answer above -- P1-21 (external review, 2026-09-21):
-    the saved-answers list had no way to remove an entry, even though a
-    technician's bookmark list is exactly the kind of thing that needs
-    tidying (a saved answer whose source was later withdrawn, or one saved
-    by mistake). POST, not DELETE, for consistency with every other
+    """Companion to save_answer above -- removes an entry from a technician's
+    bookmark list (e.g. a saved answer whose source was later withdrawn, or
+    one saved by mistake). POST, not DELETE, for consistency with every other
     state-changing action in this API (/revoke, /deactivate, /reject, ...
     -- deliberately not resource-verb-per-HTTP-method REST elsewhere in
     this codebase, so this does not start doing that alone). Idempotent
@@ -1306,11 +1282,11 @@ def list_saved_answers(
     limit: int = Query(default=50, ge=1, le=200),
     cursor: str | None = None,
 ):
-    """P1-3 (2026-08-24 independent follow-up review): a saved-answer view is
-    useless without knowing which conversation/machine/question it came from
-    -- MessageOut alone (the old response shape) carries none of that. Each
-    entry now also names which conversation it can be resumed from, so the
-    UI can offer "Open conversation" rather than showing an orphaned answer."""
+    """A saved-answer view is useless without knowing which
+    conversation/machine/question it came from -- MessageOut alone carries
+    none of that. Each entry also names which conversation it can be resumed
+    from, so the UI can offer "Open conversation" rather than showing an
+    orphaned answer."""
     before_saved_at, before_id = (
         decode_cursor(cursor, [CURSOR_TIMESTAMP, CURSOR_INT]) if cursor else (None, None)
     )
@@ -1332,14 +1308,11 @@ def list_saved_answers(
         if not rows:
             return []
 
-        # P2-02 (external review, 2026-09-21): this loop used to run a
-        # separate "most recent prior question" query PER saved answer, on
-        # top of _hydrate_message's own 3 queries per row and a
-        # _machine_label call per row -- a page of N saved answers was
-        # 1 + N*(1 question lookup + 1 machine label + 3 hydration queries)
-        # round trips. Each of those is now exactly one query for the whole
-        # page. The question lookup is genuinely per-row correlated (each
-        # answer needs the nearest PRIOR user message in ITS OWN
+        # Each of the "most recent prior question" lookup, the machine-label
+        # lookup, and message hydration runs as exactly one query for the
+        # whole page here, rather than once per saved answer. The question
+        # lookup is genuinely per-row correlated (each answer needs the
+        # nearest PRIOR user message in ITS OWN
         # conversation, not just any message in that conversation) --
         # unnest(...) zips the two id arrays into a row set, and LATERAL
         # runs the "nearest prior" subquery once per pair, still as one

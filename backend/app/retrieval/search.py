@@ -1,11 +1,6 @@
 """Hybrid retrieval: Postgres full-text search (ts_rank) lexical + dense
 vector, fused and reranked, with hard machine-scoped filtering.
 
-P2-04 (external review, 2026-09-21): this docstring used to call the lexical
-half "BM25/FTS5" -- accurate for the original SQLite implementation this was
-ported from, stale ever since (see lexical_search's own comment below for
-the actual ts_rank()-based mechanism this uses today).
-
 The machine filter is the safety-critical part. Plan requirement 11 ("Prevents
 information from a similarly named but different machine from being presented as
 if it applies to the selected model") is enforced structurally, not by prompt
@@ -79,8 +74,7 @@ def _machine_filter_sql(machine_id: int | None) -> tuple[str, list]:
 
 def _revision_filter_sql(include_superseded: bool) -> str:
     """Superseded revisions are EXCLUDED from retrieval by default, not merely
-    rank-penalized (independent follow-up review P1-11: "is_current_revision
-    receives only a ranking penalty").
+    rank-penalized.
 
     A superseded manual is not a weaker answer, it's a wrong one -- a
     technician acting on a withdrawn torque spec or an obsolete wiring
@@ -132,15 +126,13 @@ def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POO
         WHERE d.status IN ('indexed','partial')
           AND d.deactivated_at IS NULL
           AND d.review_status = 'approved'
-          -- P1-15 (external review, 2026-09-21): a chunk whose only
-          -- embedding predates the currently configured model/revision
-          -- must not be compared against a fresh query vector -- the two
-          -- live in different vector spaces, and cosine similarity between
-          -- them is meaningless, not just "a bit off". Excluded here rather
-          -- than filtered after the fact, the same graceful-degradation
-          -- path as an empty candidate set below: those chunks fall back to
-          -- lexical-only search until re-embedded, instead of polluting
-          -- results with noise no one would guess was there.
+          -- A chunk whose only embedding predates the currently configured
+          -- model/revision must not be compared against a fresh query
+          -- vector -- the two live in different vector spaces, and cosine
+          -- similarity between them is meaningless, not just "a bit off".
+          -- Excluded here rather than filtered after the fact: those chunks
+          -- fall back to lexical-only search until re-embedded, instead of
+          -- polluting results with noise no one would guess was there.
           AND e.model_name = %s
           {revision_sql}
           {filter_sql}
@@ -153,7 +145,7 @@ def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POO
         # the embedding call entirely rather than loading the model just to
         # discover there's nothing to compare against. Also means a query
         # with no matching documents never depends on model/network
-        # availability at all (independent review P1-5/P2-1).
+        # availability at all.
         return []
 
     try:
@@ -164,10 +156,9 @@ def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POO
         # (FTS) search has no model dependency at all, so hybrid_search() can
         # still return real, citable results from it -- refusing outright here
         # would throw away a working result set over an unrelated component
-        # being down (independent follow-up review P1-5, same precedent as the
-        # P1-2 fix's "labeled lexical-only degraded mode"). routes_chat.py's
-        # honest-failure-message path remains the backstop for when even
-        # lexical_search / the fusion below can't produce anything.
+        # being down. routes_chat.py's honest-failure-message path remains the
+        # backstop for when even lexical_search / the fusion below can't
+        # produce anything.
         logger.exception("Embedding model unavailable; falling back to lexical-only search")
         return []
 
@@ -234,20 +225,13 @@ def _rerank_boost(chunk: RetrievedChunk, query: str) -> float:
     these boosts are auditable in the admin retrieval inspector, which matters more
     here than a marginal ranking gain.
 
-    Magnitudes were originally 0.20-0.35 -- found live 2026-09-21 that this
-    silently broke retrieval instead of merely nudging it: reciprocal_rank_fusion's
-    fused scores live in a tiny range (RRF_K=60, CANDIDATE_POOL=50, so a chunk
-    ranked #1 in both lists scores ~0.033 and one ranked #50 in a single list
-    scores ~0.009), so a flat +0.25 for e.g. any "temperature"-mentioning query
-    matched against ANY table/spec-typed chunk -- whether or not that chunk was
-    actually about temperature -- outweighed real relevance by 10-25x. Repro:
-    "What temperature range does this machine need for installation?" against
-    machine_id 24 ranked the actual installation-temperature chunk (text-typed,
-    #1 in vector search, #3 in lexical) below several off-topic table/procedure
-    chunks that only happened to share the chunk_type + keyword match, producing
-    a false "no answer in the excerpts" for a question the corpus fully answered.
-    Rescaled by ~20x so these act as genuine tie-breakers among already-close
-    RRF candidates instead of a ranking override.
+    reciprocal_rank_fusion's fused scores live in a tiny range (RRF_K=60,
+    CANDIDATE_POOL=50, so a chunk ranked #1 in both lists scores ~0.033 and one
+    ranked #50 in a single list scores ~0.009). These boost magnitudes are kept
+    small enough to act as genuine tie-breakers among already-close RRF
+    candidates -- a boost large enough to compete with the fused score itself
+    would let a keyword match on the wrong chunk_type outrank real relevance,
+    turning an answerable question into a false "no answer in the excerpts".
     """
     boost = 0.0
     q = query.lower()
@@ -283,7 +267,7 @@ def hybrid_search(
     include_superseded: bool = False,
 ) -> list[RetrievedChunk]:
     """`include_superseded` defaults to False: superseded revisions are
-    excluded from technician-facing retrieval outright (P1-11), not just
+    excluded from technician-facing retrieval outright, not just
     rank-penalized. Only the admin query tester passes True, where the point
     is to inspect what would otherwise have matched."""
     lexical = lexical_search(query, machine_id, include_superseded=include_superseded)
@@ -304,10 +288,10 @@ def hybrid_search(
             continue
         # Near-empty chunks (single stray characters/digits from OCR or table-cell
         # extraction noise) can score an artificially high cosine similarity against
-        # short queries despite carrying no real content — found via a bare-code-query
-        # probe where a chunk whose entire content was "E" scored 0.75 against "E4",
-        # clearing the relevance gate. They carry nothing citable, so exclude them here
-        # rather than expensively re-chunking/re-embedding the whole corpus.
+        # short queries despite carrying no real content -- e.g. a chunk whose entire
+        # content is "E" can clear the relevance gate against a query like "E4". They
+        # carry nothing citable, so exclude them here rather than expensively
+        # re-chunking/re-embedding the whole corpus.
         if len(chunk.content.strip()) < MIN_CONTENT_CHARS_FOR_RESULT:
             continue
         chunk.lexical_score = lexical_map.get(chunk_id, 0.0)
