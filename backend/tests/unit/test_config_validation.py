@@ -1,11 +1,8 @@
-"""P1-2 (independent follow-up review): "The credential test uses exists(), so
-a directory passes."
-
-validate_for_startup() only checked that *something* existed at the
-service-account key path. A directory satisfies exists(), so the single most
-common secret-mount misconfiguration (mounting a directory where a file was
-intended) passed startup validation and only surfaced later as an ingestion
-failure. These tests pin the stricter shape check.
+"""validate_for_startup() must check more than that *something* exists at the
+service-account key path -- a directory satisfies exists() too, so the single
+most common secret-mount misconfiguration (mounting a directory where a file
+was intended) would otherwise pass startup validation and only surface later
+as an ingestion failure. These tests pin the stricter shape check.
 
 Live Drive reachability is deliberately NOT validated at startup -- see the
 docstring on Settings._validate_service_account_key.

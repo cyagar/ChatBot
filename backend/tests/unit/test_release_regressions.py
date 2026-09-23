@@ -1,5 +1,5 @@
-"""Regressions from the 2026-09-21 external release review (FinalChanges.txt),
-tracked one test per finding ID so each fix stays independently verifiable.
+"""Regression tests, one per named scenario, so each fix stays independently
+verifiable.
 """
 from __future__ import annotations
 
@@ -17,13 +17,11 @@ client = TestClient(app)
 
 
 def test_p1_24_login_rate_limit_cannot_be_bypassed_by_rotating_cookies(test_env, monkeypatch):
-    """P1-24: the default rate-limit key function keys on whatever tma_session
+    """The default rate-limit key function keys on whatever tma_session
     cookie value a client happens to send, without verifying it's a real
     signed session -- login/register are exactly the routes an unauthenticated
-    attacker controls that cookie completely for. Reproduced before the fix:
-    12 login attempts, each with a different unsigned/garbage cookie, all
-    returned 401 with no 429 at all, while the same 12 attempts with NO cookie
-    correctly hit 429 after AUTH_RATE_LIMIT (10/minute) was exceeded. Fixed by
+    attacker controls that cookie completely for. Rotating a different fake
+    cookie on every request must not reset the rate-limit bucket. Guarded by
     routing /api/auth/login and /api/auth/register through a dedicated
     key_func (app/rate_limit.py's auth_key_func) that always keys on IP,
     applied per-route via @limiter.limit(..., key_func=...), leaving the
@@ -49,23 +47,18 @@ def test_p1_24_login_rate_limit_cannot_be_bypassed_by_rotating_cookies(test_env,
 
 
 def test_p0_03_a_metadata_only_correction_does_not_touch_machine_links(test_env):
-    """P0-03: the admin editor's machine picker sends machine_ids on every
-    Save, even for a pure title/revision correction, because the checkbox
-    group is pre-checked from ALL existing links (approved, pending, AND
-    rejected) with no way to tell them apart -- so a title-only fix silently
-    re-approved a previously-rejected link (PATCH /documents/{id} treats a
-    present machine_ids as the admin's deliberate human review, inserting
-    every sent id as review_status='approved', confidence=1.0, after
-    deleting every existing document_machines row first). Reproduced before
-    the fix: PATCH-ing only `title` with `machine_ids` unconditionally
-    included (the old frontend behavior, reproduced directly against the
-    API here since the JS itself isn't exercised by pytest) flipped a
-    rejected link back to approved. Fixed on the frontend (admin.js) by
-    omitting machine_ids from the payload entirely unless the admin actually
-    interacted with the picker -- this test proves the API-level contract
-    that fix relies on: omitting machine_ids (sending it as JSON null, which
-    Pydantic treats identically to the field being absent) must leave
-    existing links, rejected ones included, completely untouched."""
+    """PATCH /documents/{id} treats a present machine_ids as the admin's
+    deliberate human review: it deletes every existing document_machines row
+    and inserts every sent id as review_status='approved', confidence=1.0.
+    The admin editor's machine picker checkbox group is pre-checked from ALL
+    existing links (approved, pending, AND rejected) with no way to tell them
+    apart, so admin.js must omit machine_ids from the payload entirely unless
+    the admin actually interacted with the picker -- otherwise a pure
+    title/revision correction would silently re-approve a previously-rejected
+    link. This test proves the API-level contract that relies on: omitting
+    machine_ids (sending it as JSON null, which Pydantic treats identically
+    to the field being absent) must leave existing links, rejected ones
+    included, completely untouched."""
     from app.auth.security import hash_password
     from app.db import get_conn
     from app.main import app as fastapi_app
@@ -91,8 +84,7 @@ def test_p0_03_a_metadata_only_correction_does_not_touch_machine_links(test_env)
     assert reject.status_code == 200
 
     # A title-only correction -- machine_ids explicitly omitted (JSON null),
-    # exactly what the fixed frontend now sends when the picker was never
-    # touched.
+    # exactly what admin.js sends when the picker was never touched.
     patch = local_client.patch(
         f"/api/admin/documents/{doc_id}",
         json={"title": "New Title", "machine_ids": None, "reason": "Fixing a typo in the title"},
@@ -110,11 +102,10 @@ def test_p0_03_a_metadata_only_correction_does_not_touch_machine_links(test_env)
     )
 
     # Control case, proving this is a real danger and not just an unused code
-    # path: this is exactly what the OLD frontend sent on every save
-    # (machine_ids always present, pre-checked from every existing link
-    # including rejected ones) -- confirms the backend really does silently
-    # re-approve on a present machine_ids, which is why the frontend fix
-    # (omitting it) is the correct place to have fixed this.
+    # path: machine_ids present and pre-checked from every existing link
+    # (including rejected ones) confirms the backend really does silently
+    # re-approve on a present machine_ids, which is why admin.js must omit it
+    # unless the admin actually interacted with the picker.
     patch2 = local_client.patch(
         f"/api/admin/documents/{doc_id}",
         json={"title": "New Title 2", "machine_ids": [1], "reason": "Old frontend behavior, for contrast"},
@@ -128,15 +119,13 @@ def test_p0_03_a_metadata_only_correction_does_not_touch_machine_links(test_env)
 
 
 def test_p1_04_stale_corpus_status_accepts_a_real_psycopg_datetime(test_env, monkeypatch):
-    """P1-04: _corpus_status's stale-corpus check called
-    datetime.fromisoformat() on ingestion_runs.finished_at, a TIMESTAMPTZ
-    column psycopg already returns as a real, aware datetime (not a string)
-    -- fromisoformat(datetime_obj) raised TypeError every time, and the
-    function's own blanket `except Exception: return "ok", ""` silently
-    swallowed it, so a corpus that hadn't synced in days (or ever) always
-    reported healthy. Reproduced directly against this test before the fix
-    (asserted "ok" for a 2020 run, which passed -- the bug). Fixed by using
-    the datetime value directly instead of re-parsing it as a string."""
+    """ingestion_runs.finished_at is a TIMESTAMPTZ column psycopg already
+    returns as a real, aware datetime, not a string -- _corpus_status must
+    use that value directly rather than re-parsing it with
+    datetime.fromisoformat(), which raises TypeError on an already-parsed
+    datetime. Its own blanket `except Exception: return "ok", ""` would
+    otherwise silently swallow that error, so a corpus that hadn't synced in
+    days (or ever) would always report healthy."""
     from app.api.routes_config import _corpus_status
     from app.config import get_settings
     from app.db import get_conn
@@ -166,20 +155,18 @@ def test_p1_04_stale_corpus_status_accepts_a_real_psycopg_datetime(test_env, mon
 
 
 def test_p0_02_approving_an_unready_replacement_does_not_retire_the_working_manual(test_env):
-    """P0-02: "Approve document" and "Approve link" are two independent
-    buttons on the same review-queue card (admin.js renderReviewQueue) --
-    nothing stops an admin clicking the former first. Before the fix,
-    approving the document record alone was enough for review_document() to
-    immediately deactivate every other active document at the same
-    source_ref, even when the newly-approved document had failed ingestion,
-    extracted zero chunks, or had no approved machine link of its own yet --
-    leaving technicians with nothing retrievable at that source_ref (the old
-    revision retired, the new one not actually servable) until the admin
-    came back and separately approved a link. Fixed by making promotion a
-    single atomic transition: review_document() now verifies status is
-    indexed/partial, chunk_count > 0, and at least one approved
-    document_machines link BEFORE retiring the prior revision, and rejects
-    with 409 (touching nothing) if any condition isn't met yet."""
+    """"Approve document" and "Approve link" are two independent buttons on
+    the same review-queue card (admin.js renderReviewQueue) -- nothing stops
+    an admin clicking the former first. review_document() must not let
+    approving the document record alone deactivate every other active
+    document at the same source_ref when the newly-approved document has
+    failed ingestion, extracted zero chunks, or has no approved machine link
+    of its own yet -- that would leave technicians with nothing retrievable
+    at that source_ref (the old revision retired, the new one not actually
+    servable). Promotion is a single atomic transition: review_document()
+    verifies status is indexed/partial, chunk_count > 0, and at least one
+    approved document_machines link BEFORE retiring the prior revision, and
+    rejects with 409 (touching nothing) if any condition isn't met yet."""
     from app.db import get_conn
     from app.main import app as fastapi_app
     from fastapi.testclient import TestClient
@@ -268,20 +255,20 @@ def test_p0_02_approving_an_unready_replacement_does_not_retire_the_working_manu
 
 
 def test_p0_05_a_switching_machine_while_an_answer_is_in_flight_is_rejected(test_env):
-    """P0-05 (part A): set_conversation_machine used to update
-    conversations.machine_id unconditionally, even with no pending
-    clarification to resume -- an answer still generating for the OLD
-    machine would finish and persist into a conversation now pointed at a
-    DIFFERENT machine, producing cross-machine context on the next question.
-    Fixed by rejecting the switch with 409 whenever is_processing is true
-    and there is no pending clarification (the one case that's supposed to
-    change the machine while processing).
+    """set_conversation_machine must not update conversations.machine_id
+    while an answer is still generating and there is no pending
+    clarification to resume -- otherwise an answer still generating for the
+    OLD machine would finish and persist into a conversation now pointed at
+    a DIFFERENT machine, producing cross-machine context on the next
+    question. Rejected with 409 whenever is_processing is true and there is
+    no pending clarification (the one case that's supposed to change the
+    machine while processing).
 
     processing_claimed_at is set to now() (a fresh, unexpired lease) --
-    under P0-04's lease model, is_processing=true with NO claimed_at is
-    treated as an abandoned pre-lease-migration row and is immediately
-    reclaimable (see test_p0_04_a), so a genuinely in-flight claim must
-    look like a real one to exercise this specific 409 path."""
+    under the lease model, is_processing=true with NO claimed_at is treated
+    as an abandoned pre-lease-migration row and is immediately reclaimable
+    (see test_p0_04_a), so a genuinely in-flight claim must look like a real
+    one to exercise this specific 409 path."""
     from app.db import get_conn
     from app.main import app as fastapi_app
     from fastapi.testclient import TestClient
@@ -314,15 +301,12 @@ def test_p0_05_a_switching_machine_while_an_answer_is_in_flight_is_rejected(test
 
 
 def test_p0_05_b_retry_uses_the_failed_answers_own_machine_not_the_conversations_current_one(monkeypatch, test_env):
-    """P0-05 (part B): retry_failed_answer used to read conv["machine_id"]
-    -- the conversation's CURRENT machine -- rather than the machine this
-    particular failed answer was actually generated against. If the
-    technician legally switches machines afterward (allowed once
+    """retry_failed_answer must read machine_id off the failed message row
+    itself, not conv["machine_id"] (the conversation's CURRENT machine).
+    If the technician legally switches machines afterward (allowed once
     is_processing is back to false) and then retries this OLDER failed
     answer, it must still regenerate against the ORIGINAL machine, not
-    silently apply a different machine's advice to it. Fixed by reading
-    machine_id off the failed message row itself instead of the
-    conversation."""
+    silently apply a different machine's advice to it."""
     import app.api.routes_chat as routes_chat
     from app.db import get_conn
     from app.main import app as fastapi_app
@@ -383,14 +367,14 @@ def test_p0_05_b_retry_uses_the_failed_answers_own_machine_not_the_conversations
 
 
 def test_p0_13_withdrawing_a_source_document_retroactively_flags_history_and_saved_answers(test_env):
-    """P0-13: message hydration used to return historical answer text and
-    citations with no indication that the cited document had since been
+    """Message hydration must not return historical answer text and
+    citations with no indication that the cited document has since been
     withdrawn (emergency deactivation) or lost approval (re-rejected) --
-    both the live conversation history and the saved-answers list kept
-    showing withdrawn content with no warning at all. Fixed by computing
-    each citation's source_withdrawn (and the message-level
-    has_withdrawn_source) fresh on every hydration, from the document's
-    CURRENT state, not what it was when the answer was generated."""
+    both the live conversation history and the saved-answers list must flag
+    withdrawn content. Each citation's source_withdrawn (and the
+    message-level has_withdrawn_source) is computed fresh on every
+    hydration, from the document's CURRENT state, not what it was when the
+    answer was generated."""
     from app.auth.security import hash_password
     from app.db import get_conn
     from app.main import app as fastapi_app
@@ -469,13 +453,13 @@ def test_p0_13_withdrawing_a_source_document_retroactively_flags_history_and_sav
 
 
 def test_p0_04_a_an_expired_processing_lease_can_be_reclaimed_instead_of_blocking_forever(monkeypatch, test_env):
-    """P0-04 (part A): the old plain is_processing boolean was cleared only
-    in a Python `finally` -- a killed worker, a lost DB connection during
-    release, or a shutdown between claim and `finally` left it true forever,
-    rejecting every future question/retry with 409 with no way out. Fixed by
-    turning the claim into a lease: a claim older than
-    PROCESSING_LEASE_SECONDS is now reclaimable by a later request instead
-    of blocking indefinitely. Reproduces the stuck state directly (no actual
+    """A plain is_processing boolean cleared only in a Python `finally` would
+    leave a conversation stuck forever if a worker is killed, a DB connection
+    is lost during release, or the process shuts down between claim and
+    `finally` -- every future question/retry would 409 with no way out. The
+    claim is a real lease instead: a claim older than
+    PROCESSING_LEASE_SECONDS is reclaimable by a later request instead of
+    blocking indefinitely. Reproduces the stuck state directly (no actual
     process kill needed -- the lease's age is what matters, not how it got
     old)."""
     import app.api.routes_chat as routes_chat
@@ -520,12 +504,12 @@ def test_p0_04_a_an_expired_processing_lease_can_be_reclaimed_instead_of_blockin
 
 
 def test_p0_04_b_a_zombie_attempts_late_write_never_overwrites_the_reclaiming_attempts_answer(monkeypatch, test_env):
-    """P0-04 (part B): the property fencing actually exists for. Attempt A
-    claims the lease; its lease then expires (its provider call is still
-    running -- slow, not dead) and attempt B reclaims the SAME conversation
-    and successfully persists a real answer; THEN A's slow provider call
-    finally returns and tries to persist too. Without a fencing token on the
-    write itself, A's late write would silently overwrite or duplicate B's
+    """The exact scenario lease fencing exists for. Attempt A claims the
+    lease; its lease then expires (its provider call is still running --
+    slow, not dead) and attempt B reclaims the SAME conversation and
+    successfully persists a real answer; THEN A's slow provider call finally
+    returns and tries to persist too. Without a fencing token on the write
+    itself, A's late write would silently overwrite or duplicate B's
     already-persisted answer -- exactly the hazard a naive
     reclaim-without-fencing implementation would pass by accident (only one
     attempt ever runs in most tests) but fail for real."""
@@ -605,7 +589,7 @@ def test_p0_04_b_a_zombie_attempts_late_write_never_overwrites_the_reclaiming_at
 
 
 def test_p0_10_test_fixture_refuses_a_database_url_identical_to_production(tmp_path, monkeypatch):
-    """P0-10: the test_env fixture runs migrations and an unconditional
+    """The test_env fixture runs migrations and an unconditional
     TRUNCATE ... CASCADE against whatever DATABASE_URL/DATABASE_URL_UNPOOLED
     it finds in backend/.env.test -- pointing that file at the real
     production connection string, even by accident (a copy-pasted .env, a
@@ -641,16 +625,14 @@ def test_p0_10_test_fixture_refuses_a_database_url_identical_to_production(tmp_p
 
 
 def test_p0_11_eval_script_refuses_without_a_disposable_clone(tmp_path):
-    """P0-11: the eval script used to crash immediately with AttributeError
-    (Settings.db_path_resolved no longer exists post-Postgres-migration), and
-    even patched, it could touch the live configured PostgreSQL database
-    directly. Rewritten to require EVAL_DATABASE_URL/EVAL_DATABASE_URL_UNPOOLED
+    """The eval script must require EVAL_DATABASE_URL/EVAL_DATABASE_URL_UNPOOLED
     pointing at a disposable clone, refusing hard (before any migration or
-    query) if either is missing or identical to the real production value.
-    Invoked as a real subprocess (not imported) since the script's guard
-    runs as a module-level side effect at import time -- these three cases
-    never need a real database, since the guard raises before any connection
-    is attempted."""
+    query) if either is missing or identical to the real production value --
+    it must never be able to touch the live configured PostgreSQL database
+    directly. Invoked as a real subprocess (not imported) since the script's
+    guard runs as a module-level side effect at import time -- these three
+    cases never need a real database, since the guard raises before any
+    connection is attempted."""
     import subprocess
     import sys as _sys
 
@@ -692,16 +674,12 @@ def test_p0_11_eval_script_refuses_without_a_disposable_clone(tmp_path):
 
 
 def test_p1_01_invitation_link_resolves_to_a_real_redemption_page(test_env):
-    """P1-01: admin.js generated invitation links pointing at "/?invite=..."
-    -- leftover from a removed technician PWA that used to handle that query
-    param client-side. There was no route at "/" at all (reproduced by the
-    review: GET /?invite=synthetic returned 404), so an admin could create a
-    token and the JSON API could redeem it, but a recipient had no supported
-    way to actually do that. Fixed with a real /invite route serving a
-    minimal HTML redemption page that calls POST /api/auth/register
+    """An invitation token is only useful if the link an admin sends actually
+    resolves to something a recipient can use -- a real /invite route serves
+    a minimal HTML redemption page that calls POST /api/auth/register
     directly (already covered end-to-end by test_admin.py's invitation
-    tests) -- this proves the route itself exists and that admin.js was
-    updated to link there instead of the dead "/?invite=" path."""
+    tests). This proves the route itself exists and that admin.js links
+    there rather than to a dead path."""
     resp = client.get("/invite")
     assert resp.status_code == 200, f"GET /invite must serve the redemption page, not 404 -- got {resp.status_code}"
     assert "text/html" in resp.headers["content-type"]
@@ -743,12 +721,11 @@ def _seed_p1_02_answerable_machine():
 
 
 def test_p1_02_admin_feedback_listing_includes_machine_label_message_id_and_citations(test_env):
-    """P1-02: GET /api/admin/feedback used to return only
-    rating/comment/user/conversation_id -- an admin triaging an "incorrect"
-    report had no machine, model, or citation context and no way to jump to
-    the specific answer (only a conversation_id) without separately opening
-    the conversation. Now also reports message_id, the machine the answer
-    was generated for, and every citation the answer actually used."""
+    """An admin triaging an "incorrect" report needs machine, model, and
+    citation context, and a way to jump to the specific answer, not just
+    rating/comment/user/conversation_id. GET /api/admin/feedback reports
+    message_id, the machine the answer was generated for, and every citation
+    the answer actually used."""
     _seed_p1_02_answerable_machine()
     register_test_user(client, "tech-p102@example.com", admin_email="admin-p102@example.com")
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()
@@ -782,17 +759,16 @@ def _admin_js_source() -> str:
 
 
 def test_p1_06_admin_js_has_no_inline_style_or_event_handler_attributes(test_env):
-    """P1-06: app/main.py's CSP is style-src 'self'/script-src 'self' with no
-    unsafe-inline (P1-18), but admin.js built up markup with dozens of
-    inline style="..." attributes and one onclick="..." handler -- a
-    CSP-enforcing browser silently drops every one of them. Worst case: the
-    edit-row/report-row toggle rows relied on an inline style="display:none"
-    ever having applied at all, so under real CSP enforcement they rendered
-    visible on first load instead of hidden until toggled. Fixed by moving
-    every declaration into admin.css classes (toggled via classList, not
-    .style.display/.style.cssText) and wiring the one handler via
-    addEventListener. This is a static source check, matching the review's
-    own verification depth for this finding ("Status: OPEN; static")."""
+    """app/main.py's CSP is style-src 'self'/script-src 'self' with no
+    unsafe-inline, so admin.js must never build markup with inline
+    style="..." attributes or onclick="..." handlers -- a CSP-enforcing
+    browser silently drops every one of them. Worst case: the
+    edit-row/report-row toggle rows would rely on an inline
+    style="display:none" ever having applied at all, so under real CSP
+    enforcement they'd render visible on first load instead of hidden until
+    toggled. Every declaration lives in admin.css classes (toggled via
+    classList, not .style.display/.style.cssText) and the one handler is
+    wired via addEventListener. Static source check."""
     source = _admin_js_source()
     assert 'style="' not in source, "admin.js must not build any inline style=\"...\" attribute"
     assert "onclick=" not in source, "admin.js must not build any inline onclick=\"...\" attribute"
@@ -813,15 +789,14 @@ def test_p1_06_admin_js_has_no_inline_style_or_event_handler_attributes(test_env
 
 
 def test_p1_07_admin_js_attribute_interpolation_uses_a_quote_safe_encoder(test_env):
-    """P1-07: esc() escapes text-node content (&, <, >) but not quote
-    characters -- a text node never needs them escaped, but an HTML
-    ATTRIBUTE value does. esc()'s result was interpolated directly inside
-    value="..." and data-search="..." for admin/PDF-derived data (document
-    title, revision, manufacturer, machine family) -- a value containing a
-    double quote truncates the attribute and lets the rest of the string
-    inject new attributes onto that element. Fixed with escAttr() (esc() ->
-    &quot;/&#39; on top), used at every such site. Static source check,
-    matching the review's own verification depth for this finding."""
+    """esc() escapes text-node content (&, <, >) but not quote characters --
+    a text node never needs them escaped, but an HTML ATTRIBUTE value does.
+    esc()'s result must never be interpolated directly inside value="..." or
+    data-search="..." for admin/PDF-derived data (document title, revision,
+    manufacturer, machine family): a value containing a double quote would
+    truncate the attribute and let the rest of the string inject new
+    attributes onto that element. escAttr() (esc() -> &quot;/&#39; on top)
+    is used at every such site. Static source check."""
     source = _admin_js_source()
     assert "function escAttr(" in source, "admin.js must define a quote-safe attribute encoder"
 
@@ -838,22 +813,21 @@ def test_p1_07_admin_js_attribute_interpolation_uses_a_quote_safe_encoder(test_e
 
 
 def test_p1_08_admin_actions_centrally_disable_show_errors_and_recover_from_401(test_env):
-    """P1-08: loading tabs and approving documents/links, deactivating,
-    reindexing, saving metadata, and running the query test used to await
-    api() with no try/catch and no disabled/loading state at all -- an
-    expired admin cookie, 409, 422, source timeout, or deployment restart
-    left the action apparently unresponsive (the click's promise just
-    rejected, silently, with the button still enabled for a compounding
-    double-tap) with no visible error and no path back to a usable state.
+    """Loading tabs and approving documents/links, deactivating, reindexing,
+    saving metadata, and running the query test must never await api() with
+    no try/catch and no disabled/loading state -- an expired admin cookie,
+    409, 422, source timeout, or deployment restart would otherwise leave
+    the action apparently unresponsive (the click's promise just rejected,
+    silently, with the button still enabled for a compounding double-tap)
+    with no visible error and no path back to a usable state.
 
-    Fixed with two central wrappers (guardedClick/guardedSubmit) instead of
+    Two central wrappers (guardedClick/guardedSubmit) cover this instead of
     hand-adding try/catch to each of the ~15 call sites individually:
     disable the triggering control for the duration of the call, route any
     thrown error to a single visible banner, and -- inside api() itself, so
     every call site gets it for free -- treat a 401 on an action (not
     boot()'s own initial, expected-to-401-when-signed-out probe) as an
-    expired session and return to the login form. Static source check,
-    matching the review's own verification depth for this finding."""
+    expired session and return to the login form. Static source check."""
     source = _admin_js_source()
     assert "function guardedClick(" in source
     assert "function guardedSubmit(" in source

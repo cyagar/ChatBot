@@ -118,6 +118,6 @@ def test_me_capabilities_differ_by_role(test_env):
 
     register_test_user(client, "bootstrap-admin@example.com", role="administrator")
     admin_caps = client.get("/api/auth/me").json()["capabilities"]
-    assert "ask_questions" in admin_caps  # admins can still use the technician app (P0A-1, owner-approved)
+    assert "ask_questions" in admin_caps  # admins can still use the technician app
     assert "manage_users" in admin_caps
     assert "manage_invitations" in admin_caps

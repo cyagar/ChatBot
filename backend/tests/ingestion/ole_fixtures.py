@@ -1,5 +1,5 @@
-"""Hand-built minimal OLE2 (Compound File Binary Format) writer, for P1-09
-regression tests. olefile (already a dependency, used by extract_legacy_doc)
+"""Hand-built minimal OLE2 (Compound File Binary Format) writer, for legacy
+.doc regression tests. olefile (already a dependency, used by extract_legacy_doc)
 only reads OLE files -- there's no writer available, and no genuine sample
 .doc ships with it or with the project, so this builds the smallest valid
 compound file that satisfies olefile's own reader: one FAT sector, one

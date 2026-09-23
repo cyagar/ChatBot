@@ -1,12 +1,9 @@
-"""P1-5 (independent follow-up review): "the API must return an honest
-not_found response even when the model is unavailable." vector_search()
-already skips embed_query() entirely when there are no eligible chunks, AND
-now swallows an embed_query() failure itself to degrade to lexical-only
-results rather than raising (see tests/retrieval/test_search.py -- an
-advisor-caught gap in the first pass at this fix: throwing away a working
-lexical result set just because the *vector* half failed was stricter than
-the review asked for). So an embedding-model failure specifically no longer
-reaches this module at all.
+"""The API must return an honest not_found response even when the embedding
+model is unavailable. vector_search() skips embed_query() entirely when
+there are no eligible chunks, and swallows an embed_query() failure itself
+to degrade to lexical-only results rather than raising (see
+tests/retrieval/test_search.py) -- so an embedding-model failure
+specifically never reaches this module at all.
 
 This file covers the remaining backstop: hybrid_search() failing for some
 other reason entirely (a corrupted FTS index, an unexpected bug in fusion/

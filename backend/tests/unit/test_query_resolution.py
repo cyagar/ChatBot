@@ -1,8 +1,7 @@
-"""P1-8 (independent follow-up review): "Resolve follow-ups into a stored
-standalone retrieval query before hybrid_search." hybrid_search has no
-conversational reasoning -- a follow-up like "What about replacing it?"
-retrieves on the literal words alone and never finds passages about the
-actual antecedent.
+"""Follow-ups must be resolved into a stored standalone retrieval query
+before hybrid_search: hybrid_search has no conversational reasoning, so a
+follow-up like "What about replacing it?" would retrieve on the literal
+words alone and never find passages about the actual antecedent.
 
 Pure-function tests: no DB, no provider, no FastAPI app.
 """
@@ -90,7 +89,7 @@ def test_original_wording_is_a_prefix_of_the_resolved_query():
     assert resolved.startswith(q)
 
 
-# --- P1-2 (independent follow-up review, 2026-08-24): negatives -----------
+# --- Negatives --------------------------------------------------------
 # The prior test above only covers the successful-resolution path. These
 # cover the resolver's confidence model -- when it must NOT guess.
 

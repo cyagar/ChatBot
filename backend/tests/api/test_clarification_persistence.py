@@ -1,15 +1,11 @@
-"""P1-7 (independent follow-up review): "Persist clarification candidates/
-pending question... Require exact live-versus-reload equality."
-
-The live POST /messages response for an ambiguous machine mention includes
-the specific candidate machines found (`clarifying_options`), but that list
-was never persisted -- only `is_clarifying_question` and the prompt text
-were. Reload (GET /messages) therefore reproduced the clarifying bubble's
-TEXT but not its tappable candidate buttons, silently downgrading to the
-frontend's generic "choose a machine" fallback -- which (a separate, related
-bug an advisor review caught while fixing this) routed through the ordinary
-picker flow and started a brand-new conversation instead of resuming the one
-with the pending question, abandoning it rather than answering it.
+"""The live POST /messages response for an ambiguous machine mention includes
+the specific candidate machines found (`clarifying_options`) -- this must be
+persisted, not just `is_clarifying_question` and the prompt text, or reload
+(GET /messages) would reproduce the clarifying bubble's TEXT but not its
+tappable candidate buttons, silently downgrading to the frontend's generic
+"choose a machine" fallback, which routes through the ordinary picker flow
+and starts a brand-new conversation instead of resuming the one with the
+pending question, abandoning it rather than answering it.
 
 These tests cover the backend half: migration 0007 adds
 messages.clarifying_options, and this file proves the persisted value is
@@ -56,8 +52,8 @@ def test_clarifying_options_persist_and_survive_reload_with_exact_equality(test_
     reloaded_clarify = [m for m in reloaded if m["is_clarifying_question"]]
     assert len(reloaded_clarify) == 1
 
-    # Exact live-versus-reload equality (P1-7's own wording), not just "some
-    # candidates showed up" -- same ids, same labels, same order.
+    # Exact live-versus-reload equality, not just "some candidates showed
+    # up" -- same ids, same labels, same order.
     assert reloaded_clarify[0]["clarifying_options"] == live["clarifying_options"]
 
 

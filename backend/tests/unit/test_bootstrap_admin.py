@@ -1,9 +1,8 @@
-"""Independent follow-up review 2026-08-24 P0-8: bootstrap_admin() accepted
-any string as an email (e.g. "not-an-email") and any password, including an
-empty one -- so a rushed or scripted bootstrap could mint an administrator
-with no working credential. These tests cover the validation now enforced in
-app.auth.bootstrap.bootstrap_admin itself (not just the CLI), using the same
-rules as public registration.
+"""bootstrap_admin() must reject an invalid email (e.g. "not-an-email") or an
+empty password -- a rushed or scripted bootstrap must not be able to mint an
+administrator with no working credential. These tests cover the validation
+enforced in app.auth.bootstrap.bootstrap_admin itself (not just the CLI),
+using the same rules as public registration.
 """
 
 from __future__ import annotations

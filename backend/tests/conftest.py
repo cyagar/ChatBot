@@ -16,8 +16,8 @@ PROD_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 
 def _refuse_if_production_database(url: str, var_name: str) -> None:
-    """P0-10 (external review, 2026-09-21): this fixture runs migrations and
-    an unconditional TRUNCATE ... CASCADE against whatever DATABASE_URL/
+    """The test_env fixture runs migrations and an unconditional
+    TRUNCATE ... CASCADE against whatever DATABASE_URL/
     DATABASE_URL_UNPOOLED end up set -- pointing either at the real
     production connection string, even by accident (a copy-pasted .env.test,
     a misconfigured secret), would destroy live data. Compares against
@@ -118,8 +118,8 @@ def test_env(tmp_path, monkeypatch):
 
 def register_test_user(client, email, role="technician", password="password123",
                         admin_email="bootstrap-admin@example.com", admin_password="password123"):
-    """Test-support helper mirroring the real post-P0-5 flow: public
-    self-registration is closed, so getting a logged-in user of any role now
+    """Test-support helper mirroring the real registration flow: public
+    self-registration is closed, so getting a logged-in user of any role
     requires (1) a bootstrap administrator to exist -- created directly via
     app.auth.bootstrap.bootstrap_admin, the same code scripts/bootstrap_admin.py
     uses, never through HTTP -- and (2) that admin issuing a single-use

@@ -1,10 +1,4 @@
-"""P1-1 (independent follow-up review, 2026-08-24): "Retry still resends the
-previous user question as a new message... Add an idempotent answer-attempt
-endpoint tied to the original user_message_id and an idempotency key.
-Preserve attempt history without duplicating conversation history or
-billable work."
-
-POST /conversations/{id}/messages/{message_id}/retry regenerates a failed
+"""POST /conversations/{id}/messages/{message_id}/retry regenerates a failed
 assistant message IN PLACE -- these tests prove no new user turn, no new
 assistant message, idempotency under a double-tap (the same claim-UPDATE
 pattern already proven for pending_message_id in test_multiturn.py), and

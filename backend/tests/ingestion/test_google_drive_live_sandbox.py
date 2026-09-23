@@ -6,9 +6,8 @@ separate TMA_LIVE_DRIVE_TEST_FOLDER_ID / TMA_LIVE_DRIVE_TEST_CREDENTIALS_PATH
 env vars. Deliberately NOT the app's own GOOGLE_DRIVE_FOLDER_ID /
 GOOGLE_SERVICE_ACCOUNT_JSON_PATH settings -- those may be pointed at the real
 production folder in a developer's .env, and this test must never be able to
-touch that folder just because the app happens to be configured for it
-(independent follow-up review P1-1: "never let normal CI contact the
-production folder").
+touch that folder just because the app happens to be configured for it --
+normal CI must never contact the production folder.
 
 The skip check runs unconditionally as the first line of the test body, not
 only via the `live_drive` marker -- a marker alone only stops -m-based
@@ -26,7 +25,7 @@ from app.ingestion.sources import GoogleDriveSource
 @pytest.mark.live_drive
 def test_live_sandbox_folder_lists_and_fetches_read_only(tmp_path):
     if os.environ.get("TMA_LIVE_DRIVE_TEST") != "1":
-        pytest.skip("TMA_LIVE_DRIVE_TEST=1 not set -- this test never runs by default (P1-1).")
+        pytest.skip("TMA_LIVE_DRIVE_TEST=1 not set -- this test never runs by default.")
 
     folder_id = os.environ.get("TMA_LIVE_DRIVE_TEST_FOLDER_ID")
     creds_path = os.environ.get("TMA_LIVE_DRIVE_TEST_CREDENTIALS_PATH")

@@ -1,4 +1,4 @@
-"""Unit tests for the P1-4 automated corpus sync loop
+"""Unit tests for the automated corpus sync loop
 (app/ingestion/scheduler.py).
 
 No real sleeping or Drive access: ingest_all() and asyncio.sleep() are both

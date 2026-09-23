@@ -140,11 +140,12 @@ class _ReverseOrderCitingProvider(AIProvider):
 
 
 def test_citation_order_is_identical_live_and_after_reload(monkeypatch, six_passages):
-    """P1-7: message_sources.rank is RETRIEVAL order, but the live response
-    returns citations in PROVIDER order. Reload previously ordered by rank, so
-    a reloaded conversation could show citations in a different order than the
-    technician originally saw -- the numbering under an answer would stop
-    matching the answer's own claims. Strict list equality, not sorted()."""
+    """message_sources.rank is RETRIEVAL order, but the live response returns
+    citations in PROVIDER order. Reload must order by that same provider
+    order (citation_ordinal), not rank -- otherwise a reloaded conversation
+    could show citations in a different order than the technician originally
+    saw, and the numbering under an answer would stop matching the answer's
+    own claims. Strict list equality, not sorted()."""
     import app.api.routes_chat as routes_chat
 
     monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: six_passages)
@@ -167,7 +168,7 @@ def test_citation_order_is_identical_live_and_after_reload(monkeypatch, six_pass
 class _DuplicateCitingProvider(AIProvider):
     """Returns the same chunk twice. Persistence keys by chunk_id, so without
     an explicit order-preserving dedupe the duplicate would collapse on
-    reload while still appearing twice live (P1-7)."""
+    reload while still appearing twice live."""
 
     name = "test_duplicate"
 

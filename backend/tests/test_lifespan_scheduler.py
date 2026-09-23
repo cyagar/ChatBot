@@ -1,5 +1,5 @@
-"""P1-4: the automated sync loop must actually be gated correctly and wired
-into the app's lifespan -- not just exist as an importable function nothing
+"""The automated sync loop must actually be gated correctly and wired into
+the app's lifespan -- not just exist as an importable function nothing
 calls.
 
 is_enabled() is unit-tested directly (fast, no ASGI involved) for every

@@ -1,5 +1,4 @@
-"""Contract tests for GoogleDriveSource (independent follow-up review P1-1:
-"the new production source has no automated test coverage").
+"""Contract tests for GoogleDriveSource.
 
 No live Drive/network access anywhere in this file: `_get_service()` is
 monkeypatched to return a fake Drive `files().list()` client, and most tests
@@ -8,24 +7,24 @@ real API. A separate, explicitly gated live-Drive sandbox test lives in
 test_google_drive_live_sandbox.py -- never run by default (see pytest.ini's
 `live_drive` marker).
 
-Covers, per the review's own list: query/fields/pagination/shared-folder
-support, caching (P0-1's original bug -- cache validity from size alone),
-streaming download + retry (exercising the real `_download()`, not the
-monkeypatched fake most other tests use), checksums, unsupported files,
-errors (a mid-pagination listing failure, and a subsequent retry converging),
-and restart (a brand-new instance over the same cache_dir picking up the
-persisted manifest, never re-downloading unchanged content).
+Covers query/fields/pagination/shared-folder support, caching (cache
+validity keyed on checksum, not size alone), streaming download + retry
+(exercising the real `_download()`, not the monkeypatched fake most other
+tests use), checksums, unsupported files, errors (a mid-pagination listing
+failure, and a subsequent retry converging), and restart (a brand-new
+instance over the same cache_dir picking up the persisted manifest, never
+re-downloading unchanged content).
 
-P1-3 ("file-type, folder, and download-capability policy is undefined") adds
-its own coverage below: subfolders/shortcuts get distinct, actionable skip
-reasons rather than the generic Workspace-export message; Google Workspace
-documents are confirmed skipped, not exported (the deliberate flat,
-binary-only contract -- see GoogleDriveSource's class docstring for why);
-oversized files are rejected before download using Drive's reported size
-(deliberately no file-count limit -- see the same docstring for why that
-would be unsafe); and every one of those skips is asserted to actually reach
-pop_skipped(), which is how pipeline.py now reports them as normal
-ingestion_events rows instead of only a server log line."""
+Also covers file-type, folder, and download-capability policy: subfolders/
+shortcuts get distinct, actionable skip reasons rather than the generic
+Workspace-export message; Google Workspace documents are confirmed skipped,
+not exported (the deliberate flat, binary-only contract -- see
+GoogleDriveSource's class docstring for why); oversized files are rejected
+before download using Drive's reported size (deliberately no file-count
+limit -- see the same docstring for why that would be unsafe); and every one
+of those skips is asserted to actually reach pop_skipped(), which is how
+pipeline.py reports them as normal ingestion_events rows instead of only a
+server log line."""
 
 from __future__ import annotations
 
@@ -111,8 +110,8 @@ def test_first_listing_downloads_every_file(tmp_path):
 
 
 def test_same_size_different_checksum_is_not_treated_as_cached(tmp_path):
-    """The exact P0-1 bug: two revisions can share a byte count. Cache
-    validity must key on md5Checksum, not size alone."""
+    """Two revisions can share a byte count. Cache validity must key on
+    md5Checksum, not size alone."""
     page1 = {"files": [{"id": "f1", "name": "manual.pdf", "size": "3",
                          "mimeType": "application/pdf", "md5Checksum": "checksum-v1"}]}
     page2 = {"files": [{"id": "f1", "name": "manual.pdf", "size": "3",
@@ -148,9 +147,9 @@ def test_unchanged_checksum_is_not_redownloaded(tmp_path):
 
 
 def test_rename_does_not_leave_a_stale_cache_file_fetchable(tmp_path):
-    """The exact P0-1 bug reproduction: a rename used to leave the old cache
-    file behind, and fetch()'s glob(file_id + "__*") could return either one.
-    After a rename, fetch() must return only the bytes from the new name."""
+    """A rename must not leave the old cache file behind where fetch()'s
+    glob(file_id + "__*") could return either one -- after a rename, fetch()
+    must return only the bytes from the new name."""
     page1 = {"files": [{"id": "f1", "name": "old_name.pdf", "size": "3",
                          "mimeType": "application/pdf", "md5Checksum": "same-checksum"}]}
     source, service, calls = _make_source(tmp_path, [page1], {"f1": b"AAA"})
@@ -262,9 +261,9 @@ def test_pagination_fetches_every_page(tmp_path):
 # --- unsupported items: folders and shortcuts, not just Workspace docs ----
 
 def test_subfolders_and_shortcuts_are_skipped_not_downloaded(tmp_path):
-    """list_files() only queries immediate children (P1-3 territory covers
-    whether that should ever change), but a subfolder or a shortcut item can
-    still appear in that immediate-children listing and must not be treated
+    """list_files() only queries immediate children, but a subfolder or a
+    shortcut item can still appear in that immediate-children listing and
+    must not be treated
     as a downloadable file."""
     pages = [{"files": [
         {"id": "folder1", "name": "Old Manuals", "mimeType": "application/vnd.google-apps.folder"},
@@ -334,9 +333,9 @@ def test_download_streams_and_atomically_renames_into_place(tmp_path, scripted_d
 
 
 def test_download_writes_each_chunk_through_to_disk_as_it_arrives(tmp_path, scripted_download):
-    """Independent follow-up review 2026-08-24 P0-4: the old implementation
-    buffered the whole file in io.BytesIO() and only wrote to disk once, at
-    the end, after the last chunk arrived. Proven here two ways for a
+    """Downloads must write each chunk through to disk as it arrives, not
+    buffer the whole file in io.BytesIO() and write once at the end after
+    the last chunk arrives. Proven here two ways for a
     two-chunk download: (1) the final content is the concatenation of both
     chunks, exercising the real multi-chunk MediaIoBaseDownload loop, not
     just a single next_chunk() call. (2) the max_bytes cap is enforced as
@@ -362,9 +361,8 @@ def test_download_writes_each_chunk_through_to_disk_as_it_arrives(tmp_path, scri
 
 
 def test_download_rejects_bytes_not_matching_drives_advertised_checksum(tmp_path, scripted_download):
-    """Independent follow-up review 2026-08-24 P0-4: nothing previously
-    verified downloaded bytes against Drive's own md5Checksum, so a
-    truncated/corrupted transfer that still completed without an HTTP error
+    """Downloaded bytes must be verified against Drive's own md5Checksum, or
+    a truncated/corrupted transfer that still completed without an HTTP error
     would be silently cached and fed to the pipeline. All 3 retry attempts
     here deliver bytes with the wrong MD5, so the download must fail
     outright and never reach the cache."""
@@ -419,7 +417,7 @@ def test_listing_error_mid_pagination_propagates_and_a_retry_still_converges(tmp
     file downloaded during a run that later fails on a subsequent page gets
     re-downloaded on the next attempt even though correct bytes are already
     on disk -- wasteful, but not incorrect, since the checksum-keyed cache
-    validity check (P0-1) still converges on the right content."""
+    validity check still converges on the right content."""
     page1 = {
         "files": [{"id": "f1", "name": "a.pdf", "size": "3", "mimeType": "application/pdf", "md5Checksum": "c1"}],
         "nextPageToken": "TOKEN2",
@@ -463,19 +461,19 @@ def test_fresh_instance_after_restart_reuses_the_persisted_manifest(tmp_path):
     assert source2.fetch("google_drive:f1").read_bytes() == b"AAA"
 
 
-# --- P1-3: per-file size limit, and every skip is reported ----------------
+# --- Per-file size limit, and every skip is reported -----------------------
 #
 # Deliberately no file-COUNT limit test here: a count cap would make
 # list_files() return a partial listing once a folder passes it, which is
 # indistinguishable from files having actually been removed from Drive --
-# exactly the ambiguity the review (P0-2) warns must never feed removal
-# reconciliation. See GoogleDriveSource's class docstring for the full
-# reasoning; only the per-file size limit is implemented.
+# an ambiguity that must never feed removal reconciliation. See
+# GoogleDriveSource's class docstring for the full reasoning; only the
+# per-file size limit is implemented.
 
 def test_missing_reported_size_does_not_bypass_the_cap(tmp_path, scripted_download):
-    """Independent follow-up review 2026-08-24 P0-4: the pre-download check
-    used `int(f.get("size") or 0)`, so a file with no reported size at all
-    (missing key, not even "0") was treated as 0 bytes and always passed the
+    """The pre-download check must not use `int(f.get("size") or 0)`, which
+    would treat a file with no reported size at all (missing key, not even
+    "0") as 0 bytes and always pass the
     `> max_file_size_bytes` check -- the cap was silently bypassed for
     exactly the files it matters most for. The real limit is now enforced on
     bytes actually streamed, in _download(), independent of whatever (or
