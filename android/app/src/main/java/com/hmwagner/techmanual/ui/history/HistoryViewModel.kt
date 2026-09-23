@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.ConversationOut
+import com.hmwagner.techmanual.network.describeError
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -37,7 +38,7 @@ class HistoryViewModel : ViewModel() {
                         nextCursor = resp.headers()["X-Next-Cursor"],
                     )
                 } else {
-                    _state.value = _state.value.copy(loading = false, error = "Couldn't load history (code ${resp.code()}).")
+                    _state.value = _state.value.copy(loading = false, error = resp.describeError("Couldn't load history"))
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(loading = false, error = "Can't reach the server. Check your connection.")
@@ -64,7 +65,7 @@ class HistoryViewModel : ViewModel() {
                         nextCursor = resp.headers()["X-Next-Cursor"],
                     )
                 } else {
-                    _state.value = _state.value.copy(loadingMore = false, error = "Couldn't load more history (code ${resp.code()}).")
+                    _state.value = _state.value.copy(loadingMore = false, error = resp.describeError("Couldn't load more history"))
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(loadingMore = false, error = "Can't reach the server. Check your connection.")

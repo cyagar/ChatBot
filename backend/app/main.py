@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -27,12 +28,13 @@ from app.api.errors import (
 )
 from app.api.routes_admin import router as admin_router
 from app.api.routes_chat import router as chat_router
+from app.api.routes_config import _corpus_status
 from app.api.routes_config import router as config_router
 from app.api.routes_machines import router as machines_router
 from app.api.routes_manuals import router as manuals_router
 from app.auth.routes import router as auth_router
 from app.config import get_settings
-from app.db import run_migrations
+from app.db import get_conn, run_migrations
 from app.rate_limit import limiter
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -168,6 +170,46 @@ templates = Jinja2Templates(directory=WEB_DIR / "templates")
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
+
+
+@app.get("/readyz")
+def readyz():
+    """P2-07 (external review, 2026-09-21): /healthz only proves the process
+    is running -- useful as a liveness probe, but says nothing about
+    whether this instance can actually serve a citation, which needs a
+    reachable database, readable object storage, and a corpus that has
+    synced recently enough to trust. Checked directly rather than assumed.
+
+    No auth, same as /healthz -- a deployment platform's readiness probe
+    carries no credentials, and this deliberately reports only booleans/a
+    timestamp, never a filename or manual title, so it stays safe to expose
+    publicly. Reuses routes_config.py's own _corpus_status rather than a
+    third copy of the same staleness math (routes_admin.py's ingestion
+    status endpoint is the second)."""
+    settings = get_settings()
+
+    database_ok = True
+    try:
+        with get_conn() as conn:
+            conn.execute("SELECT 1")
+    except Exception:
+        database_ok = False
+
+    storage_dir = settings.local_storage_dir_resolved
+    storage_ok = storage_dir.is_dir() and os.access(storage_dir, os.R_OK)
+
+    corpus_status, _ = _corpus_status(settings)
+
+    ok = database_ok and storage_ok
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={
+            "ok": ok,
+            "database": "ok" if database_ok else "error",
+            "storage": "ok" if storage_ok else "error",
+            "corpus": corpus_status,
+        },
+    )
 
 
 @app.get("/admin")

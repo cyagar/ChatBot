@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.CreateConversationRequest
 import com.hmwagner.techmanual.network.MachineOut
+import com.hmwagner.techmanual.network.describeError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -81,7 +82,7 @@ class MachinesViewModel : ViewModel() {
                     if (resp.isSuccessful) {
                         _state.value = _state.value.copy(recent = resp.body().orEmpty())
                     } else {
-                        _state.value = _state.value.copy(error = "Couldn't refresh (code ${resp.code()}).")
+                        _state.value = _state.value.copy(error = resp.describeError("Couldn't refresh"))
                     }
                 } else {
                     val resp = ApiClient.service.searchMachines(query = q)
@@ -91,7 +92,7 @@ class MachinesViewModel : ViewModel() {
                     if (resp.isSuccessful) {
                         _state.value = _state.value.copy(results = resp.body().orEmpty())
                     } else {
-                        _state.value = _state.value.copy(error = "Couldn't refresh (code ${resp.code()}).")
+                        _state.value = _state.value.copy(error = resp.describeError("Couldn't refresh"))
                     }
                 }
             } catch (e: CancellationException) {
@@ -189,7 +190,7 @@ class MachinesViewModel : ViewModel() {
             if (resp.isSuccessful) {
                 _state.value = _state.value.copy(loading = false, results = resp.body().orEmpty())
             } else {
-                _state.value = _state.value.copy(loading = false, error = "Search failed (code ${resp.code()}).")
+                _state.value = _state.value.copy(loading = false, error = resp.describeError("Search failed"))
             }
         } catch (e: CancellationException) {
             throw e // structured concurrency: never swallow a real cancellation
@@ -222,7 +223,7 @@ class MachinesViewModel : ViewModel() {
                     // -created conversation or turn it into a reported error.
                     touchMachineBestEffort(machine.id)
                 } else {
-                    _state.value = _state.value.copy(creatingConversation = false, error = "Couldn't start a conversation (code ${resp.code()}).")
+                    _state.value = _state.value.copy(creatingConversation = false, error = resp.describeError("Couldn't start a conversation"))
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(creatingConversation = false, error = "Can't reach the server. Check your connection.")
@@ -254,7 +255,7 @@ class MachinesViewModel : ViewModel() {
                     _state.value = _state.value.copy(
                         recent = apply(_state.value.recent, machine.is_favorite),
                         results = apply(_state.value.results, machine.is_favorite),
-                        error = "Couldn't update favorite (code ${resp.code()}).",
+                        error = resp.describeError("Couldn't update favorite"),
                     )
                 }
             } catch (_: Exception) {
@@ -301,7 +302,7 @@ class MachinesViewModel : ViewModel() {
                     _state.value = _state.value.copy(creatingConversation = false)
                     onCreated(conv.id, null)
                 } else {
-                    _state.value = _state.value.copy(creatingConversation = false, error = "Couldn't start a conversation (code ${resp.code()}).")
+                    _state.value = _state.value.copy(creatingConversation = false, error = resp.describeError("Couldn't start a conversation"))
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(creatingConversation = false, error = "Can't reach the server. Check your connection.")

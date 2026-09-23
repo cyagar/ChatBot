@@ -4023,6 +4023,23 @@
         },
         "summary": "Invite Page"
       }
+    },
+    "/readyz": {
+      "get": {
+        "description": "P2-07 (external review, 2026-09-21): /healthz only proves the process\nis running -- useful as a liveness probe, but says nothing about\nwhether this instance can actually serve a citation, which needs a\nreachable database, readable object storage, and a corpus that has\nsynced recently enough to trust. Checked directly rather than assumed.\n\nNo auth, same as /healthz -- a deployment platform's readiness probe\ncarries no credentials, and this deliberately reports only booleans/a\ntimestamp, never a filename or manual title, so it stays safe to expose\npublicly. Reuses routes_config.py's own _corpus_status rather than a\nthird copy of the same staleness math (routes_admin.py's ingestion\nstatus endpoint is the second).",
+        "operationId": "readyz_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Readyz"
+      }
     }
   }
 }

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.SavedAnswerOut
+import com.hmwagner.techmanual.network.describeError
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -40,7 +41,7 @@ class SavedAnswersViewModel : ViewModel() {
                         nextCursor = resp.headers()["X-Next-Cursor"],
                     )
                 } else {
-                    _state.value = _state.value.copy(loading = false, error = "Couldn't load saved answers (code ${resp.code()}).")
+                    _state.value = _state.value.copy(loading = false, error = resp.describeError("Couldn't load saved answers"))
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(loading = false, error = "Can't reach the server. Check your connection.")
@@ -65,7 +66,7 @@ class SavedAnswersViewModel : ViewModel() {
                         nextCursor = resp.headers()["X-Next-Cursor"],
                     )
                 } else {
-                    _state.value = _state.value.copy(loadingMore = false, error = "Couldn't load more saved answers (code ${resp.code()}).")
+                    _state.value = _state.value.copy(loadingMore = false, error = resp.describeError("Couldn't load more saved answers"))
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(loadingMore = false, error = "Can't reach the server. Check your connection.")
@@ -85,7 +86,7 @@ class SavedAnswersViewModel : ViewModel() {
             try {
                 val resp = ApiClient.service.unsaveAnswer(messageId)
                 if (!resp.isSuccessful) {
-                    _state.value = _state.value.copy(answers = before, error = "Couldn't remove that saved answer (code ${resp.code()}).")
+                    _state.value = _state.value.copy(answers = before, error = resp.describeError("Couldn't remove that saved answer"))
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(answers = before, error = "Can't reach the server. Check your connection.")

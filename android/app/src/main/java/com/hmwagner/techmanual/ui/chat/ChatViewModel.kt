@@ -11,6 +11,7 @@ import com.hmwagner.techmanual.network.FeedbackRequest
 import com.hmwagner.techmanual.network.MessageIn
 import com.hmwagner.techmanual.network.MessageOut
 import com.hmwagner.techmanual.network.SetMachineRequest
+import com.hmwagner.techmanual.network.describeError
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -213,7 +214,7 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                     feedbackByMessageId = loaded.mapNotNull { m -> m.feedback_rating?.let { m.id to it } }.toMap(),
                 )
             } else {
-                _state.value = _state.value.copy(loadingHistory = false, error = "Couldn't load this conversation (code ${msgs.code()}).")
+                _state.value = _state.value.copy(loadingHistory = false, error = msgs.describeError("Couldn't load this conversation"))
             }
         } catch (_: Exception) {
             _state.value = _state.value.copy(loadingHistory = false, error = "Can't reach the server. Check your connection.")
@@ -340,9 +341,9 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                         pendingEchoUncertain = false,
                         pendingEchoStillProcessing = false,
                         error = if (newerDraftTyped) {
-                            "Couldn't send that question (code ${resp.code()})."
+                            resp.describeError("Couldn't send that question")
                         } else {
-                            "Couldn't send that question (code ${resp.code()}). Your draft wasn't lost -- retype it."
+                            "${resp.describeError("Couldn't send that question")} Your draft wasn't lost -- retype it."
                         },
                         composerText = if (newerDraftTyped) _state.value.composerText else echo.content,
                     )
@@ -379,7 +380,7 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                     // gating has actually finished.
                     loadMessages()
                 } else {
-                    _state.value = _state.value.copy(error = "Couldn't set the machine (code ${resp.code()}).")
+                    _state.value = _state.value.copy(error = resp.describeError("Couldn't set the machine"))
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(error = "Can't reach the server. Check your connection.")
@@ -401,7 +402,7 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                         messages = _state.value.messages.map { if (it.id == updated.id) updated else it },
                     )
                 } else {
-                    _state.value = _state.value.copy(sending = false, error = "Retry failed (code ${resp.code()}).")
+                    _state.value = _state.value.copy(sending = false, error = resp.describeError("Retry failed"))
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(sending = false, error = "Can't reach the server. Check your connection.")
@@ -416,7 +417,7 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                 if (resp.isSuccessful) {
                     _state.value = _state.value.copy(savedMessageIds = _state.value.savedMessageIds + messageId, error = null)
                 } else {
-                    _state.value = _state.value.copy(error = "Couldn't save that answer (code ${resp.code()}). Try again.")
+                    _state.value = _state.value.copy(error = "${resp.describeError("Couldn't save that answer")} Try again.")
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(error = "Couldn't save that answer -- check your connection and try again.")
@@ -433,7 +434,7 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                 if (resp.isSuccessful) {
                     _state.value = _state.value.copy(savedMessageIds = _state.value.savedMessageIds - messageId, error = null)
                 } else {
-                    _state.value = _state.value.copy(error = "Couldn't remove that saved answer (code ${resp.code()}). Try again.")
+                    _state.value = _state.value.copy(error = "${resp.describeError("Couldn't remove that saved answer")} Try again.")
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(error = "Couldn't remove that saved answer -- check your connection and try again.")
@@ -451,7 +452,7 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                         error = null,
                     )
                 } else {
-                    _state.value = _state.value.copy(error = "Couldn't record that feedback (code ${resp.code()}). Try again.")
+                    _state.value = _state.value.copy(error = "${resp.describeError("Couldn't record that feedback")} Try again.")
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(error = "Couldn't record that feedback -- check your connection and try again.")
@@ -504,7 +505,7 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                 } else {
                     _state.value = _state.value.copy(
                         evidenceLoading = false,
-                        evidenceError = "Couldn't load this evidence (code ${resp.code()}).",
+                        evidenceError = resp.describeError("Couldn't load this evidence"),
                     )
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {

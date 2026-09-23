@@ -114,8 +114,14 @@ data class EvidenceOut(
     val has_page_image: Boolean = false,
 )
 
+// P2-07 (external review, 2026-09-21): defined since Phase 1 but never
+// actually parsed anywhere -- every error message shown to a technician was
+// a generic "(code 500)" with no reference the backend's own logs could be
+// searched by, even though every error response already carries one (see
+// backend/app/api/errors.py's error_body). ErrorMessages.kt's
+// correlationSuffix() is what actually reads this now.
 @Serializable
-data class ApiErrorBody(val detail: String? = null)
+data class ApiErrorBody(val detail: String? = null, val correlation_id: String? = null)
 
 @Serializable
 data class SavedAnswerOut(
