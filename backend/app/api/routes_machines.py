@@ -6,7 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, field_serializer
 
 from app.api.common import iso_utc
-from app.api.pagination import decode_cursor, paginate, set_pagination_headers
+from app.api.pagination import (
+    CURSOR_BOOL,
+    CURSOR_INT,
+    CURSOR_STR,
+    CURSOR_TIMESTAMP,
+    decode_cursor,
+    paginate,
+    set_pagination_headers,
+)
 from app.auth.deps import CurrentUser, get_current_user
 from app.db import get_conn
 
@@ -66,7 +74,9 @@ def search_machines(
     # (manufacturer, model_name, id) -- id as the tiebreaker for stable
     # cursor pagination (Phase 1, narrowed scope), same reasoning as
     # routes_chat.py's list_conversations.
-    before_mf, before_model, before_id = decode_cursor(cursor, 3) if cursor else (None, None, None)
+    before_mf, before_model, before_id = (
+        decode_cursor(cursor, [CURSOR_STR, CURSOR_STR, CURSOR_INT]) if cursor else (None, None, None)
+    )
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
                COUNT(DISTINCT d.id) AS document_count,
@@ -142,7 +152,9 @@ def recent_machines(
     it). The tradeoff is explicit: a favorited-but-now-empty machine
     disappears from recents instead of dead-ending into "no manuals" --
     consistent with what the picker already does, not a new UX decision."""
-    before_fav, before_last_used, before_id = decode_cursor(cursor, 3) if cursor else (None, None, None)
+    before_fav, before_last_used, before_id = (
+        decode_cursor(cursor, [CURSOR_BOOL, CURSOR_TIMESTAMP, CURSOR_INT]) if cursor else (None, None, None)
+    )
     sql = """
         SELECT m.id, mf.name AS manufacturer, m.model_name, m.family, m.machine_type,
                COUNT(DISTINCT d.id) AS document_count,

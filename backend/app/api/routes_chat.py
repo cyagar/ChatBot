@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_serializer
 from rapidfuzz import fuzz
 
 from app.api.common import iso_utc
-from app.api.pagination import decode_cursor, paginate, set_pagination_headers
+from app.api.pagination import CURSOR_INT, CURSOR_TIMESTAMP, decode_cursor, paginate, set_pagination_headers
 from app.auth.deps import CurrentUser, get_current_user
 from app.db import get_conn
 from app.providers.base import GeneratedAnswer, HistoryTurn, ProviderError
@@ -230,7 +230,9 @@ def list_conversations(
     # this "stable" (a page boundary can't land mid-tie and skip/repeat a
     # row) rather than plain LIMIT/OFFSET, which also shifts under
     # concurrent inserts.
-    before_updated_at, before_id = decode_cursor(cursor, 2) if cursor else (None, None)
+    before_updated_at, before_id = (
+        decode_cursor(cursor, [CURSOR_TIMESTAMP, CURSOR_INT]) if cursor else (None, None)
+    )
     with get_conn() as conn:
         # create_conversation runs the moment a technician taps a machine (or
         # "Not sure which machine?") -- before any question is typed, so the
@@ -866,7 +868,7 @@ def get_messages(
     # conversation in one response. Oldest-first (id ASC), so the cursor
     # pages forward: "id" alone is a stable, already-unique sort key here,
     # no tiebreaker column needed the way updated_at needed one above.
-    (after_id,) = decode_cursor(cursor, 1) if cursor else (None,)
+    (after_id,) = decode_cursor(cursor, [CURSOR_INT]) if cursor else (None,)
     with get_conn() as conn:
         _require_own_conversation(conn, conversation_id, user.id)
         rows = conn.execute(
@@ -1278,7 +1280,9 @@ def list_saved_answers(
     -- MessageOut alone (the old response shape) carries none of that. Each
     entry now also names which conversation it can be resumed from, so the
     UI can offer "Open conversation" rather than showing an orphaned answer."""
-    before_saved_at, before_id = decode_cursor(cursor, 2) if cursor else (None, None)
+    before_saved_at, before_id = (
+        decode_cursor(cursor, [CURSOR_TIMESTAMP, CURSOR_INT]) if cursor else (None, None)
+    )
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT m.id, m.role, m.content, m.is_clarifying_question, m.is_no_answer, "

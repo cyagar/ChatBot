@@ -197,3 +197,46 @@ def test_invalid_cursor_returns_a_400_with_the_standard_error_envelope(test_env)
     resp = client.get("/api/conversations", params={"cursor": "not-valid-base64-json!!"})
     assert resp.status_code == 400
     assert resp.json()["code"] == "BAD_REQUEST"
+
+
+def test_p2_01_a_well_formed_but_wrongly_typed_cursor_400s_instead_of_500ing(test_env):
+    """P2-01 (external review, 2026-09-21): decode_cursor used to accept any
+    scalar in any position as long as the tuple LENGTH matched -- a
+    well-formed base64/JSON cursor with a garbage timestamp or a string
+    where an integer id was expected passed that check and was handed
+    straight to PostgreSQL, which can't cast it for that comparison
+    (surfaced as an unhandled 500, not a clean 400). Reproduced directly
+    against the exact repro from the review: encoding
+    ['not-a-date', 'not-an-id'] for GET /api/conversations, whose cursor is
+    (updated_at, id)."""
+    from app.api.pagination import encode_cursor
+
+    register_test_user(client, "page-badtypes@example.com", role="technician")
+
+    bad_cursor = encode_cursor("not-a-date", "not-an-id")
+    resp = client.get("/api/conversations", params={"cursor": bad_cursor})
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "BAD_REQUEST"
+
+
+def test_p2_01_a_bool_in_an_integer_cursor_position_is_rejected(test_env):
+    """bool is a subtype of int in Python -- the old isinstance(int) check
+    silently accepted True/False as if they were 1/0 wherever an integer
+    position was expected. GET /api/conversations/{id}/messages's cursor is
+    a single integer (the last message id)."""
+    from app.api.pagination import encode_cursor
+
+    register_test_user(client, "page-boolcursor@example.com", role="technician")
+    conv = client.post("/api/conversations", json={"machine_id": None}).json()
+
+    bad_cursor = encode_cursor(True)
+    resp = client.get(f"/api/conversations/{conv['id']}/messages", params={"cursor": bad_cursor})
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "BAD_REQUEST"
+
+
+def test_p2_01_an_oversized_cursor_is_rejected_before_being_parsed(test_env):
+    register_test_user(client, "page-hugecursor@example.com", role="technician")
+    resp = client.get("/api/conversations", params={"cursor": "A" * 10_000})
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "BAD_REQUEST"

@@ -44,25 +44,64 @@ def encode_cursor(*parts) -> str:
     ).decode("ascii")
 
 
-_CURSOR_SCALAR_TYPES = (str, int, float, bool, type(None))
+# P2-01 (external review, 2026-09-21): decode_cursor used to accept any
+# scalar type (str, int, float, bool, or null) in any position, as long as
+# the tuple LENGTH matched -- a crafted cursor could put "not-a-date" where
+# a timestamp comparison was expected, or `true`/`false` where an integer id
+# was (bool is a subtype of int in Python, so it passed an isinstance(int)
+# check and would have been silently accepted as 1/0). Either handed
+# PostgreSQL a value it can't cast for that comparison, surfacing an
+# unhandled 500 instead of a clean 400 -- reproduced by decoding
+# ['not-a-date', 'not-an-id'] straight through the old check. Every caller
+# now declares a per-position TYPE, not just a count, and int positions
+# explicitly reject bool.
+CURSOR_INT = "int"
+CURSOR_STR = "str"
+CURSOR_BOOL = "bool"
+CURSOR_TIMESTAMP = "timestamp"
+
+# Real cursors are a base64'd JSON array of a handful of scalars -- comfortably
+# under 200 bytes for every caller in this file. Bounded generously above that
+# so an oversized cursor is rejected before json.loads even runs on it, rather
+# than parsing an arbitrarily large attacker-supplied payload first.
+_MAX_CURSOR_LENGTH = 2048
 
 
-def decode_cursor(cursor: str, expected_len: int) -> list:
+def _matches_cursor_type(value, kind: str) -> bool:
+    if kind == CURSOR_INT:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if kind == CURSOR_STR:
+        return isinstance(value, str)
+    if kind == CURSOR_BOOL:
+        return isinstance(value, bool)
+    if kind == CURSOR_TIMESTAMP:
+        if not isinstance(value, str):
+            return False
+        try:
+            datetime.fromisoformat(value)
+        except ValueError:
+            return False
+        return True
+    raise ValueError(f"Unknown cursor schema kind: {kind!r}")
+
+
+def decode_cursor(cursor: str, schema: list[str]) -> list:
     """P1-10 (independent follow-up review): decoding used to accept any
     valid base64/JSON and hand it straight to the caller's tuple-unpack --
     a well-formed cursor with the wrong shape (too few/many elements, or a
     nested list/dict where a scalar SQL parameter is expected) raised an
-    unhandled ValueError/TypeError instead of a clean 400. Every caller now
-    declares how many parts it expects and gets a 400 for anything else."""
+    unhandled ValueError/TypeError instead of a clean 400. `schema` is a
+    list of CURSOR_* constants, one per expected position (see P2-01's note
+    above for why a count alone isn't enough)."""
+    if len(cursor) > _MAX_CURSOR_LENGTH:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid pagination cursor.")
     try:
         parts = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
     except Exception:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid pagination cursor.") from None
-    if (
-        not isinstance(parts, list)
-        or len(parts) != expected_len
-        or not all(isinstance(p, _CURSOR_SCALAR_TYPES) for p in parts)
-    ):
+    if not isinstance(parts, list) or len(parts) != len(schema):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid pagination cursor.")
+    if not all(_matches_cursor_type(part, kind) for part, kind in zip(parts, schema)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid pagination cursor.")
     return parts
 
