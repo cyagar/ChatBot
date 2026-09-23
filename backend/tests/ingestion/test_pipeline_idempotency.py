@@ -22,6 +22,51 @@ def manuals_dir(tmp_path):
     return d
 
 
+def test_p1_15_a_chunk_embedded_under_a_stale_fingerprint_is_reembedded(test_env, monkeypatch):
+    """P1-15 (external review, 2026-09-21): embeddings.model_name used to
+    record only the model name, not the revision -- a chunk whose only
+    embedding predates a model/revision change looked identical to one
+    that was never embedded, EXCEPT _embed_pending_chunks' old
+    `LEFT JOIN embeddings e ON e.chunk_id = c.id WHERE e.chunk_id IS NULL`
+    considered it already done and skipped it forever. Unlike this file's
+    other tests, embed_texts is monkeypatched here (a fake, fixed-size
+    vector) rather than loaded for real -- the real model is exercised in
+    tests/retrieval/test_search.py; this test is about which chunks
+    _embed_pending_chunks decides need embedding, not embedding quality."""
+    import numpy as np
+
+    from app.ingestion import pipeline as pipeline_module
+    from app.retrieval.embeddings import embedding_fingerprint, vector_to_blob
+
+    import app.retrieval.embeddings as embeddings_module
+    monkeypatch.setattr(embeddings_module, "embed_texts", lambda texts, **kw: np.ones((len(texts), 4), dtype=np.float32))
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES ('axiom.pdf', 'axiom.pdf', "
+            "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
+        )
+        cur = conn.execute(
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 1, 'text', 'Some manual content here.', 25, 0) RETURNING id"
+        )
+        chunk_id = cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (%s, %s, %s, %s)",
+            (chunk_id, "some-old-model@old-revision", 4, vector_to_blob(np.zeros(4, dtype=np.float32))),
+        )
+
+    total = pipeline_module._embed_pending_chunks()
+    assert total == 1, "a chunk with only a stale-fingerprint embedding must be re-embedded"
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT model_name FROM embeddings WHERE chunk_id = %s", (chunk_id,)).fetchone()
+    assert row["model_name"] == embedding_fingerprint()
+
+
 def test_full_run_indexes_every_file_exactly_once(test_env, make_pdf, manuals_dir):
     axiom = make_pdf(["Bunn Axiom brewer installation guide. Step 1: connect water line."], name="axiom.pdf")
     cma = make_pdf(["CMA 180UC dishmachine owner's manual. Rinse arm cleaning steps follow."], name="cma.pdf")

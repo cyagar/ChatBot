@@ -15,6 +15,20 @@ import numpy as np
 from app.config import get_settings
 
 
+def embedding_fingerprint() -> str:
+    """P1-15 (external review, 2026-09-21): embeddings.model_name used to
+    store only settings.embedding_model (e.g. "BAAI/bge-small-en-v1.5"),
+    never the revision -- bumping embedding_model_revision to a different
+    commit of the same repo (different weights, a different vector space)
+    left every existing row's model_name identical, so nothing detected
+    that its vectors were now incompatible with fresh ones, and
+    vector_search() compared them anyway. This fingerprint is what actually
+    gets written and filtered on now: same model name AND revision, not
+    just the name."""
+    settings = get_settings()
+    return f"{settings.embedding_model}@{settings.embedding_model_revision}"
+
+
 @lru_cache(maxsize=1)
 def get_model():
     from sentence_transformers import SentenceTransformer

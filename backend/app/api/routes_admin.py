@@ -15,6 +15,7 @@ from app.ingestion.chunking import CURRENT_CHUNKING_VERSION
 from app.ingestion.extractors import CURRENT_EXTRACTION_VERSION
 from app.ingestion.pipeline import _INGEST_LOCK, ingest_all
 from app.ingestion.scheduler import is_enabled as scheduler_is_enabled
+from app.retrieval.embeddings import embedding_fingerprint
 from app.retrieval.search import hybrid_search
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -707,6 +708,19 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
         active_document_count = conn.execute(
             "SELECT COUNT(*) c FROM documents WHERE deactivated_at IS NULL"
         ).fetchone()["c"]
+        # P1-15 (external review, 2026-09-21): a model/revision change makes
+        # every existing embedding stale (see embedding_fingerprint's
+        # docstring) with no error anywhere -- search just quietly falls
+        # back to lexical-only for the affected chunks. Surfaced here so an
+        # admin who bumps EMBEDDING_MODEL_REVISION has a way to notice a
+        # re-index is needed, instead of only ever finding out by search
+        # quality silently degrading.
+        chunks_needing_reembedding = conn.execute(
+            "SELECT COUNT(*) c FROM chunks c "
+            "LEFT JOIN embeddings e ON e.chunk_id = c.id AND e.model_name = %s "
+            "WHERE e.chunk_id IS NULL",
+            (embedding_fingerprint(),),
+        ).fetchone()["c"]
 
     hours_since_last_success = None
     is_stale = True
@@ -738,6 +752,7 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
         "scheduler_enabled": scheduler_is_enabled(settings),
         "staleness_threshold_hours": settings.ingestion_staleness_threshold_hours,
         "is_stale": is_stale,
+        "chunks_needing_reembedding": chunks_needing_reembedding,
     }
 
 

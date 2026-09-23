@@ -19,7 +19,7 @@ import numpy as np
 
 from app.config import get_settings
 from app.db import get_conn
-from app.retrieval.embeddings import blob_to_vector, embed_query
+from app.retrieval.embeddings import blob_to_vector, embed_query, embedding_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -133,11 +133,21 @@ def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POO
         WHERE d.status IN ('indexed','partial')
           AND d.deactivated_at IS NULL
           AND d.review_status = 'approved'
+          -- P1-15 (external review, 2026-09-21): a chunk whose only
+          -- embedding predates the currently configured model/revision
+          -- must not be compared against a fresh query vector -- the two
+          -- live in different vector spaces, and cosine similarity between
+          -- them is meaningless, not just "a bit off". Excluded here rather
+          -- than filtered after the fact, the same graceful-degradation
+          -- path as an empty candidate set below: those chunks fall back to
+          -- lexical-only search until re-embedded, instead of polluting
+          -- results with noise no one would guess was there.
+          AND e.model_name = %s
           {revision_sql}
           {filter_sql}
     """
     with get_conn() as conn:
-        rows = conn.execute(sql, filter_params).fetchall()
+        rows = conn.execute(sql, [embedding_fingerprint(), *filter_params]).fetchall()
 
     if not rows:
         # No eligible chunks (empty corpus, or none for this machine) -- skip

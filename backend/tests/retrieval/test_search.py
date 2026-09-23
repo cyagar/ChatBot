@@ -57,7 +57,7 @@ def _seed_two_machines_with_similar_language(conn):
 
 
 def _embed_seeded_chunks():
-    from app.retrieval.embeddings import embed_texts, vector_to_blob
+    from app.retrieval.embeddings import embed_texts, embedding_fingerprint, vector_to_blob
 
     with get_conn() as conn:
         rows = conn.execute("SELECT id, content FROM chunks ORDER BY id").fetchall()
@@ -65,7 +65,7 @@ def _embed_seeded_chunks():
         for row, vec in zip(rows, vectors):
             conn.execute(
                 "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (%s, %s, %s, %s)",
-                (row["id"], "test-model", len(vec), vector_to_blob(vec)),
+                (row["id"], embedding_fingerprint(), len(vec), vector_to_blob(vec)),
             )
 
 
@@ -99,7 +99,7 @@ def test_vector_search_calls_embed_query_when_eligible_chunks_exist(test_env, mo
     import numpy as np
 
     from app.retrieval import search as search_module
-    from app.retrieval.embeddings import vector_to_blob
+    from app.retrieval.embeddings import embedding_fingerprint, vector_to_blob
 
     with get_conn() as conn:
         conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
@@ -115,8 +115,8 @@ def test_vector_search_calls_embed_query_when_eligible_chunks_exist(test_env, mo
             "VALUES (1, 1, 'text', 'Some manual content here.', 25, 0)"
         )
         conn.execute(
-            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, 'test-model', 2, %s)",
-            (vector_to_blob(np.array([1.0, 0.0], dtype=np.float32)),),
+            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, %s, 2, %s)",
+            (embedding_fingerprint(), vector_to_blob(np.array([1.0, 0.0], dtype=np.float32))),
         )
 
     calls = []
@@ -136,15 +136,14 @@ def test_vector_search_calls_embed_query_when_eligible_chunks_exist(test_env, mo
     # model's 384. vector_search reads dim per-row, so this is not a bug.
 
 
-def test_vector_search_returns_empty_list_without_raising_when_embedding_model_fails(test_env, monkeypatch):
-    """Advisor-caught gap in the first pass at P1-5: the review's ask was an
-    honest not_found response when the model is unavailable, but throwing away
-    a whole hybrid_search() call (including a perfectly working lexical result)
-    over the *vector* half failing was stricter than necessary -- and the
-    P1-2 fix already established the precedent of degrading to a labeled
-    lexical-only mode rather than refusing outright. vector_search() must
-    swallow an embed_query() failure and return [] so hybrid_search() (below)
-    can still return real, citable lexical results."""
+def test_p1_15_vector_search_excludes_a_chunk_embedded_under_a_different_model_fingerprint(test_env, monkeypatch):
+    """The actual bug: embeddings.model_name used to record only the model
+    name, not the revision -- a stale row (from before a model/revision
+    change) looked eligible and got compared against a fresh query vector
+    from a DIFFERENT vector space, producing meaningless similarity scores.
+    vector_search must now exclude it -- proven here by making it the ONLY
+    embedding for the only eligible chunk, so an unfiltered query would
+    return it and a correctly filtered one returns []."""
     import numpy as np
 
     from app.retrieval import search as search_module
@@ -164,8 +163,45 @@ def test_vector_search_returns_empty_list_without_raising_when_embedding_model_f
             "VALUES (1, 1, 'text', 'Some manual content here.', 25, 0)"
         )
         conn.execute(
-            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, 'test-model', 2, %s)",
-            (vector_to_blob(np.array([1.0, 0.0], dtype=np.float32)),),
+            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, %s, 2, %s)",
+            ("some-old-model@old-revision", vector_to_blob(np.array([1.0, 0.0], dtype=np.float32))),
+        )
+
+    monkeypatch.setattr(search_module, "embed_query", lambda text: np.array([1.0, 0.0], dtype=np.float32))
+
+    assert search_module.vector_search("anything", machine_id=1) == []
+
+
+def test_vector_search_returns_empty_list_without_raising_when_embedding_model_fails(test_env, monkeypatch):
+    """Advisor-caught gap in the first pass at P1-5: the review's ask was an
+    honest not_found response when the model is unavailable, but throwing away
+    a whole hybrid_search() call (including a perfectly working lexical result)
+    over the *vector* half failing was stricter than necessary -- and the
+    P1-2 fix already established the precedent of degrading to a labeled
+    lexical-only mode rather than refusing outright. vector_search() must
+    swallow an embed_query() failure and return [] so hybrid_search() (below)
+    can still return real, citable lexical results."""
+    import numpy as np
+
+    from app.retrieval import search as search_module
+    from app.retrieval.embeddings import embedding_fingerprint, vector_to_blob
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES ('axiom.pdf', 'axiom.pdf', "
+            "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
+        )
+        conn.execute("INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (1, 1, 'approved')")
+        conn.execute(
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 1, 'text', 'Some manual content here.', 25, 0)"
+        )
+        conn.execute(
+            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (1, %s, 2, %s)",
+            (embedding_fingerprint(), vector_to_blob(np.array([1.0, 0.0], dtype=np.float32))),
         )
 
     def exploding_embed_query(text):

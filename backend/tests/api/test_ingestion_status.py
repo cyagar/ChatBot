@@ -99,6 +99,38 @@ def test_completed_with_errors_still_counts_as_a_successful_sync(test_env):
     assert body["last_success_trigger"] == "scheduled"
 
 
+def test_p1_15_status_reports_chunks_needing_reembedding(test_env):
+    """A chunk whose only embedding is from a different model/revision than
+    the currently configured one (see embedding_fingerprint's docstring)
+    must be counted here -- otherwise an admin who bumps
+    EMBEDDING_MODEL_REVISION has no way to know a re-index is needed;
+    search would just silently degrade to lexical-only for those chunks."""
+    from app.retrieval.embeddings import vector_to_blob
+    import numpy as np
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES ('axiom.pdf', 'axiom.pdf', "
+            "'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, 'indexed', 'approved')"
+        )
+        cur = conn.execute(
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (1, 1, 'text', 'Some manual content here.', 25, 0) RETURNING id"
+        )
+        chunk_id = cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (%s, %s, %s, %s)",
+            (chunk_id, "some-old-model@old-revision", 4, vector_to_blob(np.zeros(4, dtype=np.float32))),
+        )
+    _register_admin()
+
+    body = client.get("/api/admin/ingestion/status").json()
+    assert body["chunks_needing_reembedding"] == 1
+
+
 def test_last_success_status_distinguishes_clean_from_error_runs(test_env):
     """Independent follow-up review 2026-08-24 P0-6: staleness correctly
     treats completed_with_errors as a success (the test above), but the

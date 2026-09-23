@@ -28,7 +28,7 @@ def _embed_seeded_chunks():
     generic "nothing clearly answers" template instead of quoting either
     chunk -- which would give the resolver no real content words to chain
     forward, defeating the point of this test."""
-    from app.retrieval.embeddings import embed_texts, vector_to_blob
+    from app.retrieval.embeddings import embed_texts, embedding_fingerprint, vector_to_blob
 
     with get_conn() as conn:
         rows = conn.execute("SELECT id, content FROM chunks ORDER BY id").fetchall()
@@ -36,7 +36,7 @@ def _embed_seeded_chunks():
         for row, vec in zip(rows, vectors):
             conn.execute(
                 "INSERT INTO embeddings (chunk_id, model_name, dim, vector) VALUES (%s, %s, %s, %s)",
-                (row["id"], "test-model", len(vec), vector_to_blob(vec)),
+                (row["id"], embedding_fingerprint(), len(vec), vector_to_blob(vec)),
             )
 
 

@@ -609,20 +609,25 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
 
 
 def _embed_pending_chunks(batch_size: int = 64) -> int:
-    """Embed every chunk that has no embedding yet. Resumable: re-running only
-    processes what's missing."""
-    from app.retrieval.embeddings import embed_texts, get_model, vector_to_blob
+    """Embed every chunk with no embedding for the CURRENTLY configured model
+    fingerprint (model name + revision -- see embedding_fingerprint's
+    docstring, P1-15). Resumable: re-running only processes what's missing --
+    which now includes a chunk whose only embedding row is from a since
+    -changed model/revision, not just one with no row at all."""
+    from app.retrieval.embeddings import embed_texts, embedding_fingerprint, vector_to_blob
 
+    fingerprint = embedding_fingerprint()
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT c.id, c.content FROM chunks c "
-            "LEFT JOIN embeddings e ON e.chunk_id = c.id WHERE e.chunk_id IS NULL"
+            "LEFT JOIN embeddings e ON e.chunk_id = c.id AND e.model_name = %s "
+            "WHERE e.chunk_id IS NULL",
+            (fingerprint,),
         ).fetchall()
 
     if not rows:
         return 0
 
-    model_name = get_settings().embedding_model
     total = 0
     for start in range(0, len(rows), batch_size):
         batch = rows[start : start + batch_size]
@@ -639,7 +644,7 @@ def _embed_pending_chunks(batch_size: int = 64) -> int:
                     "VALUES (%s, %s, %s, %s) "
                     "ON CONFLICT (chunk_id) DO UPDATE SET "
                     "model_name = EXCLUDED.model_name, dim = EXCLUDED.dim, vector = EXCLUDED.vector",
-                    (row["id"], model_name, len(vec), vector_to_blob(vec)),
+                    (row["id"], fingerprint, len(vec), vector_to_blob(vec)),
                 )
         total += len(batch)
     return total
