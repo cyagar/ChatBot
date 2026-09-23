@@ -7,7 +7,7 @@ accessory-context and filename-priority fix for wrong-machine links) to
 documents that were ingested before that fix existed, without the cost of a
 full re-index (re-extraction, re-chunking, re-embedding all documents).
 
-Per-field, not per-document (independent follow-up review P1-10): a document
+Per-field, not per-document: a document
 with a human-corrected machine_links override still gets its doc_number
 refreshed and its stale notes cleared; a document with a corrected title
 still gets its machine links re-synced. Never overwrites a field a human has
@@ -47,12 +47,10 @@ from app.ingestion.extractors import extract  # noqa: E402
 from app.ingestion.metadata import extract_metadata  # noqa: E402
 from app.ingestion.pipeline import _get_or_create_machine, _get_or_create_manufacturer  # noqa: E402
 
-# P2-05 (external review, 2026-09-21): removed an OVERRIDABLE_FIELDS tuple
-# here that nothing ever referenced -- the actual overridable-field list
-# lives inline as `simple_fields` below (manufacturer/doc_type/title/
-# revision; machine_links has its own separate handling further down).
-# doc_number is deliberately absent from both: there is no way for a human
-# to override it via PATCH /api/admin/documents/{id}
+# The overridable-field list lives inline as `simple_fields` below
+# (manufacturer/doc_type/title/revision; machine_links has its own separate
+# handling further down). doc_number is deliberately absent: there is no way
+# for a human to override it via PATCH /api/admin/documents/{id}
 # (app/api/routes_admin.py's MetadataCorrection), so it's always safe to
 # refresh -- see the doc_number block below.
 
@@ -141,17 +139,14 @@ def reindex_documents(conn, storage_dir: Path, ocr_available: bool, apply: bool)
             report.errors.append((doc["original_filename"], repr(e)))
             continue
 
-        # P1-10 (external review, 2026-09-21): extract() returning normally
-        # with status="failed"/"unsupported" (a corrupt or now-unreadable
-        # stored file, an extractor regression) used to fall straight
-        # through to extract_metadata() on that near-empty ExtractedDocument
-        # -- the resulting metadata (manufacturer/title/etc. all None or
-        # filename-derived only) then looked like a genuine change from the
-        # document's real, good existing values and got written over them.
-        # Only a raised exception was ever treated as "this document isn't
-        # safely reindexable right now" -- this is the same thing by a
-        # different route and must be handled the same way: skip the
-        # document entirely, write nothing for it.
+        # extract() returning normally with status="failed"/"unsupported"
+        # (a corrupt or now-unreadable stored file, an extractor regression)
+        # must be treated the same as a raised exception -- passing that
+        # near-empty ExtractedDocument to extract_metadata() would produce
+        # metadata (manufacturer/title/etc. all None or filename-derived
+        # only) that looks like a genuine change from the document's real,
+        # good existing values and overwrites them. Skip the document
+        # entirely instead, write nothing for it.
         if extracted.status in ("failed", "unsupported"):
             report.errors.append(
                 (doc["original_filename"], f"extraction status={extracted.status!r}: {extracted.reason}")
@@ -194,19 +189,15 @@ def reindex_documents(conn, storage_dir: Path, ocr_available: bool, apply: bool)
                 conn.execute("UPDATE documents SET doc_number = %s WHERE id = %s", (meta.doc_number, doc["id"]))
 
         # --- machine_links ---
-        # P1-10 (external review, 2026-09-21): two bugs here. (1) Old links
-        # were identified by model_name ALONE, ignoring manufacturer -- the
-        # same model name from two different manufacturers (a real, expected
-        # catalog collision) compared as identical. (2) EVERY confidence<1.0
-        # row was deleted on any change, including an admin-approved or
-        # -rejected link: review_document_machine_link (routes_admin.py)
+        # Old links are identified by (manufacturer, model_name) together,
+        # not model_name alone -- the same model name from two different
+        # manufacturers is a real, expected catalog collision. Only a
+        # still-pending (never human-reviewed) link may be added or removed
+        # by this script; review_document_machine_link (routes_admin.py)
         # only ever updates review_status, never confidence, so an approved
-        # link is routinely still <1.0 -- a reindex could silently take an
-        # approved manual out of a machine's retrieval and replace it with a
-        # fresh, unreviewed pending proposal. Only a still-pending (never
-        # human-reviewed) link may be added or removed by this script; an
-        # approved/rejected link is a human decision and survives
-        # regardless of what the current extraction proposes.
+        # link is routinely still <1.0 -- an approved/rejected link is a
+        # human decision and survives regardless of what the current
+        # extraction proposes.
         if "machine_links" in overridden:
             result.skipped_overridden_fields.append("machine_links")
         else:

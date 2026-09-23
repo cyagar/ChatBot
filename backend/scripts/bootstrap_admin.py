@@ -1,8 +1,7 @@
 """CLI: create the very first administrator account.
 
-Public self-registration can no longer create an administrator (independent
-follow-up review P0-5: the old "first HTTP registrant becomes admin" design
-was a public race). This only works while the users table is empty.
+Public self-registration can no longer create an administrator. This only
+works while the users table is empty.
 
 Usage (from backend/, or `docker compose exec app` in the container):
     py scripts/bootstrap_admin.py --email admin@example.com

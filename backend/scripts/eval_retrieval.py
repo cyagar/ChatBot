@@ -4,13 +4,7 @@ Runs each case in data/eval/ground_truth.json through the REAL chat API
 (FastAPI TestClient, real retrieval, real embeddings, the configured
 AI_PROVIDER -- nothing mocked) so the eval fidelity matches production.
 
-P0-11 (external review, 2026-09-21) rewrote this after the Postgres
-migration broke it outright (it opened a SQLite backup of a `db_path_resolved`
-setting that no longer exists) and after the review found the original
-design unsafe even once patched: it could touch the live, configured
-PostgreSQL database directly.
-
-This version REQUIRES a disposable, point-in-time Postgres clone -- never
+This script REQUIRES a disposable, point-in-time Postgres clone -- never
 production, never the shared Neon "test" branch tests/ uses (that branch is
 schema-only, with no real corpus to evaluate retrieval against). Create one
 with the Neon CLI before running this script:
@@ -53,7 +47,7 @@ PROD_ENV_FILE = Path(os.environ.get("TMA_EVAL_PROD_ENV_FILE_FOR_TESTS") or (BACK
 # Below this overall pass rate, or if EITHER retrieval hit rate or
 # citation-support rate falls below its own threshold, the process exits
 # nonzero -- a report full of FAILs that still exits 0 is worse than no
-# report at all (P0-11: "failed cases still leave CLI exit code zero").
+# report at all.
 MIN_OVERALL_PASS_RATE = 0.80
 MIN_RETRIEVAL_HIT_RATE = 0.80
 MIN_CITATION_SUPPORT_RATE = 0.80
@@ -122,16 +116,14 @@ client = TestClient(app)
 
 
 def get_or_create_eval_user() -> None:
-    """P0-5 (independent follow-up review) closed public self-registration --
-    the original version of this function's `client.post("/api/auth/register",
-    ...)` call would 404/422 against every real deployment since then. This
-    clone already has production's real users on it (it's a branch OF
-    production), so app.auth.bootstrap.bootstrap_admin (which refuses
-    outright when any user exists) isn't usable here either. Inserted
-    directly with the same shape /api/auth/register's own INSERT uses --
-    this is the account state a real invite-registration would produce,
-    without needing a production admin's real (unknown to this script)
-    password to issue that invitation through the API first."""
+    """Public self-registration is closed and this clone already has
+    production's real users on it (it's a branch OF production), so
+    app.auth.bootstrap.bootstrap_admin (which refuses outright when any user
+    exists) isn't usable here either. Inserted directly with the same shape
+    /api/auth/register's own INSERT uses -- this is the account state a real
+    invite-registration would produce, without needing a production admin's
+    real (unknown to this script) password to issue that invitation through
+    the API first."""
     password = secrets.token_urlsafe(18)
     with get_conn() as conn:
         existing = conn.execute("SELECT id FROM users WHERE email = %s", (EVAL_EMAIL,)).fetchone()
@@ -222,13 +214,12 @@ def run_case(case: dict) -> dict:
 
     keywords = case.get("expected_keywords", [])
     if keywords:
-        # P0-11: the old check searched the model's own free-form answer
-        # text as well as cited excerpts -- a keyword appearing ONLY in
-        # generated prose (never actually quoted from a cited chunk) passed,
-        # which is exactly "an uncited invented answer word can pass" from
-        # the review. Excerpts are verbatim chunk content returned by the
-        # API, not model-generated text, so requiring the keyword there is a
-        # real claim-to-evidence check, not just a claim-to-output one.
+        # Checked against cited excerpts, not the model's free-form answer
+        # text -- excerpts are verbatim chunk content returned by the API,
+        # not model-generated text, so requiring the keyword there is a real
+        # claim-to-evidence check, not just a claim-to-output one. A keyword
+        # appearing only in generated prose, never actually quoted from a
+        # cited chunk, must not pass.
         excerpt_haystack = " ".join(c.get("excerpt", "") for c in citations).lower()
         found = [k for k in keywords if k.lower() in excerpt_haystack]
         result["citation_support"] = len(found) == len(keywords)
@@ -241,14 +232,12 @@ def run_case(case: dict) -> dict:
 
 
 def run_source_withdrawal_check() -> dict:
-    """P0-11 (\"include source withdrawal in the ground truth\") and P0-13
-    (this same review, fixed earlier in this batch): rather than inventing a
-    new ground-truth case with a hand-picked expected answer (the file's own
-    header insists nothing in it is invented), this deactivates the document
-    an ALREADY-PASSING case depends on -- directly on the disposable clone,
-    never production -- and re-runs that exact case, asserting its citation
-    disappears. The expectation here is mechanically derived from the first
-    run, not authored."""
+    """Rather than inventing a new ground-truth case with a hand-picked
+    expected answer (the file's own header insists nothing in it is
+    invented), this deactivates the document an ALREADY-PASSING case depends
+    on -- directly on the disposable clone, never production -- and re-runs
+    that exact case, asserting its citation disappears. The expectation here
+    is mechanically derived from the first run, not authored."""
     case = next((c for c in json.loads(GROUND_TRUTH_PATH.read_text(encoding="utf-8"))["cases"]
                  if c["id"] == "troubleshoot-axiom-heating"), None)
     if case is None:
@@ -339,8 +328,7 @@ def main() -> int:
         f"is not independent validation of that threshold, only confirmation the tuned value "
         f"still passes the cases it was tuned on. Treat it as a regression check, not "
         f"generalization evidence, until it is re-measured against held-out, technician-written "
-        f"questions (not yet added to data/eval/ground_truth.json as of this rewrite -- see "
-        f"the P0-11 commit message)."
+        f"questions (not yet added to data/eval/ground_truth.json)."
     )
     lines.append("")
     lines.append("## Per-case results")

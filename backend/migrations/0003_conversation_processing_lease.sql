@@ -1,9 +1,9 @@
--- P0-04 (external review, 2026-09-21): the plain is_processing boolean
--- (migration 0002) is cleared only in a Python `finally` -- a killed worker,
--- a lost DB connection during release, or a process shutdown between claim
--- and `finally` leaves it true forever, rejecting every future
--- question/retry with 409 with no way out. These columns turn the boolean
--- claim into a real lease: processing_claimed_at records when the current
+-- The plain is_processing boolean (migration 0002) alone is only cleared by
+-- a Python `finally` -- a killed worker, a lost DB connection during
+-- release, or a process shutdown between claim and `finally` would leave it
+-- true forever, rejecting every future question/retry with 409 with no way
+-- out. These columns turn the boolean claim into a real lease:
+-- processing_claimed_at records when the current
 -- claim was taken, so a claim older than PROCESSING_LEASE_SECONDS
 -- (app/api/routes_chat.py) can be reclaimed by a later request instead of
 -- blocking forever. processing_attempt_id is a random fencing token

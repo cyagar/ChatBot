@@ -2,9 +2,8 @@
 to a real Drive file, and does the DB's recorded sha256 still match its
 current content?
 
-Checked in per independent follow-up review P0-4: the 2026-08-21
-local_directory -> google_drive source_ref remap (paired by sha256, with
-exact-filename matching to break the 5 shared-hash collisions, and
+The local_directory -> google_drive source_ref remap (paired by sha256, with
+exact-filename matching to break shared-hash collisions, and
 deterministic-but-arbitrary pairing for the small remainder of genuinely
 byte-identical content) was applied as a one-off interactive script against
 the live DB, not a checked-in migration. That script and its output mapping

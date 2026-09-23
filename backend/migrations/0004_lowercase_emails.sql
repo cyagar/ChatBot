@@ -1,11 +1,8 @@
--- P1-20 (external review, 2026-09-21): users.email/invitations.email are
--- TEXT with case-sensitive (or, for invitations, no) uniqueness, and every
--- write/read compared whatever case was typed -- "John@Example.com" and
--- "john@example.com" could become two separate accounts, and a user who
--- registered with mixed case could not log in with a lowercased address.
--- app/auth/security.py's normalize_email is now the single point every
+-- app/auth/security.py's normalize_email is the single point every
 -- registration/login/invitation-creation goes through -- this backfills
--- existing rows to match and adds a database-level backstop.
+-- existing rows to match and adds a database-level backstop, so
+-- "John@Example.com" and "john@example.com" can never become two separate
+-- accounts.
 --
 -- The backfill UPDATEs fail loudly (aborting this whole migration, same as
 -- any other migration failure -- see run_migrations's per-migration

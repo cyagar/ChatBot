@@ -1,13 +1,7 @@
 """CLI: create or reset a local-only technician demo account.
 
-P0A-6: the demo technician account used to be seeded by hand-editing
-`data/db/app.db` with a raw SQL INSERT, with its plaintext password
-committed straight into `android/README.md`. That meant anyone with repo
-access had a live credential, and there was no repeatable way to recreate
-the account (e.g. after wiping the dev database) without redoing the SQL by
-hand. This script replaces both: it never prints or commits a password, and
-running it again with a new --password rotates the existing account instead
-of failing.
+Never prints or commits a password; running it again with a new --password
+rotates the existing account instead of failing.
 
 Refuses to run outside APP_ENV=development, same spirit as
 `Settings.validate_for_startup()` -- this is dev-only seeding, not something
