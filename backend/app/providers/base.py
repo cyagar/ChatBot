@@ -387,7 +387,10 @@ def parse_and_validate(
     text it attributed to that excerpt. The `answer` shown to the
     technician is assembled here from the validated claims/steps, never
     taken as free prose from the model, so nothing unvalidated reaches
-    display.
+    display. Each claim/step line carries inline [n] markers keyed to its
+    position in the returned `citations` list, so a technician can tell
+    which specific citation backs which specific line instead of only
+    seeing one flattened source list for the whole answer.
 
     `machine_label` is the machine name given to the model in the prompt
     (see `_JSON_SHAPE_INSTRUCTION`'s "Selected machine:" line) -- passed
@@ -461,6 +464,24 @@ def parse_and_validate(
         if not _warning_supported(item.text, _cited_content(item, passages)):
             return None
 
+    # citations is built before the answer text so each claim/step line can
+    # carry an inline [n] marker keyed to that same list's (1-based) order --
+    # the flattened citations list alone doesn't say which claim a given
+    # citation actually backs, and Android's citation cards are numbered in
+    # this same order (ChatScreen.kt's `citations.forEachIndexed`).
+    citations: list[Citation] = []
+    seen_chunk_ids: set[int] = set()
+    for item in claims + steps + warnings:
+        for c in _item_citations(item, passages):
+            if c.chunk_id not in seen_chunk_ids:
+                seen_chunk_ids.add(c.chunk_id)
+                citations.append(c)
+    citation_index = {c.chunk_id: i + 1 for i, c in enumerate(citations)}
+
+    def markers(item: _ClaimItem) -> str:
+        indices = sorted({citation_index[passages[n - 1].chunk_id] for n in item.excerpt_numbers})
+        return "".join(f"[{i}]" for i in indices)
+
     # Does not gate on a strict relevance threshold -- instead the model
     # self-reports low confidence (see
     # SYSTEM_PROMPT above and each provider's _JSON_SHAPE_INSTRUCTION) and
@@ -476,21 +497,13 @@ def parse_and_validate(
         )
         lines.append("")
     for c in claims:
-        lines.append(f"- {c.text}")
+        lines.append(f"- {c.text} {markers(c)}")
     if steps:
         if claims:
             lines.append("")
         lines.append("**Steps:**")
         for i, s in enumerate(steps, start=1):
-            lines.append(f"{i}. {s.text}")
-
-    citations: list[Citation] = []
-    seen_chunk_ids: set[int] = set()
-    for item in claims + steps + warnings:
-        for c in _item_citations(item, passages):
-            if c.chunk_id not in seen_chunk_ids:
-                seen_chunk_ids.add(c.chunk_id)
-                citations.append(c)
+            lines.append(f"{i}. {s.text} {markers(s)}")
 
     cited_passages = [passages[n - 1] for item in (claims + steps + warnings) for n in item.excerpt_numbers]
     conflict_note = detect_conflict(cited_passages) if cited_passages else None

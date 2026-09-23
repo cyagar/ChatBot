@@ -130,6 +130,40 @@ def test_genuinely_supported_answer_passes():
     assert "81-118-31" in result.answer
 
 
+def test_p2_08_each_claim_and_step_carries_an_inline_marker_for_its_own_citation():
+    """Two claims cite two different excerpts -- each line's marker must
+    point at that citation's own position in result.citations, not just
+    list every citation on every line."""
+    passages = [
+        _passage(1, 1, "Error E4 indicates an open thermistor circuit."),
+        _passage(2, 2, "The replacement part is 81-118-31.", filename="parts.pdf"),
+    ]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [
+            {"text": "Error E4 indicates an open thermistor circuit.", "cited_excerpt_numbers": [1]},
+            {"text": "The replacement part is 81-118-31.", "cited_excerpt_numbers": [2]},
+        ],
+        "steps": [{"text": "Order part 81-118-31 and replace the sensor.", "cited_excerpt_numbers": [1, 2]}],
+        "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test")
+    assert result is not None
+    citation_index = {c.chunk_id: i + 1 for i, c in enumerate(result.citations)}
+    lines = result.answer.split("\n")
+
+    e4_line = next(l for l in lines if "E4" in l)
+    assert f"[{citation_index[1]}]" in e4_line
+    assert f"[{citation_index[2]}]" not in e4_line
+
+    part_line = next(l for l in lines if "81-118-31" in l and l.startswith("-"))
+    assert f"[{citation_index[2]}]" in part_line
+    assert f"[{citation_index[1]}]" not in part_line
+
+    step_line = next(l for l in lines if "Order part" in l)
+    assert f"[{citation_index[1]}]" in step_line and f"[{citation_index[2]}]" in step_line
+
+
 def test_low_confidence_answer_surfaces_a_caveat_in_the_response():
     """Owner decision (2026-09-16): threshold shouldn't be super high, but a
     low-confidence answer must say so in the response text itself. Every
