@@ -121,7 +121,7 @@ fun MachinesScreen(
                 modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
             )
 
-            if (!state.loading && listToShow.isEmpty()) {
+            if (!state.loading && state.error == null && listToShow.isEmpty()) {
                 Text(
                     if (state.query.isBlank()) "No recent machines yet -- search above to get started."
                     else "No matching machines found.",

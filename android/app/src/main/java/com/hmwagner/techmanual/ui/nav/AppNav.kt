@@ -1,5 +1,8 @@
 package com.hmwagner.techmanual.ui.nav
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -71,6 +75,12 @@ import kotlinx.coroutines.withTimeoutOrNull
 internal class HomeSelectionViewModel : ViewModel() {
     var selectedId by mutableStateOf<Int?>(null)
     var selectedLabel by mutableStateOf<String?>(null)
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 private object Routes {
@@ -327,10 +337,16 @@ private fun HomeContent(selection: HomeSelectionViewModel, isExpanded: Boolean) 
     // ?: -1)` below to see a changed value and recompose a fresh
     // SinglePaneHome/MachinesViewModel while Home is still technically
     // alive.
+    // Skipped while the Activity is only being recreated for a configuration
+    // change (rotation, split-screen): the ViewModel outlives that, and
+    // clearing here would drop the open conversation on every rotation.
+    val activity = LocalContext.current.findActivity()
     DisposableEffect(Unit) {
         onDispose {
-            selection.selectedId = null
-            selection.selectedLabel = null
+            if (activity?.isChangingConfigurations != true) {
+                selection.selectedId = null
+                selection.selectedLabel = null
+            }
         }
     }
 

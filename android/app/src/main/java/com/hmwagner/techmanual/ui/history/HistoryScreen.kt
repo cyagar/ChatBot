@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hmwagner.techmanual.network.ConversationOut
 import com.hmwagner.techmanual.ui.common.LogoutAction
+import com.hmwagner.techmanual.util.formatLocalTimestamp
 
 /**
  * Past conversations across all machines, most recently updated first, via
@@ -129,9 +130,7 @@ private fun ConversationRow(conv: ConversationOut, onClick: () -> Unit) {
         supportingContent = { Text(conv.machine_label ?: "No machine selected") },
         trailingContent = {
             Text(
-                // Backend timestamps are "YYYY-MM-DD HH:MM:SS" -- trim to the
-                // minute, which is all a "recently updated" list needs.
-                conv.updated_at.take(16),
+                formatLocalTimestamp(conv.updated_at),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
