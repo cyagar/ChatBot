@@ -92,6 +92,10 @@ data class MessageOut(
     // lets a reload show "already rated" instead of resetting to blank
     // buttons, the same reason is_saved exists.
     val feedback_rating: String? = null,
+    // On an assistant message: the id of the user message it answers.
+    val reply_to_message_id: Int? = null,
+    // On a user message: the Idempotency-Key it was sent with.
+    val idempotency_key: String? = null,
 )
 
 @Serializable
@@ -117,7 +121,11 @@ data class EvidenceOut(
 // ErrorMessages.kt's correlationSuffix() reads this to surface it in every
 // error message shown to a technician.
 @Serializable
-data class ApiErrorBody(val detail: String? = null, val correlation_id: String? = null)
+data class ApiErrorBody(
+    val detail: String? = null,
+    val correlation_id: String? = null,
+    val code: String? = null,
+)
 
 @Serializable
 data class SavedAnswerOut(

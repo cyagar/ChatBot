@@ -344,14 +344,15 @@ def test_p0_05_b_retry_uses_the_failed_answers_own_machine_not_the_conversations
             (user_id,),
         )
         conv_id = conv_cur.fetchone()["id"]
-        conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, machine_id) VALUES (%s, 'user', 'brew temp?', 1)",
+        question_id = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, machine_id) VALUES (%s, 'user', 'brew temp?', 1) "
+            "RETURNING id",
             (conv_id,),
-        )
+        ).fetchone()["id"]
         msg_cur = conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, machine_id, answer_status) "
-            "VALUES (%s, 'assistant', '', 1, 'failed') RETURNING id",
-            (conv_id,),
+            "INSERT INTO messages (conversation_id, role, content, machine_id, answer_status, reply_to_message_id) "
+            "VALUES (%s, 'assistant', '', 1, 'failed', %s) RETURNING id",
+            (conv_id, question_id),
         )
         failed_msg_id = msg_cur.fetchone()["id"]
         # Technician legally switches machines afterward (processing already

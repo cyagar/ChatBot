@@ -3,6 +3,8 @@ package com.hmwagner.techmanual.ui.chat
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.ApiService
 import com.hmwagner.techmanual.network.CitationOut
+import com.hmwagner.techmanual.util.InMemoryPendingSendStore
+import com.hmwagner.techmanual.util.PendingSendStore
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -44,6 +46,7 @@ class ChatViewModelTest {
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
+        PendingSendStore.current = InMemoryPendingSendStore()
         server = MockWebServer()
         server.start()
 
@@ -145,7 +148,7 @@ class ChatViewModelTest {
                 request.path?.endsWith("/machine") == true -> jsonResponse(
                     """{"id": 1, "machine_id": 7, "machine_label": "Acme 3000", "started_at": "2026-08-24T00:00:00Z", "updated_at": "2026-08-24T00:00:00Z"}"""
                 )
-                request.path?.endsWith("/messages") == true -> {
+                request.path?.contains("/messages") == true -> {
                     reachedReload.countDown()
                     releaseReload.await(2, TimeUnit.SECONDS)
                     jsonResponse("""[{"id": 99, "role": "assistant", "content": "Which model?", "created_at": "2026-08-24T00:00:00Z"}]""")
@@ -187,7 +190,7 @@ class ChatViewModelTest {
                     releaseSend.await(2, TimeUnit.SECONDS)
                     jsonResponse("""{"id": 21, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}""")
                 }
-                request.path?.endsWith("/messages") == true && request.method == "GET" -> jsonResponse(
+                request.path?.contains("/messages") == true && request.method == "GET" -> jsonResponse(
                     """[{"id": 20, "role": "user", "content": "Why won't it start?", "created_at": "2026-08-24T00:00:00Z"},
                         {"id": 21, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}]"""
                 )
@@ -371,17 +374,24 @@ class ChatViewModelTest {
         assertNull(vm.state.value.pendingEcho)
     }
 
+    private fun conflict(code: String) = MockResponse().setResponseCode(409)
+        .setBody("""{"detail": "conflict", "code": "$code", "correlation_id": "c1", "retryable": false}""")
+        .addHeader("Content-Type", "application/json")
+
     @Test
-    fun `a 409 for an already-processing key triggers a refresh that resolves the pending echo`() {
-        var askCount = 0
+    fun `an in-progress replay whose reload finds the reply resolves the pending question`() {
+        var sentKey: String? = null
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when {
-                request.path?.endsWith("/messages") == true && request.method == "POST" -> {
-                    askCount++
-                    MockResponse().setResponseCode(409)
+                request.path?.contains("/messages") == true && request.method == "POST" -> {
+                    sentKey = request.getHeader("Idempotency-Key")
+                    conflict("IDEMPOTENCY_IN_PROGRESS")
                 }
-                request.path?.endsWith("/messages") == true && request.method == "GET" -> jsonResponse(
-                    """[{"id": 9, "role": "assistant", "content": "OK", "created_at": "2026-08-24T00:00:00Z"}]"""
+                request.path?.contains("/messages") == true && request.method == "GET" -> jsonResponse(
+                    """[{"id": 8, "role": "user", "content": "Why won't it start?", "idempotency_key": "$sentKey",
+                         "created_at": "2026-08-24T00:00:00Z"},
+                        {"id": 9, "role": "assistant", "content": "OK", "reply_to_message_id": 8,
+                         "created_at": "2026-08-24T00:00:00Z"}]"""
                 )
                 else -> MockResponse().setResponseCode(404)
             }
@@ -389,33 +399,24 @@ class ChatViewModelTest {
 
         vm.onComposerChange("Why won't it start?")
         vm.send()
-        awaitState { it.messages.isNotEmpty() }
+        awaitState { it.messages.size == 2 }
 
-        assertEquals(1, askCount)
-        assertEquals(1, vm.state.value.messages.size)
-        assertEquals(9, vm.state.value.messages[0].id)
-        assertNull("loadMessages() found the reply, so the pending echo should be resolved, not left dangling", vm.state.value.pendingEcho)
+        assertNull("the reply is correlated to this question, so the pending echo resolves", vm.state.value.pendingEcho)
+        assertNull(PendingSendStore.current.load(1))
     }
 
     @Test
-    fun `a 409 whose reload finds only the persisted user turn keeps the question visibly pending`() {
-        // Covers the harder, and more common, case a server crash or a
-        // still-generating answer actually produces (the favorable case,
-        // where reload already has the assistant's reply, is covered
-        // above): the duplicate-key POST returns 409, but the reload's own
-        // last message is still just the user's own turn -- loadMessages()
-        // must not unconditionally clear pendingEcho on ANY successful GET
-        // regardless, or the retry/processing affordance would vanish while
-        // no answer exists at all.
-        var askCount = 0
+    fun `an in-progress replay whose reload finds only the stored question keeps it visibly pending`() {
+        var sentKey: String? = null
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when {
-                request.path?.endsWith("/messages") == true && request.method == "POST" -> {
-                    askCount++
-                    MockResponse().setResponseCode(409)
+                request.path?.contains("/messages") == true && request.method == "POST" -> {
+                    sentKey = request.getHeader("Idempotency-Key")
+                    conflict("IDEMPOTENCY_IN_PROGRESS")
                 }
-                request.path?.endsWith("/messages") == true && request.method == "GET" -> jsonResponse(
-                    """[{"id": 10, "role": "user", "content": "Why won't it start?", "created_at": "2026-08-24T00:00:00Z"}]"""
+                request.path?.contains("/messages") == true && request.method == "GET" -> jsonResponse(
+                    """[{"id": 10, "role": "user", "content": "Why won't it start?", "idempotency_key": "$sentKey",
+                         "created_at": "2026-08-24T00:00:00Z"}]"""
                 )
                 else -> MockResponse().setResponseCode(404)
             }
@@ -423,29 +424,150 @@ class ChatViewModelTest {
 
         vm.onComposerChange("Why won't it start?")
         vm.send()
-        awaitState { !it.sending && !it.loadingHistory }
+        awaitState { !it.sending && !it.loadingHistory && it.pendingEchoStillProcessing }
 
         val state = vm.state.value
-        assertEquals(1, askCount)
-        assertTrue(
-            "the question must stay visibly pending -- no assistant reply exists yet",
-            state.pendingEcho != null,
-        )
         assertEquals("Why won't it start?", state.pendingEcho?.content)
-        assertTrue(
-            "the reload found the server's OWN persisted copy of this exact question -- that's " +
-                "definitely-accepted-and-still-working, not the generic 'connection lost, unknown' state",
-            state.pendingEchoStillProcessing,
-        )
-        assertFalse(
-            "must not ALSO read as the generic uncertain/connection-lost state",
-            state.pendingEchoUncertain,
-        )
-        assertTrue(
-            "the persisted duplicate of the same question must not ALSO render as a separate message bubble",
-            state.messages.none { it.role == "user" },
-        )
-        assertTrue("the pending status needs an explanation, not a blank banner", state.error?.isNotBlank() == true)
+        assertFalse(state.pendingEchoUncertain)
+        assertTrue("the stored copy must not also render as its own bubble", state.messages.none { it.role == "user" })
+        assertTrue(state.error?.isNotBlank() == true)
+        assertEquals("the pending question survives for a later retry", state.pendingEcho, PendingSendStore.current.load(1))
+    }
+
+    @Test
+    fun `a busy-conversation 409 is a rejection, not proof the question was accepted`() {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path?.contains("/messages") == true && request.method == "POST" -> conflict("CONVERSATION_BUSY")
+                else -> jsonResponse("[]")
+            }
+        }
+
+        vm.onComposerChange("Second question")
+        vm.send()
+        awaitState { !it.sending }
+
+        val state = vm.state.value
+        assertNull(state.pendingEcho)
+        assertEquals("the technician's text comes back to the composer", "Second question", state.composerText)
+        assertNull(PendingSendStore.current.load(1))
+    }
+
+    @Test
+    fun `a second question cannot be sent while the first has no answer yet`() {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+        vm.onComposerChange("First question")
+        vm.send()
+        awaitState { !it.sending }
+        assertTrue(vm.state.value.pendingEchoUncertain)
+
+        vm.onComposerChange("Second question")
+        vm.send()
+
+        assertEquals("First question", vm.state.value.pendingEcho?.content)
+        assertEquals("the second draft stays in the composer", "Second question", vm.state.value.composerText)
+        assertEquals("no second request was made", 3, server.requestCount)
+    }
+
+    @Test
+    fun `an unrelated older assistant reply never clears a pending question`() {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+        vm.onComposerChange("Is this safe to run?")
+        vm.send()
+        awaitState { !it.sending }
+
+        server.enqueue(conversationJsonResponse())
+        server.enqueue(jsonResponse(
+            """[{"id": 3, "role": "user", "content": "An older question", "idempotency_key": "old",
+                 "created_at": "2026-08-24T00:00:00Z"},
+                {"id": 4, "role": "assistant", "content": "An older answer", "reply_to_message_id": 3,
+                 "created_at": "2026-08-24T00:00:00Z"}]"""
+        ))
+        vm.refresh()
+        awaitState { !it.loadingHistory }
+
+        assertEquals("Is this safe to run?", vm.state.value.pendingEcho?.content)
+        assertTrue(vm.state.value.pendingEchoUncertain)
+        assertEquals(2, vm.state.value.messages.size)
+    }
+
+    @Test
+    fun `a pending question survives the ViewModel being recreated`() {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+        vm.onComposerChange("Is this safe to run?")
+        vm.send()
+        awaitState { !it.sending }
+        val original = vm.state.value.pendingEcho
+
+        server.enqueue(conversationJsonResponse())
+        server.enqueue(jsonResponse("[]"))
+        vm = ChatViewModel(conversationId = 1)
+        awaitState { !it.loadingHistory }
+
+        assertEquals("same key and text, so a retry resumes the exact operation", original, vm.state.value.pendingEcho)
+        assertTrue(vm.state.value.pendingEchoUncertain)
+    }
+
+    @Test
+    fun `a reload response that arrives after a newer reload is discarded`() {
+        val releaseFirst = CountDownLatch(1)
+        val firstArrived = CountDownLatch(1)
+        var getCount = 0
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.path?.contains("/messages") != true) return conversationJsonResponse()
+                val n = synchronized(this) { ++getCount }
+                if (n == 1) {
+                    firstArrived.countDown()
+                    releaseFirst.await(2, TimeUnit.SECONDS)
+                    return jsonResponse(
+                        """[{"id": 1, "role": "assistant", "content": "stale", "created_at": "2026-08-24T00:00:00Z"}]"""
+                    )
+                }
+                return jsonResponse(
+                    """[{"id": 2, "role": "assistant", "content": "fresh", "created_at": "2026-08-24T00:00:00Z"}]"""
+                )
+            }
+        }
+
+        vm.refresh()
+        assertTrue(firstArrived.await(2, TimeUnit.SECONDS))
+        vm.refresh()
+        awaitState { it.messages.any { m -> m.content == "fresh" } }
+        releaseFirst.countDown()
+        Thread.sleep(200)
+
+        assertEquals(listOf("fresh"), vm.state.value.messages.map { it.content })
+    }
+
+    @Test
+    fun `earlier messages page in ahead of the newest page`() {
+        val seenQueries = mutableListOf<String>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.path?.contains("/messages") != true) return conversationJsonResponse()
+                seenQueries.add(request.path.orEmpty())
+                return if (request.path?.contains("before=CURSOR1") == true) {
+                    jsonResponse(
+                        """[{"id": 1, "role": "user", "content": "oldest", "created_at": "2026-08-24T00:00:00Z"}]"""
+                    )
+                } else {
+                    jsonResponse(
+                        """[{"id": 5, "role": "user", "content": "newest", "created_at": "2026-08-24T00:00:00Z"}]"""
+                    ).addHeader("X-Next-Cursor", "CURSOR1").addHeader("X-Has-More", "true")
+                }
+            }
+        }
+
+        vm.refresh()
+        awaitState { it.earlierCursor == "CURSOR1" }
+        assertTrue(seenQueries.last().contains("latest=true"))
+
+        vm.loadEarlier()
+        awaitState { !it.loadingEarlier && it.messages.size == 2 }
+
+        assertEquals(listOf("oldest", "newest"), vm.state.value.messages.map { it.content })
+        assertNull("no older page remains", vm.state.value.earlierCursor)
     }
 
     @Test
@@ -532,7 +654,7 @@ class ChatViewModelTest {
                     releaseSend.await(2, TimeUnit.SECONDS)
                     jsonResponse("""{"id": 11, "role": "assistant", "content": "OK", "created_at": "2026-08-24T00:00:00Z"}""")
                 }
-                request.path?.endsWith("/messages") == true && request.method == "GET" -> jsonResponse("[]")
+                request.path?.contains("/messages") == true && request.method == "GET" -> jsonResponse("[]")
                 else -> MockResponse().setResponseCode(404)
             }
         }

@@ -33,11 +33,18 @@ private fun <T> Response<T>.parsedErrorBody(): ApiErrorBody? {
  * be `!isSuccessful` -- like parsedErrorBody, it consumes errorBody()'s
  * stream.
  */
-fun <T> Response<T>.describeError(action: String): String {
-    val correlationId = parsedErrorBody()?.correlation_id
-    return if (correlationId != null) {
+fun <T> Response<T>.describeError(action: String): String = describeErrorWithCode(action).message
+
+/** A failed response's domain error `code` (e.g. CONVERSATION_BUSY) alongside the user-facing message. */
+data class DescribedError(val code: String?, val message: String)
+
+fun <T> Response<T>.describeErrorWithCode(action: String): DescribedError {
+    val body = parsedErrorBody()
+    val correlationId = body?.correlation_id
+    val message = if (correlationId != null) {
         "$action (code ${code()}, ref: $correlationId)."
     } else {
         "$action (code ${code()})."
     }
+    return DescribedError(body?.code, message)
 }

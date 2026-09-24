@@ -678,6 +678,17 @@
             "title": "Id",
             "type": "integer"
           },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
           "is_clarifying_question": {
             "title": "Is Clarifying Question",
             "type": "boolean"
@@ -690,6 +701,17 @@
             "default": false,
             "title": "Is Saved",
             "type": "boolean"
+          },
+          "reply_to_message_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To Message Id"
           },
           "retry_count": {
             "default": 0,
@@ -3152,6 +3174,7 @@
     },
     "/api/conversations/{conversation_id}/messages": {
       "get": {
+        "description": "Oldest-first pages by default (`cursor` pages forward). With\n`latest=true` the newest `limit` messages come back (still oldest-first\nwithin the page); X-Next-Cursor then names the page before it, to be\npassed as `before` to walk backward through a long conversation.",
         "operationId": "get_messages_api_conversations__conversation_id__messages_get",
         "parameters": [
           {
@@ -3189,6 +3212,32 @@
                 }
               ],
               "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "latest",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Latest",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
             }
           },
           {

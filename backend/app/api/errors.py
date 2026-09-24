@@ -1,18 +1,7 @@
-"""Phase 1 (narrowed scope, 2026-08-26): "Standardize safe errors: code,
-display message, correlation ID, retryability, field errors, and HTTP
-status." Every error response across this app used to be FastAPI's bare
-default -- `{"detail": "..."}` for a raised HTTPException, or `{"detail":
-[{"loc": [...], "msg": ..., "type": ...}]}` (a LIST, not a string) for a
-422 validation error -- with no error code, no correlation id, no
-machine-readable retryability signal, and, for 422s, `detail` isn't even a
-string a client can safely display.
-
-`detail` is kept in every response, unchanged in meaning from before this
-file existed (a human-readable message), because two existing consumers --
-`app/web/static/js/app.js` and `admin.js` -- already read `body.detail` to
-show the real error text, and neither should have to change for this. The
-new fields (`code`, `message`, `correlation_id`, `retryable`,
-`field_errors`, `status`) are additive.
+"""Standard error responses: every error carries a stable `code`, a
+human-readable `message` (also exposed as `detail`), a correlation id, a
+retryability flag, per-field errors for validation failures, and the HTTP
+status. `detail` stays a plain string so existing consumers can show it as-is.
 """
 
 from __future__ import annotations
@@ -30,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 CORRELATION_ID_HEADER = "X-Correlation-ID"
 
-# Deliberately coarse -- one code per status actually raised in this app
-# today, not a large enum of hypothetical codes nothing returns yet.
+# Default code per status. Endpoints whose clients must tell two failures with
+# the same status apart raise ApiError with an explicit code instead.
 _CODE_BY_STATUS: dict[int, str] = {
     400: "BAD_REQUEST",
     401: "UNAUTHORIZED",
@@ -52,14 +41,23 @@ _CODE_BY_STATUS: dict[int, str] = {
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 
+class ApiError(StarletteHTTPException):
+    """An HTTP error with a domain-specific `code` (e.g. CONVERSATION_BUSY)
+    that clients branch on instead of inferring meaning from the status."""
+
+    def __init__(self, status_code: int, detail: str, code: str, *, retryable: bool = False):
+        super().__init__(status_code=status_code, detail=detail)
+        self.code = code
+        self.retryable = retryable
+
+
 def _code_for_status(status_code: int) -> str:
     return _CODE_BY_STATUS.get(status_code, f"HTTP_{status_code}")
 
 
 def _correlation_id(request: Request) -> str:
-    # Set by CorrelationIdMiddleware for every request; this fallback only
-    # matters if an exception handler somehow runs before that middleware
-    # does (it shouldn't, but a missing id must never itself be the error).
+    # Set by the correlation-id middleware; the fallback keeps a missing id
+    # from becoming its own error.
     return getattr(request.state, "correlation_id", None) or str(uuid.uuid4())
 
 
@@ -69,13 +67,15 @@ def error_body(
     message: str,
     *,
     field_errors: list[dict] | None = None,
+    code: str | None = None,
+    retryable: bool | None = None,
 ) -> dict:
     return {
         "detail": message,
-        "code": _code_for_status(status_code),
+        "code": code or _code_for_status(status_code),
         "message": message,
         "correlation_id": _correlation_id(request),
-        "retryable": status_code in _RETRYABLE_STATUSES,
+        "retryable": status_code in _RETRYABLE_STATUSES if retryable is None else retryable,
         "field_errors": field_errors or [],
         "status": status_code,
     }
@@ -83,7 +83,10 @@ def error_body(
 
 async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-    body = error_body(request, exc.status_code, message)
+    body = error_body(
+        request, exc.status_code, message,
+        code=getattr(exc, "code", None), retryable=getattr(exc, "retryable", None),
+    )
     return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
 
 
@@ -104,9 +107,8 @@ async def rate_limit_exception_handler(request: Request, exc: RateLimitExceeded)
 
 
 def unhandled_exception_body(request: Request, dev_mode: bool, exc: Exception) -> JSONResponse | None:
-    """Returns None in dev mode to signal "re-raise the real exception",
-    matching this handler's pre-existing behavior of never masking a
-    traceback during local development."""
+    """Returns None in dev mode to signal "re-raise the real exception" so a
+    traceback is never masked during local development."""
     if dev_mode:
         return None
     logger.exception("Unhandled exception (correlation_id=%s)", _correlation_id(request))

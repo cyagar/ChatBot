@@ -12,6 +12,8 @@ import com.hmwagner.techmanual.network.MessageIn
 import com.hmwagner.techmanual.network.MessageOut
 import com.hmwagner.techmanual.network.SetMachineRequest
 import com.hmwagner.techmanual.network.describeError
+import com.hmwagner.techmanual.network.describeErrorWithCode
+import com.hmwagner.techmanual.util.PendingSendStore
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,12 +21,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
 /**
- * A local-only echo of the technician's own typed question. The server never
- * returns the user's message from POST .../messages (only the assistant
- * reply) -- see routes_chat.py's ask_question -- so this is how the app shows
- * "what I just asked" before/while the answer arrives. It's overwritten by
- * the real persisted messages on the next full reload (retry, clarify
- * resume, screen re-entry), so it never drifts from the server's record.
+ * The technician's own question while it has no answer yet. `id` is the
+ * Idempotency-Key the question is sent under and stays fixed across retries;
+ * the server stores it on the user message, which is how a reload matches the
+ * question to its reply.
  */
 data class LocalEcho(val id: String, val content: String)
 
@@ -32,20 +32,10 @@ data class ChatUiState(
     val conversation: ConversationOut? = null,
     val messages: List<MessageOut> = emptyList(),
     val pendingEcho: LocalEcho? = null,
-    // True when a send failed with a network exception, or a reload after a
-    // 409 found no trace of the question at all (server never even
-    // persisted it) -- genuinely don't know whether the server got it (see
-    // the comment in send()'s catch block, and loadMessages()). Lets the UI
-    // tell "still in flight" apart from "we lost track of this one".
+    // The send ended without a response: whether the server received the
+    // question is unknown. Retry resends it under the same key.
     val pendingEchoUncertain: Boolean = false,
-    // True when a reload after a 409 confirms the OPPOSITE of uncertain: the
-    // server definitely has this exact question persisted (its own last
-    // message is that user turn) and is still working on it, or died before
-    // finishing. Deliberately a separate flag from pendingEchoUncertain --
-    // "definitely accepted, still generating" and "no idea if this was even
-    // received" are different situations and need different copy --
-    // collapsing them into one "uncertain" label would show "Connection lost"
-    // over a question the server had already accepted.
+    // The server has stored this question and has not finished answering it.
     val pendingEchoStillProcessing: Boolean = false,
     val composerText: String = "",
     val sending: Boolean = false,
@@ -66,9 +56,15 @@ data class ChatUiState(
     // savedMessageIds so a reload shows "already rated" instead of
     // resetting the buttons to blank.
     val feedbackByMessageId: Map<Int, String> = emptyMap(),
+    // Cursor for the page of messages older than the oldest one loaded.
+    val earlierCursor: String? = null,
+    val loadingEarlier: Boolean = false,
 )
 
-class ChatViewModel(private val conversationId: Int) : ViewModel() {
+class ChatViewModel(
+    private val conversationId: Int,
+    private val pendingStore: PendingSendStore = PendingSendStore.current,
+) : ViewModel() {
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state
 
@@ -78,18 +74,19 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
     // LazyColumn keys list items on MessageOut.id (see ChatScreen).
     private var nextLocalMessageId = -1
 
-    // The general `sending` flag is not precise enough to guard `messages`
-    // in loadMessages() below -- selectClarifyingMachine() also sets
-    // sending=true and then calls loadMessages() itself as its OWN update
-    // mechanism (not a concurrent unrelated refresh), and guarding on
-    // `sending` there would block that legitimate path from ever seeing its
-    // reload's messages. This flag is scoped specifically to performSend()'s
-    // own askQuestion() call
-    // being in flight, which is the one and only scenario an UNRELATED
-    // refresh() (e.g. pull-to-refresh) can race against.
+    // True only while performSend()'s own POST is awaiting a response. A
+    // concurrent reload must not replace `messages` in that window, or the
+    // POST's answer would be appended on top of a list that already has it.
     private var askQuestionInFlight = false
 
+    // Bumped by every reload; a response that arrives after a newer reload
+    // started is discarded so an older page can never overwrite a newer one.
+    private var loadGeneration = 0
+
     init {
+        pendingStore.load(conversationId)?.let {
+            _state.value = _state.value.copy(pendingEcho = it, pendingEchoUncertain = true)
+        }
         refresh()
     }
 
@@ -98,18 +95,12 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
     }
 
     // Split out from refresh() so selectClarifyingMachine() can await a reload
-    // in the same coroutine instead of firing a detached one via refresh() --
-    // launching a child coroutine and returning immediately let its own
-    // `finally` clear `sending` before the reload actually finished, which
-    // re-enabled the composer while the conversation was still mid-reload.
+    // in the same coroutine; a detached reload would let its `finally` clear
+    // `sending` before the reload finished.
     private suspend fun loadMessages() {
+        val generation = ++loadGeneration
         _state.value = _state.value.copy(loadingHistory = true, error = null)
         try {
-            // Fetched every reload, not just after selectClarifyingMachine()
-            // -- otherwise state.conversation stays null (and the toolbar
-            // falls back to the stale label passed through navigation)
-            // whenever the server resolves a machine for this conversation
-            // through any other path (a mention in the question).
             // Best-effort: a failure here must never block the messages
             // themselves from loading.
             val convResp = try {
@@ -119,84 +110,38 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
             } catch (_: Exception) {
                 null
             }
+            if (generation != loadGeneration) return
             if (convResp?.isSuccessful == true) {
                 _state.value = _state.value.copy(conversation = convResp.body())
             }
 
             val msgs = ApiClient.service.getMessages(conversationId)
+            if (generation != loadGeneration) return
             if (msgs.isSuccessful) {
                 val loaded = msgs.body().orEmpty()
                 val current = _state.value
                 val pending = current.pendingEcho
-                // A send() genuinely in flight (its own performSend()
-                // coroutine hasn't returned yet) owns pendingEcho/its status
-                // exclusively -- ChatScreen's PullToRefreshBox has no guard
-                // against pulling to refresh while sending is true, and a
-                // reload landing in that window must not race the original
-                // send: clearing pendingEcho out from under it, or showing a
-                // false "still waiting" banner over a question that hasn't
-                // even had a chance to fail yet.
+                // A send whose POST has not returned owns pendingEcho and its
+                // status exclusively.
                 val sendInFlight = current.sending
-                // A pending question is only actually answered once the
-                // reload's own last message is the assistant's reply --
-                // unconditionally clearing pendingEcho on ANY successful GET
-                // would silently drop the "still processing" affordance the
-                // moment a duplicate-Idempotency-Key 409 (see performSend)
-                // reloaded a conversation whose last persisted row was still
-                // just the user's own turn (the answer never finished
-                // generating, or the server crashed mid-attempt), or even a
-                // reload that found nothing persisted at all yet (the
-                // original POST may never have reached the server).
-                // Either way, the question must stay visibly pending and
-                // recoverable, not look complete or vanish.
-                val answered = loaded.isNotEmpty() && loaded.last().role == "assistant"
+                // The pending question is matched by its idempotency key, and
+                // its answer by the reply link -- never by "the last row is an
+                // assistant message".
+                val questionRow = pending?.let { p ->
+                    loaded.lastOrNull { it.role == "user" && it.idempotency_key == p.id }
+                }
+                val answered = questionRow != null &&
+                    loaded.any { it.role == "assistant" && it.reply_to_message_id == questionRow.id }
                 val stillUnanswered = pending != null && !sendInFlight && !answered
-                // The two ways a question can be "still unanswered" need
-                // different, accurate copy, not one collapsed "uncertain"
-                // label: a 409 reload whose last message IS this user's turn
-                // means the server definitely accepted it and is still
-                // working -- "Connection lost, unknown if received" would be
-                // simply wrong there. Only an empty/unrelated reload is a
-                // genuine "no idea if this was even received".
-                val acceptedAndProcessing = stillUnanswered && loaded.isNotEmpty() && loaded.last().role == "user"
-                // When accepted-and-processing, drop that trailing persisted
-                // user turn from the visible list rather than also keeping
-                // pendingEcho -- both would otherwise render the exact same
-                // question twice (once as a normal message bubble, once as
-                // the pending one).
-                val displayMessages = if (acceptedAndProcessing) loaded.dropLast(1) else loaded
-                // Rehydrate saved state from the server's own record, not
-                // just the messages list itself -- a freshly (re)created
-                // ChatViewModel (rotation between panes, an app restart, or
-                // simply leaving and re-entering this conversation) would
-                // otherwise start this map empty every time, so the button
-                // would reset to unmarked and a re-tap would silently
-                // duplicate the saved_answers row server-side.
+                // The server stored the question and has no reply yet. The
+                // stored row is hidden so it is not drawn twice next to the
+                // pending bubble.
+                val acceptedAndProcessing = stillUnanswered && questionRow != null
+                val displayMessages = if (acceptedAndProcessing) loaded.filter { it.id != questionRow!!.id } else loaded
+                if (pending != null && !sendInFlight && answered) pendingStore.clear(conversationId)
                 _state.value = current.copy(
-                    // This assignment must not run unconditionally while
-                    // performSend()'s own POST is still awaiting its
-                    // response -- otherwise a pull-to-refresh landing in
-                    // that window could load the server's already-persisted
-                    // user+assistant turns into `messages` here, and when
-                    // the original POST's response then arrives,
-                    // performSend's success handler unconditionally appends
-                    // its own synthetic user turn + the same
-                    // (already-present) assistant answer on top -- the
-                    // server-assigned answer id would end up in `messages`
-                    // twice, which LazyColumn(items, key={it.id}) treats as a
-                    // duplicate-key error. Deliberately guarded on the
-                    // narrower askQuestionInFlight, not the general
-                    // `sendInFlight`/`current.sending` used below --
-                    // selectClarifyingMachine() also sets `sending=true` and
-                    // then calls loadMessages() itself as its OWN update
-                    // mechanism (not a concurrent unrelated refresh), so
-                    // guarding this on `sending` broke that path entirely
-                    // (first attempt at this fix; caught by the existing
-                    // "confirming a clarifying machine..." test).
-                    // askQuestionInFlight is true only while performSend()'s
-                    // own network call is in flight, which is the one
-                    // scenario an unrelated refresh() can actually race.
                     messages = if (askQuestionInFlight) current.messages else displayMessages,
+                    earlierCursor = if (askQuestionInFlight) current.earlierCursor else msgs.headers()["X-Next-Cursor"],
                     loadingHistory = false,
                     pendingEcho = if (sendInFlight) current.pendingEcho else if (stillUnanswered) pending else null,
                     pendingEchoUncertain = if (sendInFlight) current.pendingEchoUncertain else stillUnanswered && !acceptedAndProcessing,
@@ -208,14 +153,52 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                     } else if (stillUnanswered) {
                         "Still waiting to hear back on that question. Pull to refresh or tap Retry to check again."
                     } else null,
+                    // Rehydrated from the server so a re-created ViewModel does
+                    // not reset saved/rated marks and invite duplicate actions.
                     savedMessageIds = loaded.filter { it.is_saved }.map { it.id }.toSet(),
                     feedbackByMessageId = loaded.mapNotNull { m -> m.feedback_rating?.let { m.id to it } }.toMap(),
                 )
             } else {
                 _state.value = _state.value.copy(loadingHistory = false, error = msgs.describeError("Couldn't load this conversation"))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
-            _state.value = _state.value.copy(loadingHistory = false, error = "Can't reach the server. Check your connection.")
+            if (generation == loadGeneration) {
+                _state.value = _state.value.copy(loadingHistory = false, error = "Can't reach the server. Check your connection.")
+            }
+        }
+    }
+
+    fun loadEarlier() {
+        val cursor = _state.value.earlierCursor ?: return
+        if (_state.value.loadingEarlier) return
+        _state.value = _state.value.copy(loadingEarlier = true)
+        viewModelScope.launch {
+            try {
+                val resp = ApiClient.service.getMessages(conversationId, before = cursor)
+                if (resp.isSuccessful) {
+                    val loadedIds = _state.value.messages.map { it.id }.toSet()
+                    val older = resp.body().orEmpty().filter { it.id !in loadedIds }
+                    _state.value = _state.value.copy(
+                        messages = older + _state.value.messages,
+                        earlierCursor = resp.headers()["X-Next-Cursor"],
+                        loadingEarlier = false,
+                    )
+                } else {
+                    _state.value = _state.value.copy(
+                        loadingEarlier = false,
+                        error = resp.describeError("Couldn't load earlier messages"),
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(
+                    loadingEarlier = false,
+                    error = "Can't reach the server. Check your connection.",
+                )
+            }
         }
     }
 
@@ -223,11 +206,14 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
         _state.value = _state.value.copy(composerText = v)
     }
 
+    // One question at a time: while a question has no answer yet, a second
+    // one is not sent.
     fun send() {
         val text = _state.value.composerText.trim()
-        if (text.isEmpty() || _state.value.sending) return
+        if (text.isEmpty() || _state.value.sending || _state.value.pendingEcho != null) return
 
         val echo = LocalEcho(UUID.randomUUID().toString(), text)
+        pendingStore.save(conversationId, echo)
         _state.value = _state.value.copy(
             sending = true,
             error = null,
@@ -240,14 +226,10 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
     }
 
     /**
-     * Resends a still-pending question from an "uncertain" bubble (connection
-     * lost mid-send, or the server says it's already processing) using the
-     * SAME idempotency key and text as the original attempt -- never a
-     * freshly generated key, and never whatever's currently typed in the
-     * composer. Reusing the key is what makes this safe to tap more than
-     * once: if the original attempt actually landed, the server replays its
-     * result instead of creating a second user turn (routes_chat.py's
-     * ask_question).
+     * Resends the pending question under the SAME idempotency key and text --
+     * never a fresh key, never the composer's current content. If the original
+     * attempt landed, the server replays its answer (or resumes it, if the
+     * attempt died) instead of creating a second turn.
      */
     fun retryPendingSend() {
         val echo = _state.value.pendingEcho ?: return
@@ -261,100 +243,67 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
         viewModelScope.launch { performSend(echo) }
     }
 
+    private fun rejectPendingQuestion(echo: LocalEcho, message: String) {
+        pendingStore.clear(conversationId)
+        // Restore the question to the composer only if nothing newer has been
+        // typed since.
+        val newerDraftTyped = _state.value.composerText.isNotEmpty()
+        _state.value = _state.value.copy(
+            sending = false,
+            pendingEcho = null,
+            pendingEchoUncertain = false,
+            pendingEchoStillProcessing = false,
+            error = if (newerDraftTyped) message else "$message Your draft wasn't lost -- retype it.",
+            composerText = if (newerDraftTyped) _state.value.composerText else echo.content,
+        )
+    }
+
     private suspend fun performSend(echo: LocalEcho) {
         try {
-            // echo.id doubles as the Idempotency-Key -- it's already a UUID
-            // generated once per composed question and held steady across
-            // retries (see LocalEcho/retryPendingSend), which is exactly what
-            // the key needs to be. askQuestionInFlight brackets ONLY this
-            // call (finally clears it before any of the branches below run,
-            // including the 409 branch's own loadMessages() call), so a
-            // concurrent refresh() is only ever blocked from touching
-            // `messages` for the actual duration this response is pending.
             val resp = try {
                 askQuestionInFlight = true
                 ApiClient.service.askQuestion(conversationId, MessageIn(echo.content), idempotencyKey = echo.id)
             } finally {
                 askQuestionInFlight = false
             }
-            when {
-                resp.isSuccessful -> {
-                    val answer = resp.body()!!
-                    // The pendingEcho bubble was rendered AFTER the message
-                    // list (see ChatScreen), so once the answer landed in
-                    // `messages` while pendingEcho stayed set, the user's own
-                    // question kept rendering below the assistant's reply --
-                    // backwards conversation order. Fold the echoed question
-                    // into `messages` as a synthetic local turn (the server
-                    // never returns the user's own message from this
-                    // endpoint -- see LocalEcho's doc comment) in the correct
-                    // position, then clear pendingEcho so it isn't rendered twice.
-                    val userTurn = MessageOut(
-                        id = nextLocalMessageId--,
-                        role = "user",
-                        content = echo.content,
-                        created_at = "",
-                    )
-                    _state.value = _state.value.copy(
-                        sending = false,
-                        messages = _state.value.messages + userTurn + answer,
-                        pendingEcho = null,
-                        pendingEchoUncertain = false,
-                        pendingEchoStillProcessing = false,
-                    )
-                }
-                resp.code() == 409 -> {
-                    // The same idempotency key was already accepted -- the
-                    // original attempt is still generating (or, rarely, the
-                    // server died mid-attempt). Either way, starting a fresh
-                    // attempt with a NEW key would be exactly the
-                    // duplicate-question hazard idempotency keys exist to
-                    // prevent, so keep the same pending echo/key and check
-                    // whether it's actually finished now. No point setting an
-                    // "already sent, checking…" message of our own here --
-                    // loadMessages() immediately resets `error` on
-                    // entry anyway and owns the real "still unanswered"
-                    // status/copy once it knows whether the reload actually
-                    // found a reply.
-                    _state.value = _state.value.copy(sending = false)
-                    loadMessages()
-                }
-                else -> {
-                    // Must not restore echo.content into the composer
-                    // unconditionally -- composerText was cleared to "" only
-                    // at the START of this same send() call, so if the
-                    // technician typed a NEW question while this one was
-                    // still failing server-side, that draft is what's
-                    // sitting in composerText right now, and restoring the
-                    // OLD failed question over it would silently throw the
-                    // newer draft away. Only restore when the composer is
-                    // still empty (nothing newer has been typed); otherwise
-                    // leave the newer draft alone and adjust the message
-                    // accordingly, since "your draft wasn't lost" would be
-                    // false in that case.
-                    val newerDraftTyped = _state.value.composerText.isNotEmpty()
-                    _state.value = _state.value.copy(
-                        sending = false,
-                        pendingEcho = null,
-                        pendingEchoUncertain = false,
-                        pendingEchoStillProcessing = false,
-                        error = if (newerDraftTyped) {
-                            resp.describeError("Couldn't send that question")
-                        } else {
-                            "${resp.describeError("Couldn't send that question")} Your draft wasn't lost -- retype it."
-                        },
-                        composerText = if (newerDraftTyped) _state.value.composerText else echo.content,
-                    )
-                }
+            if (resp.isSuccessful) {
+                val answer = resp.body()!!
+                pendingStore.clear(conversationId)
+                // The server never returns the user's own message from this
+                // endpoint, so it is folded into `messages` as a local turn
+                // ahead of the answer.
+                val userTurn = MessageOut(
+                    id = nextLocalMessageId--,
+                    role = "user",
+                    content = echo.content,
+                    created_at = "",
+                )
+                _state.value = _state.value.copy(
+                    sending = false,
+                    messages = _state.value.messages + userTurn + answer,
+                    pendingEcho = null,
+                    pendingEchoUncertain = false,
+                    pendingEchoStillProcessing = false,
+                )
+                return
             }
+            val failure = resp.describeErrorWithCode("Couldn't send that question")
+            if (failure.code == "IDEMPOTENCY_IN_PROGRESS") {
+                // This exact question is stored and being answered; keep it
+                // pending under the same key and check on it.
+                _state.value = _state.value.copy(sending = false)
+                loadMessages()
+            } else {
+                // Any other rejection -- a busy conversation, a superseded or
+                // mismatched key, a validation or server error -- means this
+                // question was not accepted for answering.
+                rejectPendingQuestion(echo, failure.message)
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
-            // We don't know whether the server actually received this --
-            // retryOnConnectionFailure is disabled specifically so we never
-            // silently resend it. Surface the honest ambiguity rather than
-            // guessing. pendingEcho is deliberately left set (not cleared) so
-            // the question doesn't just vanish, and its key is reused if the
-            // technician taps Retry -- so even a blind retry here can't
-            // create a duplicate turn.
+            // Whether the server received the question is unknown; it stays
+            // pending under its key so Retry can resolve it safely.
             _state.value = _state.value.copy(
                 sending = false,
                 pendingEchoUncertain = true,

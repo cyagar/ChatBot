@@ -12,7 +12,15 @@ from pydantic import BaseModel, Field, field_serializer
 from rapidfuzz import fuzz
 
 from app.api.common import iso_utc
-from app.api.pagination import CURSOR_INT, CURSOR_TIMESTAMP, decode_cursor, paginate, set_pagination_headers
+from app.api.errors import ApiError
+from app.api.pagination import (
+    CURSOR_INT,
+    CURSOR_TIMESTAMP,
+    decode_cursor,
+    encode_cursor,
+    paginate,
+    set_pagination_headers,
+)
 from app.auth.deps import CurrentUser, get_current_user
 from app.db import get_conn
 from app.providers.base import GeneratedAnswer, HistoryTurn, ProviderError
@@ -82,6 +90,11 @@ class MessageOut(BaseModel):
     clarifying_options: list[dict] = []
     retry_count: int = 0
     created_at: datetime
+    # The user message this assistant message answers; the client correlates
+    # replies to questions through it, never through row order.
+    reply_to_message_id: int | None = None
+    # On a user message: the Idempotency-Key it was sent with.
+    idempotency_key: str | None = None
     # The requesting user's own current feedback/save state, so a client that
     # reloads a conversation (app restart, rotation recreating a ViewModel,
     # just navigating away and back) can show "already marked" instead of
@@ -533,14 +546,14 @@ def _generate_and_persist_answer(
             else:
                 cur = conn.execute(
                     "INSERT INTO messages (conversation_id, role, content, is_no_answer, machine_id, "
-                    "safety_warnings, conflict_note, provider, answer_status) "
-                    "SELECT %s, 'assistant', %s, %s, %s, %s, %s, %s, %s WHERE EXISTS ("
+                    "safety_warnings, conflict_note, provider, answer_status, reply_to_message_id) "
+                    "SELECT %s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s WHERE EXISTS ("
                     "SELECT 1 FROM conversations WHERE id = %s AND processing_attempt_id = %s) "
                     "RETURNING id",
                     (
                         conversation_id, result.answer, result.is_no_answer, machine_id,
                         json.dumps(result.safety_warnings) if result.safety_warnings else None,
-                        result.conflict_note, result.provider, answer_status,
+                        result.conflict_note, result.provider, answer_status, user_message_id,
                         conversation_id, attempt_id,
                     ),
                 )
@@ -563,12 +576,12 @@ def _generate_and_persist_answer(
         else:
             cur = conn.execute(
                 "INSERT INTO messages (conversation_id, role, content, is_no_answer, machine_id, "
-                "safety_warnings, conflict_note, provider, answer_status) "
-                "VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                "safety_warnings, conflict_note, provider, answer_status, reply_to_message_id) "
+                "VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (
                     conversation_id, result.answer, result.is_no_answer, machine_id,
                     json.dumps(result.safety_warnings) if result.safety_warnings else None,
-                    result.conflict_note, result.provider, answer_status,
+                    result.conflict_note, result.provider, answer_status, user_message_id,
                 ),
             )
             msg_id = cur.fetchone()["id"]
@@ -636,6 +649,7 @@ def _generate_and_persist_answer(
         conflict_note=result.conflict_note,
         retry_count=row["retry_count"],
         created_at=row["created_at"],
+        reply_to_message_id=user_message_id,
     )
 
 
@@ -861,6 +875,8 @@ def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
             clarifying_options=clarifying_options,
             retry_count=row["retry_count"] if "retry_count" in row.keys() else 0,
             created_at=row["created_at"],
+            reply_to_message_id=row["reply_to_message_id"] if "reply_to_message_id" in row.keys() else None,
+            idempotency_key=row["idempotency_key"] if "idempotency_key" in row.keys() else None,
             feedback_rating=feedback_by_message.get(row["id"]),
             is_saved=row["id"] in saved_message_ids,
             has_withdrawn_source=any(c.source_withdrawn for c in citations),
@@ -872,6 +888,12 @@ def _hydrate_message(conn, row, user_id: int) -> MessageOut:
     return _hydrate_messages(conn, [row], user_id)[0]
 
 
+_MESSAGE_COLUMNS = (
+    "id, role, content, is_clarifying_question, is_no_answer, safety_warnings, conflict_note, "
+    "answer_status, clarifying_options, retry_count, created_at, reply_to_message_id, idempotency_key"
+)
+
+
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageOut])
 def get_messages(
     conversation_id: int,
@@ -879,20 +901,30 @@ def get_messages(
     user: CurrentUser = Depends(get_current_user),
     limit: int = Query(default=500, ge=1, le=2000),
     cursor: str | None = None,
+    latest: bool = False,
+    before: str | None = None,
 ):
-    # Default limit is generous (real conversations in this app today are
-    # nowhere near 500 messages) so an existing caller that never passes
-    # limit/cursor keeps getting exactly what it always did -- a full
-    # conversation in one response. Oldest-first (id ASC), so the cursor
-    # pages forward: "id" alone is a stable, already-unique sort key here,
-    # no tiebreaker column needed the way updated_at needed one above.
-    (after_id,) = decode_cursor(cursor, [CURSOR_INT]) if cursor else (None,)
+    """Oldest-first pages by default (`cursor` pages forward). With
+    `latest=true` the newest `limit` messages come back (still oldest-first
+    within the page); X-Next-Cursor then names the page before it, to be
+    passed as `before` to walk backward through a long conversation."""
     with get_conn() as conn:
         _require_own_conversation(conn, conversation_id, user.id)
+        if latest or before is not None:
+            (before_id,) = decode_cursor(before, [CURSOR_INT]) if before else (None,)
+            rows = conn.execute(
+                f"SELECT {_MESSAGE_COLUMNS} FROM messages WHERE conversation_id = %s "
+                "AND (%s::integer IS NULL OR id < %s) ORDER BY id DESC LIMIT %s",
+                (conversation_id, before_id, before_id, limit + 1),
+            ).fetchall()
+            has_more = len(rows) > limit
+            page = list(reversed(rows[:limit]))
+            set_pagination_headers(response, encode_cursor(page[0]["id"]) if has_more and page else None)
+            return _hydrate_messages(conn, page, user.id)
+        (after_id,) = decode_cursor(cursor, [CURSOR_INT]) if cursor else (None,)
         rows = conn.execute(
-            "SELECT id, role, content, is_clarifying_question, is_no_answer, "
-            "safety_warnings, conflict_note, answer_status, clarifying_options, retry_count, created_at "
-            "FROM messages WHERE conversation_id = %s AND (%s::integer IS NULL OR id > %s) ORDER BY id LIMIT %s",
+            f"SELECT {_MESSAGE_COLUMNS} FROM messages WHERE conversation_id = %s "
+            "AND (%s::integer IS NULL OR id > %s) ORDER BY id LIMIT %s",
             (conversation_id, after_id, after_id, limit + 1),
         ).fetchall()
         rows, next_cursor = paginate(rows, limit, lambda r: (r["id"],))
@@ -902,43 +934,56 @@ def get_messages(
 
 def _message_by_idempotency_key(conn, conversation_id: int, idempotency_key: str):
     return conn.execute(
-        "SELECT id FROM messages WHERE conversation_id = %s AND idempotency_key = %s AND role = 'user'",
+        "SELECT id, content FROM messages WHERE conversation_id = %s AND idempotency_key = %s AND role = 'user'",
         (conversation_id, idempotency_key),
     ).fetchone()
 
 
 def _reply_to_user_message(conn, conversation_id: int, user_message_id: int):
-    """The assistant (or clarifying-question) message immediately following a
-    given user turn, if one has been persisted yet. There's no explicit
-    reply-to column -- ordering is the same contract _fetch_history and
-    retry_answer's "preceding user message" lookup already rely on."""
+    """The latest assistant message answering a given user turn, if one has
+    been persisted yet (a clarifying question and the answer that later
+    resumes it both point at the same turn)."""
     return conn.execute(
-        "SELECT id, role, content, is_clarifying_question, is_no_answer, "
-        "safety_warnings, conflict_note, answer_status, clarifying_options, retry_count, created_at "
-        "FROM messages WHERE conversation_id = %s AND role = 'assistant' AND id > %s "
-        "ORDER BY id ASC LIMIT 1",
+        f"SELECT {_MESSAGE_COLUMNS} FROM messages "
+        "WHERE conversation_id = %s AND role = 'assistant' AND reply_to_message_id = %s "
+        "ORDER BY id DESC LIMIT 1",
         (conversation_id, user_message_id),
     ).fetchone()
 
 
-def _idempotent_replay(conn, conversation_id: int, user_message_id: int, user_id: int) -> MessageOut:
-    """Called once a duplicate Idempotency-Key has been identified (either by
-    the pre-check or by losing the UNIQUE-index race on insert). A duplicate
-    key returns the original result, not another user message. If the
-    original attempt hasn't produced a reply yet -- still generating, or the
-    process died mid-attempt -- there is nothing to replay; 409 rather than
-    silently starting a second provider call for the same question (that
-    second call is exactly the hazard this exists to prevent). A fuller
-    durable-attempt design, letting the client resume the original attempt
-    instead of dead-ending here, would need a durable job queue/outbox and is
-    out of scope for this endpoint today."""
-    reply = _reply_to_user_message(conn, conversation_id, user_message_id)
+def _release_on_conn(conn, conversation_id: int, attempt_id: str) -> None:
+    conn.execute(
+        "UPDATE conversations SET is_processing = false, processing_attempt_id = NULL, "
+        "processing_claimed_at = NULL WHERE id = %s AND processing_attempt_id = %s",
+        (conversation_id, attempt_id),
+    )
+
+
+def _replay_or_locate_orphan(conn, conversation_id: int, existing, question: str, user_id: int) -> MessageOut | None:
+    """Handles a request whose Idempotency-Key already has a stored user turn.
+    Returns the stored reply when there is one. Returns None when the turn was
+    accepted but never answered and is still the newest user turn, meaning the
+    caller may resume it. Anything else raises a coded error."""
+    if existing["content"] != question:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This idempotency key was already used for a different question.",
+            "IDEMPOTENCY_PAYLOAD_MISMATCH",
+        )
+    reply = _reply_to_user_message(conn, conversation_id, existing["id"])
     if reply is not None:
         return _hydrate_message(conn, reply, user_id)
-    raise HTTPException(
-        status.HTTP_409_CONFLICT,
-        detail="A request with this idempotency key is already being processed.",
-    )
+    later_turn = conn.execute(
+        "SELECT 1 FROM messages WHERE conversation_id = %s AND role = 'user' AND id > %s LIMIT 1",
+        (conversation_id, existing["id"]),
+    ).fetchone()
+    if later_turn is not None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "That question was never answered and a newer question has been asked since. Ask it again.",
+            "IDEMPOTENCY_SUPERSEDED",
+        )
+    return None
 
 
 @router.post("/conversations/{conversation_id}/messages", response_model=MessageOut)
@@ -962,10 +1007,17 @@ def ask_question(
         conv = _require_own_conversation(conn, conversation_id, user.id)
         machine_id = conv["machine_id"]
 
+        # A stored turn under this key is either replayed (it has a reply) or,
+        # when it was accepted but never answered and is still the newest
+        # turn, resumed below under a fresh lease.
+        resume_message_id: int | None = None
         if idempotency_key is not None:
             existing = _message_by_idempotency_key(conn, conversation_id, idempotency_key)
             if existing is not None:
-                return _idempotent_replay(conn, conversation_id, existing["id"], user.id)
+                replayed = _replay_or_locate_orphan(conn, conversation_id, existing, question, user.id)
+                if replayed is not None:
+                    return replayed
+                resume_message_id = existing["id"]
 
         # Concurrent questions in one conversation are not supported -- a
         # technician must wait for (or stop) an in-flight question before
@@ -974,62 +1026,70 @@ def ask_question(
         # inserted, so a rejected second question never creates a turn.
         attempt_id = _claim_conversation_processing(conn, conversation_id)
         if not attempt_id:
-            raise HTTPException(
+            if resume_message_id is not None:
+                raise ApiError(
+                    status.HTTP_409_CONFLICT,
+                    "This question is already being answered. Check again in a moment.",
+                    "IDEMPOTENCY_IN_PROGRESS",
+                    retryable=True,
+                )
+            raise ApiError(
                 status.HTTP_409_CONFLICT,
-                # There is no stop/cancel endpoint -- don't imply one exists.
                 # A stuck claim (dead worker, lost connection) is reclaimable
                 # automatically after PROCESSING_LEASE_SECONDS, so "wait" is
                 # the honest, complete recovery instruction.
-                detail="Another question is still being answered in this conversation. "
+                "Another question is still being answered in this conversation. "
                 "Wait for it to finish before asking another.",
+                "CONVERSATION_BUSY",
+                retryable=True,
             )
+
+        if resume_message_id is not None:
+            # The claim can succeed just after the original attempt finished;
+            # answering again would duplicate the answer.
+            finished = _reply_to_user_message(conn, conversation_id, resume_message_id)
+            if finished is not None:
+                _release_on_conn(conn, conversation_id, attempt_id)
+                return _hydrate_message(conn, finished, user.id)
 
         # Bounded prior turns, captured before this question is inserted, so
         # follow-ups like "what about replacing it?" have real context instead
         # of only ever seeing the latest question in isolation.
-        history = _fetch_history(conn, conversation_id)
+        history = _fetch_history(conn, conversation_id, before_message_id=resume_message_id)
 
-        try:
-            # A nested transaction (SAVEPOINT under the connection's already
-            # -open outer transaction) -- unlike sqlite3, a Postgres
-            # constraint violation aborts the whole transaction until a
-            # ROLLBACK, so without this savepoint the idempotency-key lookup
-            # in the except block below would itself fail with
-            # InFailedSqlTransaction instead of running.
-            with conn.transaction():
-                cur = conn.execute(
-                    "INSERT INTO messages (conversation_id, role, content, idempotency_key) "
-                    "VALUES (%s, 'user', %s, %s) RETURNING id",
-                    (conversation_id, question, idempotency_key),
-                )
-                user_message_id = cur.fetchone()["id"]
-        except psycopg.errors.UniqueViolation:
-            # Lost a race against a concurrent request carrying the same key
-            # -- the pre-check above is a fast path, not the safety
-            # mechanism; the UNIQUE index on (conversation_id,
-            # idempotency_key) is. The winner's user message is now visible.
-            # (In practice the processing-lock claim above already serializes
-            # same-conversation requests, so this branch is mostly a
-            # defensive fallback rather than the primary safety net.)
-            # Same-connection release (not _release_conversation_processing --
-            # see the comment on that helper): this except block runs inside
-            # the still-open outer transaction that claimed the lock, which
-            # hasn't committed yet, so a second connection would block
-            # forever waiting on a lock this one hasn't released.
-            existing = _message_by_idempotency_key(conn, conversation_id, idempotency_key)
-            if existing is None:
-                conn.execute(
-                    "UPDATE conversations SET is_processing = false, processing_attempt_id = NULL, "
-                    "processing_claimed_at = NULL WHERE id = %s AND processing_attempt_id = %s",
-                    (conversation_id, attempt_id),
-                )
-                raise  # not actually a key collision -- some other integrity error
-            conn.execute(
-                "UPDATE conversations SET is_processing = false, processing_attempt_id = NULL, "
-                "processing_claimed_at = NULL WHERE id = %s AND processing_attempt_id = %s",
-                (conversation_id, attempt_id),
-            )
-            return _idempotent_replay(conn, conversation_id, existing["id"], user.id)
+        if resume_message_id is not None:
+            user_message_id = resume_message_id
+        else:
+            try:
+                # A savepoint: a Postgres constraint violation aborts the whole
+                # transaction until rollback, and the key lookup in the except
+                # block below must still be able to run.
+                with conn.transaction():
+                    cur = conn.execute(
+                        "INSERT INTO messages (conversation_id, role, content, idempotency_key) "
+                        "VALUES (%s, 'user', %s, %s) RETURNING id",
+                        (conversation_id, question, idempotency_key),
+                    )
+                    user_message_id = cur.fetchone()["id"]
+            except psycopg.errors.UniqueViolation:
+                # Lost a race against a concurrent request carrying the same
+                # key; the UNIQUE index on (conversation_id, idempotency_key)
+                # is the safety mechanism, the pre-check above is a fast path.
+                # The lease is released on this still-open connection: a second
+                # connection would block on the row lock this transaction holds.
+                existing = _message_by_idempotency_key(conn, conversation_id, idempotency_key)
+                _release_on_conn(conn, conversation_id, attempt_id)
+                if existing is None:
+                    raise  # not actually a key collision -- some other integrity error
+                replayed = _replay_or_locate_orphan(conn, conversation_id, existing, question, user.id)
+                if replayed is not None:
+                    return replayed
+                raise ApiError(
+                    status.HTTP_409_CONFLICT,
+                    "This question is already being answered. Check again in a moment.",
+                    "IDEMPOTENCY_IN_PROGRESS",
+                    retryable=True,
+                ) from None
 
         # A new user turn always supersedes any earlier pending clarification:
         # if the technician typed a fresh question instead of picking
@@ -1058,8 +1118,9 @@ def ask_question(
                 )
                 cur = conn.execute(
                     "INSERT INTO messages (conversation_id, role, content, is_clarifying_question, "
-                    "clarifying_options) VALUES (%s, 'assistant', %s, true, %s) RETURNING id",
-                    (conversation_id, clarifying_text, json.dumps(candidates)),
+                    "clarifying_options, reply_to_message_id) VALUES (%s, 'assistant', %s, true, %s, %s) "
+                    "RETURNING id",
+                    (conversation_id, clarifying_text, json.dumps(candidates), user_message_id),
                 )
                 msg_id = cur.fetchone()["id"]
                 conn.execute(
@@ -1083,7 +1144,7 @@ def ask_question(
                 return MessageOut(
                     id=msg_id, role="assistant", content=clarifying_text,
                     is_clarifying_question=True, is_no_answer=False,
-                    clarifying_options=candidates,
+                    clarifying_options=candidates, reply_to_message_id=user_message_id,
                     created_at=conn.execute("SELECT created_at FROM messages WHERE id=%s", (msg_id,)).fetchone()["created_at"],
                 )
 
@@ -1122,7 +1183,8 @@ def retry_answer(
     with get_conn() as conn:
         conv = _require_own_conversation(conn, conversation_id, user.id)
         row = conn.execute(
-            "SELECT id, role, answer_status, machine_id FROM messages WHERE id = %s AND conversation_id = %s",
+            "SELECT id, role, answer_status, machine_id, reply_to_message_id FROM messages "
+            "WHERE id = %s AND conversation_id = %s",
             (message_id, conversation_id),
         ).fetchone()
         if not row or row["role"] != "assistant":
@@ -1144,18 +1206,18 @@ def retry_answer(
         attempt_id = _claim_conversation_processing(conn, conversation_id)
         if not attempt_id:
             conn.execute("UPDATE messages SET answer_status = 'failed' WHERE id = %s", (message_id,))
-            raise HTTPException(
+            raise ApiError(
                 status.HTTP_409_CONFLICT,
-                # No stop/cancel endpoint exists -- don't imply one does.
-                detail="Another question is still being answered in this conversation. "
+                "Another question is still being answered in this conversation. "
                 "Wait for it to finish before retrying.",
+                "CONVERSATION_BUSY",
+                retryable=True,
             )
 
         user_row = conn.execute(
-            "SELECT id, content FROM messages WHERE conversation_id = %s AND role = 'user' AND id < %s "
-            "ORDER BY id DESC LIMIT 1",
-            (conversation_id, message_id),
-        ).fetchone()
+            "SELECT id, content FROM messages WHERE conversation_id = %s AND role = 'user' AND id = %s",
+            (conversation_id, row["reply_to_message_id"]),
+        ).fetchone() if row["reply_to_message_id"] is not None else None
         # Retry must use the machine this failed answer was actually
         # generated against, not the conversation's CURRENT machine_id. If
         # the technician switches machines (a legal action, since a switch is

@@ -992,9 +992,7 @@ def frequently_unanswered(admin: CurrentUser = Depends(require_admin), limit: in
         rows = conn.execute(
             "SELECT prev.content AS question, m.created_at, m.conversation_id "
             "FROM messages m "
-            "JOIN messages prev ON prev.conversation_id = m.conversation_id AND prev.id = ("
-            "  SELECT MAX(id) FROM messages WHERE conversation_id = m.conversation_id AND id < m.id AND role='user'"
-            ") "
+            "JOIN messages prev ON prev.id = m.reply_to_message_id "
             "WHERE m.role = 'assistant' AND m.is_no_answer = true "
             "ORDER BY m.created_at DESC LIMIT %s",
             (limit,),

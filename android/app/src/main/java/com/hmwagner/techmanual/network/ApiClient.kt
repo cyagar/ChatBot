@@ -75,6 +75,7 @@ object ApiClient {
         // explicitly signed out of.
         okHttpClient.dispatcher.cancelAll()
         cookieJar.clear()
+        com.hmwagner.techmanual.util.PendingSendStore.current.clearAll()
         _sessionExpired.value = true
         try {
             service.logout()
@@ -191,7 +192,10 @@ object ApiClient {
 
     fun hasSession(): Boolean = cookieJar.hasSession()
 
-    fun clearSession() = cookieJar.clear()
+    fun clearSession() {
+        cookieJar.clear()
+        com.hmwagner.techmanual.util.PendingSendStore.current.clearAll()
+    }
 
     // Test seam only. init(context) needs a real Android Context, which
     // JVM-only ViewModel unit tests don't have -- tests build their own

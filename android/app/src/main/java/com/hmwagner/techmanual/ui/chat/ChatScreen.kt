@@ -155,6 +155,17 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
+                        if (state.earlierCursor != null) {
+                            item(key = "load-earlier") {
+                                TextButton(
+                                    onClick = vm::loadEarlier,
+                                    enabled = !state.loadingEarlier,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(if (state.loadingEarlier) "Loading…" else "Load earlier messages")
+                                }
+                            }
+                        }
                         items(state.messages, key = { it.id }) { msg ->
                             MessageBubble(msg, onCitationClick = vm::openCitation, onRetry = { vm.retry(msg.id) },
                                 onClarifyingSelect = vm::selectClarifyingMachine,
@@ -545,7 +556,11 @@ private fun Composer(state: ChatUiState, vm: ChatViewModel) {
             placeholder = { Text("Ask a question about the selected machine…") },
             supportingText = { Text("${state.composerText.length} / $maxLen") },
         )
-        IconButton(onClick = vm::send, enabled = !state.sending && state.composerText.isNotBlank()) {
+        // A second question waits until the pending one is answered or rejected.
+        IconButton(
+            onClick = vm::send,
+            enabled = !state.sending && state.pendingEcho == null && state.composerText.isNotBlank(),
+        ) {
             Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
         }
     }
@@ -609,8 +624,9 @@ private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: ()
                         // its cached failure for the identical URL instead of
                         // actually re-requesting.
                         var retryToken by remember { mutableIntStateOf(0) }
+                        val imageFailed = painterState is AsyncImagePainter.State.Error
                         Box(
-                            Modifier.fillMaxWidth().fillMaxHeight(0.75f),
+                            Modifier.fillMaxWidth().then(if (imageFailed) Modifier else Modifier.fillMaxHeight(0.75f)),
                             contentAlignment = Alignment.Center,
                         ) {
                             AsyncImage(
@@ -619,7 +635,7 @@ private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: ()
                                 contentDescription = "Manual page ${evidence.page_number}",
                                 contentScale = ContentScale.Fit,
                                 onState = { painterState = it },
-                                modifier = Modifier.fillMaxWidth().fillMaxHeight(),
+                                modifier = if (imageFailed) Modifier.fillMaxWidth() else Modifier.fillMaxWidth().fillMaxHeight(),
                             )
                             when (painterState) {
                                 is AsyncImagePainter.State.Loading -> CircularProgressIndicator()
@@ -636,6 +652,13 @@ private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: ()
                                     TextButton(onClick = { retryToken++ }) { Text("Retry") }
                                 }
                                 else -> {}
+                            }
+                        }
+                        // The cited text stays readable when the page image cannot load.
+                        if (imageFailed) {
+                            Text("Text extracted from this page:", style = MaterialTheme.typography.labelMedium)
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                                Text(evidence.content, modifier = Modifier.padding(12.dp))
                             }
                         }
                     }

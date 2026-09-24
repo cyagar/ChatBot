@@ -8,6 +8,9 @@ import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
 
+/** Page size for a conversation's newest messages; older pages load on demand. */
+const val MESSAGE_PAGE_SIZE = 200
+
 interface ApiService {
 
     @POST("api/auth/login")
@@ -56,7 +59,12 @@ interface ApiService {
     suspend fun getConversation(@Path("conversationId") conversationId: Int): Response<ConversationOut>
 
     @GET("api/conversations/{conversationId}/messages")
-    suspend fun getMessages(@Path("conversationId") conversationId: Int): Response<List<MessageOut>>
+    suspend fun getMessages(
+        @Path("conversationId") conversationId: Int,
+        @Query("limit") limit: Int = MESSAGE_PAGE_SIZE,
+        @Query("latest") latest: Boolean = true,
+        @Query("before") before: String? = null,
+    ): Response<List<MessageOut>>
 
     @POST("api/conversations/{conversationId}/messages")
     suspend fun askQuestion(
