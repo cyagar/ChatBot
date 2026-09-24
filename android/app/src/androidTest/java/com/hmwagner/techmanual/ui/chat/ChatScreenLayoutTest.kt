@@ -115,11 +115,18 @@ class ChatScreenLayoutTest {
         server.shutdown()
     }
 
+    // ChatViewModel fetches the conversation before its messages, so every
+    // ChatScreen scenario must queue this ahead of the messages response.
+    private fun conversationResponse() = MockResponse().setResponseCode(200)
+        .setHeader("Content-Type", "application/json")
+        .setBody("""{"id": 1, "machine_id": null, "machine_label": "Test Machine", "title": null, "started_at": "", "updated_at": ""}""")
+
     @Test
     fun clarifyingOptionChipsWrapAcrossTheSupportedWidthAndFontScaleMatrix() {
         val optionsJson = longOptionLabels.mapIndexed { i, label ->
             """{"id": ${i + 1}, "label": "$label"}"""
         }.joinToString(",", prefix = "[", postfix = "]")
+        server.enqueue(conversationResponse())
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
@@ -183,6 +190,7 @@ class ChatScreenLayoutTest {
         val citationsJson = (1..8).joinToString(",", prefix = "[", postfix = "]") { n ->
             """{"chunk_id": $n, "document_id": 1, "filename": "manual.pdf", "page_number": $n, "excerpt": "x"}"""
         }
+        server.enqueue(conversationResponse())
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setHeader("Content-Type", "application/json")

@@ -266,6 +266,11 @@ class AppNavSessionExpiryTest {
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
+                .setBody("""{"id": 42, "machine_id": 7, "machine_label": "Acme X100", "title": null, "started_at": "", "updated_at": ""}"""),
+        ) // ChatViewModel's initial getConversation
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
                 .setBody("[]"),
         ) // ChatViewModel's initial getMessages
 
