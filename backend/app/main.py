@@ -65,7 +65,24 @@ async def lifespan(_app: FastAPI):
             await sync_task
 
 
-app = FastAPI(title="Technician Manual Assistant", version="0.1.0", lifespan=lifespan)
+def interactive_docs_urls(app_env: str) -> dict[str, str | None]:
+    """Swagger UI, ReDoc and the raw schema are only served in development --
+    on a deployed instance they hand anyone on the internet a complete map of
+    every route, including the administrator API. The committed
+    backend/openapi.json (scripts/export_openapi.py, via app.openapi()) is
+    unaffected."""
+    enabled = app_env == "development"
+    return {
+        "docs_url": "/docs" if enabled else None,
+        "redoc_url": "/redoc" if enabled else None,
+        "openapi_url": "/openapi.json" if enabled else None,
+    }
+
+
+app = FastAPI(
+    title="Technician Manual Assistant", version="0.1.0", lifespan=lifespan,
+    **interactive_docs_urls(get_settings().app_env),
+)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exception_handler)
