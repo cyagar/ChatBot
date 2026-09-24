@@ -1626,7 +1626,7 @@
     },
     "/api/admin/documents/{document_id}/reactivate": {
       "post": {
-        "description": "Undoes deactivate_document. Only clears deactivated_at -- does not touch\nreview_status or is_current_revision, since a document deactivated for a\nreason other than \"it was superseded\" (e.g. deactivated by mistake, or a\nwithdrawn manual reinstated after correction) may need either left exactly\nas they were. If this document was superseded by another that is now the\nactive one for the same source_ref, an administrator must resolve that\noverlap explicitly afterward (PATCH .../documents/{id} to correct\nis_current_revision, or deactivate the other one) -- reactivation alone\ndoes not infer which of two active documents should win.",
+        "description": "Undoes deactivate_document for a document that was deactivated on its\nown. Refuses a document that was retired in favour of another revision, and\nany reactivation that would leave two revisions active at one source_ref --\nthose go through POST .../rollback, which swaps them atomically.",
         "operationId": "reactivate_document_api_admin_documents__document_id__reactivate_post",
         "parameters": [
           {
@@ -1753,6 +1753,73 @@
           }
         },
         "summary": "Review Document",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/documents/{document_id}/rollback": {
+      "post": {
+        "description": "Makes an earlier revision the single current one: retires whichever\nrevision is active at its source_ref and reinstates this document, in one\ntransaction, so retrieval never sees two current revisions or none.",
+        "operationId": "rollback_to_document_api_admin_documents__document_id__rollback_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reason",
+            "required": false,
+            "schema": {
+              "default": "Rolled back by administrator.",
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rollback To Document",
         "tags": [
           "admin"
         ]

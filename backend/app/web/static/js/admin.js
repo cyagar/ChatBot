@@ -589,8 +589,8 @@ function wireTabEvents() {
   });
   root.querySelectorAll(".reactivate-btn").forEach((btn) => {
     guardedClick(btn, async () => {
-      if (!confirm("Reactivate this manual? It will become searchable again.")) return;
-      await api(`/api/admin/documents/${btn.dataset.id}/reactivate`, { method: "POST" });
+      if (!confirm("Reactivate this manual as the current revision? Any other active revision of it will be retired.")) return;
+      await api(`/api/admin/documents/${btn.dataset.id}/rollback`, { method: "POST" });
       state.documents = await api(`/api/admin/documents${state.showDeactivated ? "?include_deactivated=true" : ""}`);
       render();
     });

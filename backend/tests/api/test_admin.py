@@ -345,6 +345,91 @@ def test_approving_replacement_deactivates_old_document_at_same_source_ref(test_
     assert any(a["event_type"] == "document_superseded" for a in audit)
 
 
+def _seed_superseded_pair(source_ref="google_drive:revchain"):
+    """v1 approved+current, v2 approved via the API so v1 is retired by the
+    real promotion path."""
+    with get_conn() as conn:
+        old_id = _seed_document_at_source_ref(conn, source_ref, sha256="v1", review_status="approved")
+        new_id = _seed_document_at_source_ref(conn, source_ref, sha256="v2", review_status="pending")
+        conn.execute(
+            "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
+            "SELECT id, 'text', 'seeded chunk content', 21, 0 FROM documents WHERE id IN (%s, %s)",
+            (old_id, new_id),
+        )
+    _register_admin()
+    client.post(f"/api/admin/documents/{new_id}/machines/1/review", json={"decision": "approved"})
+    assert client.post(f"/api/admin/documents/{new_id}/review", json={"decision": "approved"}).status_code == 200
+    return old_id, new_id
+
+
+def _retrievable(conn, source_ref):
+    return [r["id"] for r in conn.execute(
+        "SELECT id FROM documents WHERE source_ref = %s AND deactivated_at IS NULL "
+        "AND review_status = 'approved' AND is_current_revision ORDER BY id", (source_ref,)
+    ).fetchall()]
+
+
+def test_promotion_marks_the_retired_revision_non_current_and_superseded(test_env):
+    old_id, new_id = _seed_superseded_pair()
+    with get_conn() as conn:
+        old = conn.execute("SELECT is_current_revision, superseded_by FROM documents WHERE id = %s", (old_id,)).fetchone()
+    assert old["is_current_revision"] is False
+    assert old["superseded_by"] == new_id
+
+
+def test_reactivating_a_superseded_revision_is_refused_and_leaves_one_current(test_env):
+    old_id, new_id = _seed_superseded_pair()
+    resp = client.post(f"/api/admin/documents/{old_id}/reactivate")
+    assert resp.status_code == 409
+    with get_conn() as conn:
+        assert _retrievable(conn, "google_drive:revchain") == [new_id]
+
+
+def test_rollback_swaps_the_current_revision_atomically(test_env):
+    old_id, new_id = _seed_superseded_pair()
+    client.post(f"/api/admin/documents/{old_id}/machines/1/review", json={"decision": "approved"})
+    resp = client.post(f"/api/admin/documents/{old_id}/rollback")
+    assert resp.status_code == 200
+    assert resp.json()["retired"] == 1
+    with get_conn() as conn:
+        assert _retrievable(conn, "google_drive:revchain") == [old_id]
+        newer = conn.execute("SELECT is_current_revision, superseded_by FROM documents WHERE id = %s", (new_id,)).fetchone()
+        audit = conn.execute("SELECT 1 FROM audit_events WHERE event_type = 'document_rolled_back' AND target_id = %s", (old_id,)).fetchone()
+    assert newer["is_current_revision"] is False
+    assert newer["superseded_by"] == old_id
+    assert audit is not None
+
+
+def test_rollback_to_an_unapproved_document_is_refused(test_env):
+    with get_conn() as conn:
+        doc_id = _seed_document_at_source_ref(conn, "google_drive:unapproved", sha256="x", review_status="pending")
+    _register_admin()
+    assert client.post(f"/api/admin/documents/{doc_id}/rollback").status_code == 409
+
+
+def test_database_refuses_two_current_approved_revisions_at_one_source_ref(test_env):
+    import psycopg
+    import pytest
+
+    with get_conn() as conn:
+        _seed_document_at_source_ref(conn, "google_drive:dup", sha256="a", review_status="approved")
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        with get_conn() as conn:
+            _seed_document_at_source_ref(conn, "google_drive:dup", sha256="b", review_status="approved")
+
+
+def test_marking_a_second_active_revision_current_via_patch_is_a_conflict_not_a_500(test_env):
+    source_ref = "google_drive:patchdup"
+    with get_conn() as conn:
+        _seed_document_at_source_ref(conn, source_ref, sha256="a", review_status="approved")
+        other = _seed_document_at_source_ref(conn, source_ref, sha256="b", review_status="pending")
+        conn.execute("UPDATE documents SET is_current_revision = false WHERE id = %s", (other,))
+        conn.execute("UPDATE documents SET review_status = 'approved' WHERE id = %s", (other,))
+    _register_admin()
+    resp = client.patch(f"/api/admin/documents/{other}", json={"is_current_revision": True, "reason": "test"})
+    assert resp.status_code == 409
+
+
 def test_rejecting_replacement_leaves_old_document_active(test_env):
     """The failure mode this whole fix exists to prevent: a replacement that
     turns out to be wrong must never take the working manual down with it."""
@@ -638,3 +723,22 @@ def test_disable_and_enable_user_round_trip(test_env):
     with get_conn() as conn:
         row = conn.execute("SELECT is_disabled FROM users WHERE id = %s", (user_id,)).fetchone()
     assert row["is_disabled"] == 0
+
+
+def test_migration_0005_retires_pre_existing_duplicate_current_revisions(test_env):
+    from app.db import MIGRATIONS_DIR
+
+    source_ref = "google_drive:legacydup"
+    with get_conn() as conn:
+        conn.execute("DROP INDEX documents_one_current_per_source_ref")
+        first = _seed_document_at_source_ref(conn, source_ref, sha256="l1", review_status="approved")
+        second = _seed_document_at_source_ref(conn, source_ref, sha256="l2", review_status="approved")
+        conn.execute((MIGRATIONS_DIR / "0005_single_current_revision.sql").read_text(encoding="utf-8"))
+        rows = {r["id"]: r for r in conn.execute(
+            "SELECT id, deactivated_at, is_current_revision, superseded_by FROM documents WHERE id IN (%s, %s)",
+            (first, second),
+        ).fetchall()}
+    assert rows[second]["deactivated_at"] is None and rows[second]["is_current_revision"]
+    assert rows[first]["deactivated_at"] is not None
+    assert rows[first]["is_current_revision"] is False
+    assert rows[first]["superseded_by"] == second

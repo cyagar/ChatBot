@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import psycopg
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, Field, field_serializer
 
@@ -190,10 +191,17 @@ def correct_metadata(document_id: int, payload: MetadataCorrection, admin: Curre
 
         if payload.is_current_revision is not None:
             _log("is_current_revision", doc["is_current_revision"], payload.is_current_revision)
-            conn.execute(
-                "UPDATE documents SET is_current_revision = %s WHERE id = %s",
-                (payload.is_current_revision, document_id),
-            )
+            try:
+                conn.execute(
+                    "UPDATE documents SET is_current_revision = %s WHERE id = %s",
+                    (payload.is_current_revision, document_id),
+                )
+            except psycopg.errors.UniqueViolation:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail="Another active revision at this source path is already current. "
+                           "Use the rollback endpoint to swap revisions.",
+                )
 
         if payload.machine_ids is not None:
             # machine_ids must be validated before document_machines' INSERT
@@ -254,28 +262,119 @@ def deactivate_document(document_id: int, reason: str = "Deactivated by administ
     return {"ok": True}
 
 
+def _retire_active_siblings(conn, source_ref: str | None, keep_id: int, reason: str) -> int:
+    """Retires every other active document at `source_ref`, marking it
+    non-current and pointing it at its replacement. The caller must already
+    hold the sibling row locks (see _lock_source_ref_documents)."""
+    if source_ref is None:
+        return 0
+    return conn.execute(
+        "UPDATE documents SET deactivated_at = now(), is_current_revision = false, superseded_by = %s, "
+        "status_reason = COALESCE(status_reason || ' | ', '') || %s "
+        "WHERE source_ref = %s AND id != %s AND deactivated_at IS NULL",
+        (keep_id, reason, source_ref, keep_id),
+    ).rowcount
+
+
+def _lock_source_ref_documents(conn, source_ref: str | None) -> None:
+    """Row locks in ascending id order, so concurrent promotions at one
+    source_ref queue instead of deadlocking."""
+    if source_ref is not None:
+        conn.execute(
+            "SELECT id FROM documents WHERE source_ref = %s AND deactivated_at IS NULL ORDER BY id FOR UPDATE",
+            (source_ref,),
+        )
+
+
+def _promotion_problems(conn, doc) -> list[str]:
+    chunk_count = conn.execute(
+        "SELECT COUNT(*) AS n FROM chunks WHERE document_id = %s", (doc["id"],)
+    ).fetchone()["n"]
+    has_approved_link = conn.execute(
+        "SELECT 1 FROM document_machines WHERE document_id = %s AND review_status = 'approved' LIMIT 1",
+        (doc["id"],),
+    ).fetchone()
+    problems = []
+    if doc["status"] not in ("indexed", "partial"):
+        problems.append(f"ingestion status is {doc['status']!r}, not indexed/partial")
+    if chunk_count == 0:
+        problems.append("it has no extracted content (0 chunks)")
+    if not has_approved_link:
+        problems.append("it has no approved machine link yet")
+    return problems
+
+
 @router.post("/documents/{document_id}/reactivate")
 def reactivate_document(document_id: int, reason: str = "Reactivated by administrator.",
                          admin: CurrentUser = Depends(require_admin)):
-    """Undoes deactivate_document. Only clears deactivated_at -- does not touch
-    review_status or is_current_revision, since a document deactivated for a
-    reason other than "it was superseded" (e.g. deactivated by mistake, or a
-    withdrawn manual reinstated after correction) may need either left exactly
-    as they were. If this document was superseded by another that is now the
-    active one for the same source_ref, an administrator must resolve that
-    overlap explicitly afterward (PATCH .../documents/{id} to correct
-    is_current_revision, or deactivate the other one) -- reactivation alone
-    does not infer which of two active documents should win."""
+    """Undoes deactivate_document for a document that was deactivated on its
+    own. Refuses a document that was retired in favour of another revision, and
+    any reactivation that would leave two revisions active at one source_ref --
+    those go through POST .../rollback, which swaps them atomically."""
     with get_conn() as conn:
-        result = conn.execute(
-            "UPDATE documents SET deactivated_at = NULL WHERE id = %s AND deactivated_at IS NOT NULL",
+        doc = conn.execute(
+            "SELECT id, source_ref, superseded_by FROM documents WHERE id = %s AND deactivated_at IS NOT NULL",
             (document_id,),
-        )
-        if result.rowcount == 0:
+        ).fetchone()
+        if not doc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found or not deactivated.")
+        _lock_source_ref_documents(conn, doc["source_ref"])
+        if doc["superseded_by"] is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"Document {document_id} was superseded by document {doc['superseded_by']}. "
+                       "Use the rollback endpoint to replace the current revision with this one.",
+            )
+        competing = conn.execute(
+            "SELECT id FROM documents WHERE source_ref = %s AND id != %s AND deactivated_at IS NULL "
+            "AND review_status = 'approved' AND is_current_revision LIMIT 1",
+            (doc["source_ref"], document_id),
+        ).fetchone() if doc["source_ref"] is not None else None
+        if competing:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"Document {competing['id']} is the active current revision at this source path. "
+                       "Use the rollback endpoint to replace it with this one.",
+            )
+        conn.execute("UPDATE documents SET deactivated_at = NULL WHERE id = %s", (document_id,))
         log_audit_event(conn, "document_reactivated", actor_user_id=admin.id,
                          target_type="document", target_id=document_id, detail=reason)
     return {"ok": True}
+
+
+@router.post("/documents/{document_id}/rollback")
+def rollback_to_document(document_id: int, reason: str = "Rolled back by administrator.",
+                          admin: CurrentUser = Depends(require_admin)):
+    """Makes an earlier revision the single current one: retires whichever
+    revision is active at its source_ref and reinstates this document, in one
+    transaction, so retrieval never sees two current revisions or none."""
+    with get_conn() as conn:
+        doc = conn.execute(
+            "SELECT id, source_ref, status, review_status FROM documents WHERE id = %s", (document_id,)
+        ).fetchone()
+        if not doc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found.")
+        _lock_source_ref_documents(conn, doc["source_ref"])
+        if doc["review_status"] != "approved":
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="Only an approved document can be rolled back to.")
+        problems = _promotion_problems(conn, doc)
+        if problems:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="Cannot roll back to this document: " + "; ".join(problems) + ".",
+            )
+        retired = _retire_active_siblings(
+            conn, doc["source_ref"], document_id,
+            f"Superseded: rolled back to document {document_id}.",
+        )
+        conn.execute(
+            "UPDATE documents SET deactivated_at = NULL, is_current_revision = true, superseded_by = NULL "
+            "WHERE id = %s",
+            (document_id,),
+        )
+        log_audit_event(conn, "document_rolled_back", actor_user_id=admin.id, target_type="document",
+                         target_id=document_id, detail=f"{reason} Retired {retired} active revision(s).")
+    return {"ok": True, "retired": retired}
 
 
 # ---------------------------------------------------------------------------
@@ -410,10 +509,7 @@ def review_document(document_id: int, payload: DocumentReviewRequest, admin: Cur
             # transaction uses, makes that cycle impossible: whichever
             # transaction gets here first locks the lowest id first and the
             # other simply queues behind it.
-            conn.execute(
-                "SELECT id FROM documents WHERE source_ref = %s AND deactivated_at IS NULL ORDER BY id FOR UPDATE",
-                (doc["source_ref"],),
-            )
+            _lock_source_ref_documents(conn, doc["source_ref"])
 
             # "Approve document" and "Approve link" are two independent
             # buttons on the same review-queue card (admin.js
@@ -426,20 +522,7 @@ def review_document(document_id: int, payload: DocumentReviewRequest, admin: Cur
             # separately approved a link. Promotion must be a single atomic
             # transition: verify the replacement is actually ready before
             # retiring the revision that still works.
-            chunk_count = conn.execute(
-                "SELECT COUNT(*) AS n FROM chunks WHERE document_id = %s", (document_id,)
-            ).fetchone()["n"]
-            has_approved_link = conn.execute(
-                "SELECT 1 FROM document_machines WHERE document_id = %s AND review_status = 'approved' LIMIT 1",
-                (document_id,),
-            ).fetchone()
-            problems = []
-            if doc["status"] not in ("indexed", "partial"):
-                problems.append(f"ingestion status is {doc['status']!r}, not indexed/partial")
-            if chunk_count == 0:
-                problems.append("it has no extracted content (0 chunks)")
-            if not has_approved_link:
-                problems.append("it has no approved machine link yet")
+            problems = _promotion_problems(conn, doc)
             if problems:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
@@ -448,10 +531,22 @@ def review_document(document_id: int, payload: DocumentReviewRequest, admin: Cur
                            "revision at this source_ref keeps serving until this document is ready.",
                 )
 
+        # Siblings are retired before the claim so the one-current-revision
+        # unique index never sees two approved current documents.
+        retired = 0
+        if payload.decision == "approved":
+            retired = _retire_active_siblings(
+                conn, doc["source_ref"], document_id,
+                f"Superseded: document {document_id} was approved at this source path.",
+            )
         claim = conn.execute(
             "UPDATE documents SET review_status = %s, reviewed_by = %s, reviewed_at = now(), "
-            "review_note = %s WHERE id = %s AND deactivated_at IS NULL",
-            (payload.decision, admin.id, payload.note, document_id),
+            "review_note = %s, "
+            "is_current_revision = CASE WHEN %s THEN true ELSE is_current_revision END, "
+            "superseded_by = CASE WHEN %s THEN NULL ELSE superseded_by END "
+            "WHERE id = %s AND deactivated_at IS NULL",
+            (payload.decision, admin.id, payload.note, payload.decision == "approved",
+             payload.decision == "approved", document_id),
         )
         if claim.rowcount == 0:
             # Deactivated by a concurrent approval of a competing replacement
@@ -460,19 +555,11 @@ def review_document(document_id: int, payload: DocumentReviewRequest, admin: Cur
         log_audit_event(conn, "document_reviewed", actor_user_id=admin.id, target_type="document",
                          target_id=document_id, detail=f"{payload.decision}" + (f": {payload.note}" if payload.note else ""))
 
-        if payload.decision == "approved":
-            superseded = conn.execute(
-                "UPDATE documents SET deactivated_at = now(), "
-                "status_reason = COALESCE(status_reason || ' | ', '') "
-                "|| 'Superseded: document ' || %s::text || ' was approved at this source path.' "
-                "WHERE source_ref = %s AND id != %s AND deactivated_at IS NULL",
-                (document_id, doc["source_ref"], document_id),
-            )
-            if superseded.rowcount:
-                log_audit_event(conn, "document_superseded", actor_user_id=admin.id, target_type="document",
-                                 target_id=document_id,
-                                 detail=f"Retired {superseded.rowcount} prior active document(s) at "
-                                        f"source_ref={doc['source_ref']!r} on approval.")
+        if retired:
+            log_audit_event(conn, "document_superseded", actor_user_id=admin.id, target_type="document",
+                             target_id=document_id,
+                             detail=f"Retired {retired} prior active document(s) at "
+                                    f"source_ref={doc['source_ref']!r} on approval.")
     return {"ok": True}
 
 
