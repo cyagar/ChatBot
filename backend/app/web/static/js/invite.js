@@ -1,33 +1,39 @@
 "use strict";
 
-// Kept as an external file, not an inline <script>, because app/main.py's
-// CSP is script-src 'self' with no 'unsafe-inline' -- an inline script on
-// this page would be silently blocked by any CSP-respecting browser,
-// breaking the redemption flow it exists to power.
+// External file, not an inline <script>: app/main.py's CSP is script-src
+// 'self' without 'unsafe-inline'. Visibility is toggled with the .hidden class
+// for the same reason (style-src 'self' blocks inline style attributes).
 (function () {
   const params = new URLSearchParams(window.location.search);
   const token = params.get("token");
   const email = params.get("email") || "";
 
+  // The token must not linger in the address bar, history or later Referer
+  // headers once it has been read.
+  window.history.replaceState(null, "", window.location.pathname);
+
+  const show = (id) => document.getElementById(id).classList.remove("hidden");
+  const hide = (id) => document.getElementById(id).classList.add("hidden");
+
   document.getElementById("email-field").value = email;
 
   if (!token) {
-    document.getElementById("missing-token").style.display = "block";
-    document.getElementById("accept-form").style.display = "none";
-    document.getElementById("intro").style.display = "none";
+    show("missing-token");
+    hide("accept-form");
+    hide("intro");
     return;
   }
 
   document.getElementById("accept-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const errorEl = document.getElementById("form-error");
-    errorEl.style.display = "none";
+    hide("form-error");
 
     const password = document.getElementById("password").value;
     const password2 = document.getElementById("password2").value;
     if (password !== password2) {
       errorEl.textContent = "Passwords do not match.";
-      errorEl.style.display = "block";
+      show("form-error");
       return;
     }
 
@@ -49,16 +55,15 @@
         const body = await resp.json().catch(() => ({}));
         throw new Error(body.detail || body.message || `Request failed (${resp.status}).`);
       }
-      // A successful registration also sets a browser session cookie for
-      // this page's own origin -- not useful here (there is no technician
-      // PWA to land in), so it's left alone rather than built out into a
-      // second, redundant sign-in surface.
-      document.getElementById("accept-form").style.display = "none";
-      document.getElementById("intro").style.display = "none";
-      document.getElementById("success").style.display = "block";
+      // Registration also opens a browser session that nothing here uses;
+      // end it so no credential is left behind on this device.
+      await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+      hide("accept-form");
+      hide("intro");
+      show("success");
     } catch (err) {
       errorEl.textContent = err.message;
-      errorEl.style.display = "block";
+      show("form-error");
     } finally {
       submitBtn.disabled = false;
     }

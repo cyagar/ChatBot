@@ -640,7 +640,7 @@ function wireTabEvents() {
       const picker = root.querySelector(`.machine-picker[data-doc="${input.dataset.doc}"]`);
       const q = input.value.trim().toLowerCase();
       picker.querySelectorAll(".machine-option").forEach((opt) => {
-        opt.style.display = opt.dataset.search.includes(q) ? "" : "none";
+        opt.classList.toggle("hidden", !opt.dataset.search.includes(q));
       });
     });
   });

@@ -188,20 +188,47 @@ def healthz():
     return {"ok": True}
 
 
+_STUCK_INGESTION_HOURS = 2
+
+
+def _corpus_readiness(settings) -> tuple[str, str]:
+    """(corpus, ingestion) for /readyz. corpus: "ok", "degraded" (usable but
+    stale), "unusable" (nothing retrievable) or "error" (could not be
+    determined). ingestion: "ok" or "stuck" (a run has claimed to be running
+    for hours)."""
+    try:
+        with get_conn() as conn:
+            retrievable = conn.execute(
+                "SELECT 1 FROM documents d JOIN document_machines dm ON dm.document_id = d.id "
+                "WHERE d.review_status = 'approved' AND d.deactivated_at IS NULL AND d.is_current_revision "
+                "AND dm.review_status = 'approved' LIMIT 1"
+            ).fetchone()
+            stuck = conn.execute(
+                "SELECT 1 FROM ingestion_runs WHERE status = 'running' "
+                "AND started_at < now() - make_interval(hours => %s) LIMIT 1",
+                (_STUCK_INGESTION_HOURS,),
+            ).fetchone()
+    except Exception:
+        return "error", "ok"
+    ingestion = "stuck" if stuck else "ok"
+    if retrievable is None:
+        return "unusable", ingestion
+    status, _ = _corpus_status(settings)
+    return status, ingestion
+
+
 @app.get("/readyz")
 def readyz():
-    """/healthz only proves the process is running -- useful as a liveness
-    probe, but says nothing about whether this instance can actually serve a
-    citation, which needs a reachable database, readable object storage, and
-    a corpus that has synced recently enough to trust. Checked directly
-    rather than assumed.
+    """Readiness: can this instance serve a cited answer right now. Fails
+    (503) when the database or storage is unavailable, when no approved,
+    current, machine-linked document is retrievable, or when that cannot be
+    determined. A corpus that is usable but stale, or an ingestion run that
+    looks stuck, is reported as "degraded"/"stuck" with HTTP 200 so a load
+    balancer keeps serving while alerting can act on the body.
 
-    No auth, same as /healthz -- a deployment platform's readiness probe
-    carries no credentials, and this deliberately reports only booleans/a
-    timestamp, never a filename or manual title, so it stays safe to expose
-    publicly. Reuses routes_config.py's own _corpus_status rather than a
-    third copy of the same staleness math (routes_admin.py's ingestion
-    status endpoint is the second)."""
+    /healthz is the liveness probe (the process is up). No auth, and only
+    booleans and status strings are returned, never a filename or manual
+    title, so this is safe to expose publicly."""
     settings = get_settings()
 
     database_ok = True
@@ -214,16 +241,17 @@ def readyz():
     storage_dir = settings.local_storage_dir_resolved
     storage_ok = storage_dir.is_dir() and os.access(storage_dir, os.R_OK)
 
-    corpus_status, _ = _corpus_status(settings)
+    corpus, ingestion = _corpus_readiness(settings) if database_ok else ("error", "ok")
 
-    ok = database_ok and storage_ok
+    ok = database_ok and storage_ok and corpus in ("ok", "degraded")
     return JSONResponse(
         status_code=200 if ok else 503,
         content={
             "ok": ok,
             "database": "ok" if database_ok else "error",
             "storage": "ok" if storage_ok else "error",
-            "corpus": corpus_status,
+            "corpus": corpus,
+            "ingestion": ingestion,
         },
     )
 

@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="referrer" content="no-referrer" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Accept invitation — Technician Manual Assistant</title>
   <meta name="theme-color" content="#0b1220" />
@@ -9,15 +10,15 @@
   <link rel="stylesheet" href="/static/css/admin.css" />
 </head>
 <body>
-  <div style="max-width:420px; margin:48px auto; padding:0 16px;">
+  <div class="invite-wrap">
     <div class="card">
-      <h1 style="margin-top:0;">Set up your account</h1>
-      <p id="intro" style="color:var(--text-dim);">
+      <h1 class="invite-title">Set up your account</h1>
+      <p id="intro" class="invite-dim">
         You've been invited to Technician Manual Assistant. Choose a password below, then sign in
         from the Android app using this email and password.
       </p>
 
-      <p id="missing-token" style="display:none; color:var(--danger);">
+      <p id="missing-token" class="invite-error hidden">
         This link is missing its invitation token. Ask the administrator who invited you to send
         the link again, exactly as shown in their invitations list.
       </p>
@@ -27,13 +28,13 @@
         <label>Display name (optional) <input id="display-name" type="text" maxlength="100" /></label>
         <label>Password <input id="password" type="password" required minlength="8" maxlength="72" autocomplete="new-password" /></label>
         <label>Confirm password <input id="password2" type="password" required minlength="8" maxlength="72" autocomplete="new-password" /></label>
-        <p id="form-error" style="display:none; color:var(--danger); margin:4px 0 0;"></p>
-        <button type="submit" style="margin-top:8px;">Create account</button>
+        <p id="form-error" class="invite-error invite-form-error hidden"></p>
+        <button type="submit" class="invite-submit">Create account</button>
       </form>
 
-      <div id="success" style="display:none;">
-        <p style="color:var(--accent);">Your account is ready.</p>
-        <p style="color:var(--text-dim);">
+      <div id="success" class="hidden">
+        <p class="invite-accent">Your account is ready.</p>
+        <p class="invite-dim">
           Open the Technician Manual Assistant Android app and sign in with this email and the
           password you just chose.
         </p>

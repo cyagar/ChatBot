@@ -83,3 +83,13 @@
 .login-shell { max-width: 360px; margin: 80px auto; padding: 0 16px; }
 .admin-nav-title { padding: 10px 10px 20px; font-weight: 700; }
 .admin-nav-footer { margin-top: auto; padding-top: 20px; }
+
+/* /invite page. Presentation lives here, not in style attributes, because
+   the CSP is style-src 'self'. */
+.invite-wrap { max-width: 420px; margin: 48px auto; padding: 0 16px; }
+.invite-title { margin-top: 0; }
+.invite-dim { color: var(--text-dim); }
+.invite-accent { color: var(--accent); }
+.invite-error { color: var(--danger); }
+.invite-form-error { margin: 4px 0 0; }
+.invite-submit { margin-top: 8px; }
