@@ -25,16 +25,13 @@ jobs:
     defaults:
       run:
         working-directory: backend
-    # P0-10 (external review, 2026-09-21): this job invoked pytest with no
-    # database at all -- the first test needing one aborted immediately with
-    # "backend/.env.test is missing" (tests/conftest.py's test_env fixture
-    # refuses to run against nothing, or worse, to silently fall back to a
-    # developer's real backend/.env). An ephemeral Postgres service
-    # container, torn down with the job, is what test_env's own TRUNCATE
-    # ... CASCADE runs against below -- never a Neon branch or any other
-    # persistent database, so there is nothing here a bad run could damage
-    # beyond this one job. Only one job today, so "isolated databases per
-    # parallel job" (the review's other ask) doesn't yet apply -- there's no
+    # An ephemeral Postgres service container, torn down with the job, is
+    # what test_env's own TRUNCATE ... CASCADE runs against below -- never a
+    # Neon branch or any other persistent database, so there is nothing here
+    # a bad run could damage beyond this one job (tests/conftest.py's
+    # test_env fixture refuses to run against nothing, or worse, silently
+    # fall back to a developer's real backend/.env). Only one job today, so
+    # isolated databases per parallel job doesn't yet apply -- there's no
     # parallelism to isolate; add a per-job database name if/when a matrix
     # is introduced.
     services:
@@ -95,7 +92,7 @@ jobs:
         # dependency's import path, not anything OCR-specific).
 
       - name: Install Python dependencies
-        # requirements-dev.txt (P2-05) pulls in requirements.txt itself plus
+        # requirements-dev.txt pulls in requirements.txt itself plus
         # pytest/httpx -- this job needs both, unlike the Dockerfile, which
         # only ever installs requirements.txt for the deployed image.
         run: |
@@ -103,7 +100,7 @@ jobs:
           pip install --no-cache-dir -r requirements-dev.txt
 
       - name: Write backend/.env.test for the ephemeral Postgres service
-        # P0-10: a plain postgres:// DSN, not a Neon one -- tests/conftest.py's
+        # A plain postgres:// DSN, not a Neon one -- tests/conftest.py's
         # production-DSN guard (test_env fixture) compares this against
         # backend/.env's real DATABASE_URL and refuses to run if they ever
         # match; CI has no backend/.env at all, so that guard is a no-op
