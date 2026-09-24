@@ -1,12 +1,9 @@
 name: Backend CI
 
-# Change set 2 (UpdatedNextSteps.txt section 14): "Add CI for backend and
-# Android deterministic checks." Runs the full backend/tests/ suite --
-# app.config.Settings.validate_for_startup() isn't invoked (tests/conftest.py's
-# test_env fixture sets env vars directly, never calling that), and no
-# secrets/external services are required: AI_PROVIDER is forced to
-# local_extractive and Google Drive is left unconfigured for every test, per
-# tests/conftest.py's own test_env fixture.
+# Runs the full backend/tests suite against a PostgreSQL 16 service container.
+# No secrets or external services are needed: AI_PROVIDER is forced to
+# local_extractive and Google Drive is left unconfigured by tests/conftest.py's
+# test_env fixture.
 
 on:
   push:

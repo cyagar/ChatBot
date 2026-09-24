@@ -124,9 +124,7 @@ def register(payload: RegisterRequest, request: Request, response: Response):
     # so a technician who typed mixed case at registration can still log in
     # with any casing later.
     email = normalize_email(payload.email)
-    # invitations.expires_at is TIMESTAMPTZ -- psycopg hands it back as a
-    # real tz-aware datetime (unlike SQLite's TEXT column, which forced an
-    # isoformat-string comparison), so `now` must be one too.
+    # invitations.expires_at is TIMESTAMPTZ (a tz-aware datetime), so `now` must be too.
     now = datetime.now(timezone.utc)
 
     with get_conn() as conn:
@@ -163,7 +161,7 @@ def register(payload: RegisterRequest, request: Request, response: Response):
 
         try:
             # A nested transaction (SAVEPOINT under the connection's already
-            # -open outer transaction) -- unlike sqlite3, a Postgres
+            # -open outer transaction) -- a Postgres
             # constraint violation aborts the whole transaction until a
             # ROLLBACK, so without this savepoint the recovery UPDATE in the
             # except block below would itself fail with

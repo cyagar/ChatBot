@@ -187,17 +187,38 @@ def _resolve_machine_mention(question: str) -> tuple[int | None, list[dict]]:
 
 
 @router.post("/conversations", response_model=ConversationOut, status_code=status.HTTP_201_CREATED)
-def create_conversation(payload: CreateConversationRequest, user: CurrentUser = Depends(get_current_user)):
+def create_conversation(
+    payload: CreateConversationRequest,
+    user: CurrentUser = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    if idempotency_key is not None and (not idempotency_key.strip() or len(idempotency_key) > 128):
+        idempotency_key = None
     with get_conn() as conn:
         if payload.machine_id is not None:
             exists = conn.execute("SELECT id FROM machines WHERE id = %s", (payload.machine_id,)).fetchone()
             if not exists:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Machine not found.")
         cur = conn.execute(
-            "INSERT INTO conversations (user_id, machine_id) VALUES (%s, %s) RETURNING id",
-            (user.id, payload.machine_id),
+            "INSERT INTO conversations (user_id, machine_id, idempotency_key) VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id",
+            (user.id, payload.machine_id, idempotency_key),
         )
-        conv_id = cur.fetchone()["id"]
+        created = cur.fetchone()
+        if created is None:
+            existing = conn.execute(
+                "SELECT id, machine_id FROM conversations WHERE user_id = %s AND idempotency_key = %s",
+                (user.id, idempotency_key),
+            ).fetchone()
+            if existing["machine_id"] != payload.machine_id:
+                raise ApiError(
+                    status.HTTP_409_CONFLICT,
+                    "This idempotency key was already used to start a conversation on a different machine.",
+                    "IDEMPOTENCY_PAYLOAD_MISMATCH",
+                )
+            conv_id = existing["id"]
+        else:
+            conv_id = created["id"]
         row = conn.execute(
             "SELECT id, machine_id, title, started_at, updated_at FROM conversations WHERE id = %s",
             (conv_id,),
@@ -209,11 +230,15 @@ def create_conversation(payload: CreateConversationRequest, user: CurrentUser = 
     )
 
 
+def _title_from_question(question: str) -> str:
+    content = question.strip()
+    return content if len(content) <= 80 else content[:79].rstrip() + "…"
+
+
 def _conversation_title(conn, conversation_id: int, stored_title: str | None) -> str | None:
-    """Nothing writes conversations.title -- it is NULL for every
-    conversation, which would make a history list unusable (every row
-    blank) if left as-is. Derive one from the first user message when no
-    stored title exists."""
+    """The title is set once, from the conversation's first question. A
+    conversation without a stored title (one that predates that, or has no
+    question yet) derives it from its first user message."""
     if stored_title:
         return stored_title
     row = conn.execute(
@@ -221,10 +246,7 @@ def _conversation_title(conn, conversation_id: int, stored_title: str | None) ->
         "ORDER BY id ASC LIMIT 1",
         (conversation_id,),
     ).fetchone()
-    if not row:
-        return None
-    content = row["content"].strip()
-    return content if len(content) <= 80 else content[:79].rstrip() + "…"
+    return _title_from_question(row["content"]) if row else None
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
@@ -1071,6 +1093,10 @@ def ask_question(
                         (conversation_id, question, idempotency_key),
                     )
                     user_message_id = cur.fetchone()["id"]
+                    conn.execute(
+                        "UPDATE conversations SET title = %s WHERE id = %s AND title IS NULL",
+                        (_title_from_question(question), conversation_id),
+                    )
             except psycopg.errors.UniqueViolation:
                 # Lost a race against a concurrent request carrying the same
                 # key; the UNIQUE index on (conversation_id, idempotency_key)

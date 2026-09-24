@@ -137,8 +137,7 @@ def list_documents(
         sql += " AND d.status = %s"
         params.append(status_filter)
     if q:
-        # ILIKE, not LIKE -- see routes_machines.py's search_machines() for
-        # why (SQLite's LIKE is case-insensitive by default, Postgres's isn't).
+        # ILIKE: LIKE is case-sensitive in Postgres.
         sql += " AND d.original_filename ILIKE %s"
         params.append(f"%{q}%")
     sql += " ORDER BY d.created_at DESC"
@@ -831,9 +830,6 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
     hours_since_last_success = None
     is_stale = True
     if last_success is not None:
-        # finished_at is already a tz-aware datetime -- Postgres TIMESTAMPTZ,
-        # not SQLite's naive TEXT timestamp that needed fromisoformat() plus
-        # an explicit UTC tzinfo attached by hand.
         finished = last_success["finished_at"]
         hours_since_last_success = (datetime.now(timezone.utc) - finished).total_seconds() / 3600
         is_stale = hours_since_last_success > settings.ingestion_staleness_threshold_hours

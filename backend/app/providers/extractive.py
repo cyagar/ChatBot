@@ -24,7 +24,7 @@ WARNING_RE = re.compile(r"^(WARNING|CAUTION|DANGER|NOTICE|IMPORTANT)\b.*", re.IG
 # Two signals were tried and measured against this corpus (see
 # data/reports/retrieval_eval_report.md and the debug scripts used to produce
 # these numbers) before picking a threshold:
-#   - lexical_score > 0 is USELESS as a gate: FTS5's OR-of-all-terms means any
+#   - lexical_score > 0 is USELESS as a gate: a full-text OR-of-all-terms query means any
 #     shared stopword ("the", "is", "a", "for") produces a positive BM25 score,
 #     and even genuine content-word overlap on a single word ("pressure" in
 #     "tire pressure" vs. "water pressure") produces scores (3.6-12.6) that

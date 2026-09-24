@@ -202,3 +202,39 @@ def test_the_latest_page_of_a_long_conversation_can_be_paged_backward(test_env):
     )
     assert [m["content"] for m in oldest.json()] == [f"message {i}" for i in range(0, 5)]
     assert oldest.headers["X-Has-More"] == "false"
+
+
+def test_a_conversation_title_is_set_once_from_its_first_question(test_env):
+    conv_id = _conversation()
+    _ask(conv_id, _ANSWERABLE_QUESTION, "k1")
+    _ask(conv_id, "a later question", "k2")
+
+    with get_conn() as conn:
+        stored = conn.execute("SELECT title FROM conversations WHERE id = %s", (conv_id,)).fetchone()["title"]
+    assert stored == _ANSWERABLE_QUESTION
+    assert client.get(f"/api/conversations/{conv_id}").json()["title"] == _ANSWERABLE_QUESTION
+
+
+def test_a_retried_start_conversation_request_returns_the_same_conversation(test_env):
+    register_test_user(client, "starter@example.com", role="technician")
+    _seed_answerable_machine()
+    headers = {"Idempotency-Key": "start-1"}
+
+    first = client.post("/api/conversations", json={"machine_id": 1}, headers=headers)
+    again = client.post("/api/conversations", json={"machine_id": 1}, headers=headers)
+
+    assert first.status_code == 201 and again.status_code == 201
+    assert first.json()["id"] == again.json()["id"]
+    with get_conn() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM conversations").fetchone()["n"] == 1
+
+
+def test_the_same_start_key_for_a_different_machine_is_refused(test_env):
+    register_test_user(client, "starter2@example.com", role="technician")
+    _seed_answerable_machine()
+    headers = {"Idempotency-Key": "start-2"}
+    client.post("/api/conversations", json={"machine_id": 1}, headers=headers)
+
+    resp = client.post("/api/conversations", json={"machine_id": None}, headers=headers)
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "IDEMPOTENCY_PAYLOAD_MISMATCH"

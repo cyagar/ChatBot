@@ -97,10 +97,9 @@ def search_machines(
         -- mf.name has to be in GROUP BY too -- Postgres's functional
         -- -dependency exception (grouping by a table's PK lets you select
         -- that table's other columns ungrouped) only covers m.id's own
-        -- table (machines), not a joined table's columns. SQLite never
-        -- enforced this at all.
+        -- table (machines), not a joined table's columns.
         GROUP BY m.id, mf.name
-        -- Postgres (unlike SQLite) evaluates HAVING before the SELECT list,
+        -- Postgres evaluates HAVING before the SELECT list,
         -- so it can't see the "document_count" alias -- repeat the aggregate.
         HAVING COUNT(DISTINCT d.id) > 0
             AND (
@@ -112,10 +111,7 @@ def search_machines(
         ORDER BY mf.name, m.model_name, m.id
         LIMIT %s
     """
-    # ILIKE, not LIKE -- SQLite's LIKE is case-insensitive by default for
-    # ASCII, Postgres's is case-sensitive. Using plain LIKE here would have
-    # silently broken this autocomplete search for any query not matching
-    # the stored casing exactly (e.g. "axiom" no longer finding "Axiom").
+    # ILIKE so the search matches regardless of casing ("axiom" finds "Axiom").
     like = f"%{q}%"
     with get_conn() as conn:
         rows = conn.execute(sql, [
@@ -165,7 +161,7 @@ def recent_machines(
         -- is (user_id, machine_id), and user_id is fixed by the WHERE
         -- clause, so each m.id still gets exactly one row/group.
         GROUP BY m.id, mf.name, r.is_favorite, r.last_used_at
-        -- Postgres (unlike SQLite) evaluates HAVING before the SELECT list,
+        -- Postgres evaluates HAVING before the SELECT list,
         -- so it can't see the "document_count" alias -- repeat the aggregate.
         HAVING COUNT(DISTINCT d.id) > 0
             AND (

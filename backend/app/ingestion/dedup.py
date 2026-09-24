@@ -43,14 +43,6 @@ def shingles(text: str, size: int = SHINGLE_SIZE) -> set[str]:
     return {" ".join(tokens[i : i + size]) for i in range(len(tokens) - size + 1)}
 
 
-def jaccard(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    intersection = len(a & b)
-    union = len(a | b)
-    return intersection / union if union else 0.0
-
-
 def containment(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
@@ -58,31 +50,12 @@ def containment(a: set[str], b: set[str]) -> float:
     return len(a & b) / smaller if smaller else 0.0
 
 
-def content_similarity(text_a: str, text_b: str) -> float:
-    return containment(shingles(text_a), shingles(text_b))
-
-
-def find_near_duplicate(
-    candidate_text: str,
-    existing: list[tuple[int, str]],
-    threshold: float = NEAR_DUPLICATE_THRESHOLD,
-) -> tuple[int, float] | None:
-    """Returns (document_id, similarity) of the best near-duplicate above threshold."""
-    cand = shingles(candidate_text)
-    best: tuple[int, float] | None = None
-    for doc_id, text in existing:
-        sim = containment(cand, shingles(text))
-        if sim >= threshold and (best is None or sim > best[1]):
-            best = (doc_id, sim)
-    return best
-
-
 def find_near_duplicate_cached(
     candidate_text: str,
     existing_shingles: dict[int, set[str]],
     threshold: float = NEAR_DUPLICATE_THRESHOLD,
 ) -> tuple[tuple[int, float] | None, list[tuple[int, float]]]:
-    """Same as find_near_duplicate but takes pre-computed shingle sets, avoiding
+    """Same as the containment search but takes pre-computed shingle sets, avoiding
     re-shingling every prior document for every new one.
 
     Returns (best_match_above_threshold, all_scores) — all_scores is returned so the

@@ -33,11 +33,8 @@ class PersistentCookieJar(context: Context) : CookieJar {
     private val cache = mutableMapOf<String, MutableList<Cookie>>()
 
     init {
-        // Pre-encryption installs stored a plaintext cookie under this same
-        // key name. Discard rather than migrate it (android/README.md):
-        // this is a demo with a known password, a one-time forced re-login
-        // costs nothing, and plaintext-migration code would be dead weight
-        // the moment every real install has upgraded past it.
+        // A plaintext cookie stored under this key by an older install is
+        // discarded, forcing one re-login, rather than migrated.
         prefs.edit().remove(LEGACY_PLAINTEXT_KEY).apply()
 
         loadStoredCookie()?.let { cookie ->

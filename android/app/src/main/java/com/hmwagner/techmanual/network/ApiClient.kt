@@ -14,12 +14,7 @@ import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 
-/**
- * Hand-rolled singleton holder -- deliberately skipping Hilt today (see
- * android/README.md "Scope decisions for the one-day demo"). Retrofitting
- * proper DI is cheap once there's more than one screen's worth of wiring;
- * it wasn't worth the kapt/ksp setup time for a one-day vertical slice.
- */
+/** Singleton holder for the HTTP stack (OkHttp client, Retrofit service, cookie jar). */
 object ApiClient {
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
@@ -123,32 +118,20 @@ object ApiClient {
         }
 
         // Retries a request exactly once when the connection itself failed
-        // (e.g. "unexpected end of stream" from a dead pooled connection
-        // reused after the peer's keep-alive timeout elapsed -- confirmed
-        // 2026-08-25 that a short server-side --timeout-keep-alive reliably
-        // triggers this, and reconfirmed live 2026-09-16 hitting it three
-        // times in ~10 minutes of normal tap-to-tap pacing during device
-        // testing). GET is always safe to retry. Most POSTs are deliberately
-        // NOT retried here, even though OkHttp's own retryOnConnectionFailure
-        // would cover it too -- an append-only write with no idempotency
-        // protection (nothing currently on this client, but a future one is
-        // easy to add without revisiting this) could otherwise write a
-        // second row for a request the server actually received. ask_question
-        // already has its own resilience story instead: a per-turn
-        // Idempotency-Key plus the manual "Retry" button in ChatViewModel that
-        // reuses it (see "Handled during review" in the README) -- that one
-        // deliberately stays a user-initiated action, not an automatic one.
-        //
-        // POST /api/conversations is the one deliberate exception: picking a
-        // machine hit this exact failure repeatedly during testing, and it's
-        // genuinely safe to retry -- create_conversation (routes_chat.py) is
-        // a single plain INSERT with no other side effects, so the worst
-        // case of a retried request the server actually received is one
-        // harmless extra empty conversation, not a duplicated write.
+        // (typically a pooled connection the server already closed). GET is
+        // always safe to retry. POST /api/conversations is retried too, under a
+        // single Idempotency-Key so the server returns the conversation it
+        // already created. Other POSTs are never retried automatically: asking
+        // a question has its own user-initiated Retry that reuses its key.
         val getRetryInterceptor = okhttp3.Interceptor { chain ->
-            val request = chain.request()
-            val retryable = request.method == "GET" ||
-                (request.method == "POST" && request.url.encodedPath == "/api/conversations")
+            val original = chain.request()
+            val isCreateConversation = original.method == "POST" && original.url.encodedPath == "/api/conversations"
+            val request = if (isCreateConversation && original.header("Idempotency-Key") == null) {
+                original.newBuilder().header("Idempotency-Key", java.util.UUID.randomUUID().toString()).build()
+            } else {
+                original
+            }
+            val retryable = request.method == "GET" || isCreateConversation
             if (!retryable) {
                 chain.proceed(request)
             } else {

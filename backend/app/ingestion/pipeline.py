@@ -618,8 +618,7 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
                 (doc_id, ch.page_number, ch.section_heading, ch.chunk_type,
                  ch.content, len(ch.content), ordinal),
             )
-        # No SQLite chunks_fts sync step needed -- chunks.content_tsv is a
-        # Postgres GENERATED column, auto-maintained on every insert.
+        # chunks.content_tsv is a GENERATED column, maintained on every insert.
 
         if near:
             near_id, sim = near
@@ -681,11 +680,8 @@ def _embed_pending_chunks(batch_size: int = 64) -> int:
         with get_conn() as conn:
             for row, vec in zip(batch, vectors):
                 conn.execute(
-                    # ON CONFLICT ... DO UPDATE (SQLite's INSERT OR REPLACE,
-                    # ported) against embeddings' own chunk_id PRIMARY KEY --
-                    # REPLACE semantics update in place rather than
-                    # delete-then-insert, which matters here since nothing
-                    # else references embeddings by a surrogate row id.
+                    # Upsert on the chunk_id primary key: updates in place
+                    # rather than delete-then-insert.
                     "INSERT INTO embeddings (chunk_id, model_name, dim, vector) "
                     "VALUES (%s, %s, %s, %s) "
                     "ON CONFLICT (chunk_id) DO UPDATE SET "

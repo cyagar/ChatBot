@@ -2990,6 +2990,22 @@
         "operationId": "create_conversation_api_conversations_post",
         "parameters": [
           {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
             "in": "cookie",
             "name": "tma_session",
             "required": false,
