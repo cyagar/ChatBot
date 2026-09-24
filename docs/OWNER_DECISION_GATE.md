@@ -1,15 +1,17 @@
-# Owner Decision Gate (2026-08-26)
+# Owner Decision Gate
 
-`UpdatedNextSteps.txt` section 5 requires these eight decisions be made and
-recorded, with named owners, before Phase 1 (versioned API contract) starts.
-Change set 1 (P0A-1 through P0A-6) was complete at the time these were made.
+Recorded business and platform decisions for a native Android client backed by a
+FastAPI + PostgreSQL (Neon) service. Sections 1-9 date from 2026-08-26;
+sections 11-13 from later dates; "Open decisions" at the end lists what still
+needs an owner. Earlier ledgers referenced here are archived in
+`docs/history/`.
 
 **Owner for every decision below: ceyhun@hmwagner.com.** Decided: 2026-08-26.
 
 ## 1. Production milestone
 
-**Decision:** The next milestone is a production-capable pilot, not
-continued expansion of the current FastAPI/SQLite demo.
+**Decision:** The milestone is a production-capable pilot. (The application
+originally ran on SQLite; it now runs on PostgreSQL/Neon.)
 
 ## 2. Identity provider
 
@@ -73,7 +75,7 @@ Concrete service selections:
 
 **Decision:** Google Drive remains the sole source of truth, no change from
 the current implementation (`GoogleDriveSource`, see
-`docs/PRODUCTION_READINESS.md`).
+`docs/history/PRODUCTION_READINESS_LEDGER.md`).
 
 ## 5. BYOD vs. company-managed devices
 
@@ -108,7 +110,7 @@ assignment is needed.
 
 **Factual note for anyone reading this later:** the migration's own audit
 trail (`review_note` on the grandfathered `documents`/`document_machines`
-rows, see `docs/PRODUCTION_READINESS.md`'s "Registration is closed..." entry)
+rows, see `docs/history/PRODUCTION_READINESS_LEDGER.md`'s "Registration is closed..." entry)
 explicitly states that no individual *re-review happened at migration time
 within this system*. That is not in conflict with this decision — the claim
 here is that the real review happened upstream of that migration (before the
@@ -141,7 +143,7 @@ existing FastAPI routes — done against the current app, not a new one.
 
 **All five items above are implemented (2026-08-26, commits `826811b`,
 `6fc65f3`, and the OpenAPI-contract commit that follows this record's own
-update)** — see the new "Phase 1" bullet in `docs/PRODUCTION_READINESS.md`
+update)** — see the "Phase 1" bullet in `docs/history/PRODUCTION_READINESS_LEDGER.md`
 for the detailed accounting. Phase 1 (narrowed scope) is done.
 
 ## 11. Backup and data-retention policy (2026-08-26)
@@ -188,7 +190,7 @@ authorize turning the service on.
 ## 13. Issues.txt follow-up decisions (2026-09-16)
 
 Answered directly, in response to the independent builder-review backlog
-(`Issues.txt`, reviewed commit `2105488`):
+(`docs/history/Issues_2026-08.txt`, reviewed commit `2105488`):
 
 - **Concurrent questions in one conversation: not supported.** A second
   question must not be enterable while one is being answered — the
@@ -226,6 +228,31 @@ Answered directly, in response to the independent builder-review backlog
 - **The historical demo-credential exposure in git history (P0-5): a
   non-issue.** Everything runs local-only; no rotation/deletion action was
   requested.
+
+---
+
+## Open decisions (second audit, 2026-09-24)
+
+Each needs an owner (ceyhun@hmwagner.com unless reassigned) before a broad
+pilot; none is settled by the code.
+
+1. **Deployment topology.** Cloud Run (section 3) versus one persistent Docker
+   host. The application currently assumes a long-lived single process; see the
+   "Deployment topology" gate in `docs/PRODUCTION_READINESS.md`.
+2. **Answer provider for testers.** `local_extractive` (verbatim passages) or
+   `anthropic` (generated, lexically validated, not entailment-checked).
+3. **Anthropic data terms.** Retention setting, region, contractual position,
+   and tester consent wording (`docs/TESTER_ONBOARDING.md`).
+4. **Neon recovery window and restore drill.** Confirm the current plan's
+   point-in-time recovery window and record a timed restore.
+5. **Retention, offboarding and deletion.** Section 11 keeps conversations
+   indefinitely; decide log retention and what happens to a departed
+   technician's history.
+6. **Evidence for the 71 grandfathered manuals.** Section 8 accepts them;
+   record who reviewed which source and when, outside the mutable database
+   rows, and require explicit review for new, revised or high-risk manuals.
+7. **Support ownership.** Incident owner, rollback owner, support contact and
+   stop-testing criteria.
 
 ---
 

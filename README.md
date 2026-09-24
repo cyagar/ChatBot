@@ -1,202 +1,167 @@
 # Technician Manual Assistant
 
-A tablet-first RAG application that lets machine technicians ask natural-language
-questions about commercial food-service equipment (coffee/tea/frozen-beverage
-brewers, dishmachines, espresso machines, warewash controls) and get answers
-grounded in — and cited to — the manufacturer's own manuals.
+A native Android app and FastAPI backend that let machine technicians ask
+questions about commercial food-service equipment and get answers cited to the
+manufacturer's own manuals. An administrator web UI (`/admin`) manages the
+corpus, reviews, invitations and audit trail.
 
-See `docs/ARCHITECTURE.md` for the design and the stack-substitution rationale,
-and `docs/PRODUCTION_READINESS.md` for what's still outstanding before a real
-production launch.
+- `docs/ARCHITECTURE.md` — current design and data flow.
+- `docs/PRODUCTION_READINESS.md` — release gates with owner, status and evidence.
+- `docs/OWNER_DECISION_GATE.md` — recorded business/platform decisions.
+- `docs/DRIVE_RECONCILIATION_RUNBOOK.md`, `docs/RELEASE_RECORD_TEMPLATE.md` — operations.
+- `docs/TESTER_ONBOARDING.md` — accounts, privacy notice, support and offboarding.
+- `android/README.md` — Android build, test and release.
+- `docs/history/` — dated review reports and ledgers. Historical evidence only,
+  never current status.
 
 ## Prerequisites
 
-- **Python 3.12+** (developed and tested on 3.14; all dependencies ship
-  Windows/Linux wheels for both).
-- **Tesseract OCR** — optional, only needed to index scanned/image-only pages.
-  Windows: install from https://github.com/UB-Mannheim/tesseract/wiki, then set
-  `TESSERACT_CMD` in `.env` to the install path.
-- **Docker** — optional, only needed for the containerized deployment path (see
-  `docker-compose.yml`). Not required to run or develop locally.
-- **Node.js** — not currently required. The frontend is server-rendered
-  (FastAPI + Jinja2 + vanilla JS) because Node wasn't available in the initial
-  development environment; see `docs/ARCHITECTURE.md` for the migration path if
-  you want the plan's originally preferred Next.js frontend instead.
+- Python 3.12+ (3.14 is used for local development; the container uses 3.12).
+- A PostgreSQL 16+ database with the `pgvector` extension: a Neon project
+  (see `docs/OWNER_DECISION_GATE.md`) or a local instance.
+- Tesseract OCR (optional; needed only to index scanned pages). Set
+  `TESSERACT_CMD` in `.env`.
+- Docker (optional; container deployment).
 
-## Setup
+## Setup (runtime)
 
 ```bash
 cd backend
 pip install -r requirements.txt
-copy .env.example .env    # (or `cp` on macOS/Linux)
+cp .env.example .env
 ```
 
-Edit `backend/.env`:
+Edit `backend/.env`. Every variable is documented in `.env.example`. The ones
+that matter for a first run:
 
-- `AI_PROVIDER` — `local_extractive` (default, no API key needed, returns
-  verbatim manual passages with citations — zero hallucination risk by
-  construction) or `anthropic` (set `ANTHROPIC_API_KEY` for generated,
-  synthesized answers).
-- `TESSERACT_CMD` — set if you installed Tesseract and want scanned pages
-  indexed.
-- `GOOGLE_DRIVE_FOLDER_ID`/`GOOGLE_SERVICE_ACCOUNT_JSON_PATH` — required to
-  index anything at all. Google Drive is the only document source; there is
-  no local-directory fallback (see "Indexing manuals" below).
+| Variable | Purpose |
+|---|---|
+| `APP_ENV` | `development` for local work. **`production` for any deployed instance**: it enables secure cookies and HSTS and turns on startup validation that refuses weak secrets, a missing `ALLOWED_REGISTRATION_DOMAINS`, a missing database, missing Drive configuration, or a missing Anthropic key. |
+| `SECRET_KEY` | Random secret, at least 32 characters. Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
+| `DATABASE_URL`, `DATABASE_URL_UNPOOLED` | Pooled connection for the app, direct connection for migrations and dumps. Both are required. |
+| `AI_PROVIDER` | `local_extractive` (no API key; returns verbatim passages) or `anthropic` (`ANTHROPIC_API_KEY`, optional `ANTHROPIC_MODEL`). |
+| `GOOGLE_DRIVE_FOLDER_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` | The corpus source. Drive is the only source. |
 
-A `SECRET_KEY` is auto-generated into `.env` on first setup in this repo's
-history; if you're starting fresh, put any random 64-character string there —
-**never commit `.env`** (it's gitignored).
+Never commit `.env`, keystores or service-account keys.
 
-## Indexing manuals
+Generated answers (`AI_PROVIDER=anthropic`) are checked lexically against
+their cited excerpts: numbers and identifiers must appear verbatim, warnings
+must be quoted, and each claim and step must consist of the excerpt's own words
+in order with its negations kept. A no-answer response shows fixed server text
+rather than model prose. This is a mechanical check, not proof that a statement
+is entailed by its source, so technicians must verify against the cited page.
 
-Manuals live in a shared Google Drive folder — that's the single source of
-truth; there is no local upload path or local manuals folder in production
-(one place for the corpus to live means it can't drift out of sync with
-itself). To point a deployment at Drive, set in `.env`:
-
-- `GOOGLE_DRIVE_FOLDER_ID` — the ID from the folder's URL
-  (`drive.google.com/drive/folders/<THIS_PART>`)
-- `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` — path to a downloaded service-account
-  key file (never the key's contents inline in `.env`). Share the target
-  folder with that service account's `client_email` (Viewer is enough).
-
-A background loop (`INGESTION_SYNC_INTERVAL_MINUTES` in `.env`, default 6h)
-automatically re-syncs from Drive on that schedule -- see "Google Drive as
-the document source" below. You don't have to trigger a re-index by hand for
-the corpus to stay current, but you still can, any time — either the admin
-UI (`/admin` → "Ingestion reports" → "Run re-index now") or:
-
-```bash
-python scripts/ingest.py
-```
-
-This is safe to re-run at any time — it's idempotent (unchanged files are
-skipped) and resumable (safe to interrupt and re-run; already-indexed
-documents aren't reprocessed). It prints a summary and writes full per-file
-detail into the `ingestion_runs`/`ingestion_events` tables, browsable from the
-admin UI (`/admin` → "Ingestion reports").
-
-To index only new/changed files without re-embedding everything:
-`python scripts/ingest.py` (embedding is incremental automatically — only
-chunks without an existing embedding are processed).
-
-## Running the app
+## Running locally
 
 ```bash
 cd backend
 python -m uvicorn app.main:app --reload
 ```
 
-There is no public sign-up. Create the first administrator out-of-band:
+Migrations are applied at startup under a database advisory lock, so
+concurrent instances do not race. There is no public sign-up. Create the first
+administrator out-of-band (refused once any user exists):
 
 ```bash
-cd backend
 python scripts/bootstrap_admin.py --email you@example.com
 ```
 
-(Refuses to run once any user already exists.) Log in at the admin dashboard,
-`http://localhost:8000/admin` → **Invitations** to invite technicians (and,
-if needed, additional administrators) — each invite is a single-use,
-expiring, email-bound link you send them yourself. Technicians use the
-Android app, not a browser — the technician PWA was removed (owner decision,
-2026-09-16); only the admin web UI is served from the backend now.
+Sign in at `http://localhost:8000/admin` and use **Invitations** to invite
+technicians. Technicians use the Android app; the backend serves no
+technician web UI.
+
+Liveness is `GET /healthz` (the process is up). Readiness is `GET /readyz`
+(database reachable, storage readable, corpus status).
+
+## Indexing manuals
+
+Manuals live in the shared Google Drive folder. A background loop re-syncs every
+`INGESTION_SYNC_INTERVAL_MINUTES` (default 360; disabled when
+`GOOGLE_DRIVE_FOLDER_ID` is blank), and an administrator can trigger a run from
+`/admin` → Ingestion reports → Run re-index now, or with
+`python scripts/ingest.py`. Runs are idempotent and resumable. Newly ingested or
+replaced manuals are not retrievable until an administrator approves the
+document and its machine links. Approving a replacement retires the previous
+revision atomically; `POST /api/admin/documents/{id}/rollback` restores an
+earlier revision the same way. See `docs/DRIVE_RECONCILIATION_RUNBOOK.md` for
+documents that disappear from Drive.
 
 ## Testing
 
 ```bash
 cd backend
+pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-Covers unit (extraction, chunking, metadata, dedup), ingestion integration
-(idempotency, duplicate detection, resumability — against real temp SQLite DBs
-and real synthetic PDFs, not mocks), retrieval (including the machine-scoping
-isolation test), and API tests (auth, chat flow, rate limiting, authorization).
+Tests run migrations and `TRUNCATE ... CASCADE` against the database named in
+`backend/.env.test` (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`). Point it at a
+disposable Neon branch or local Postgres, never production; the suite refuses to
+start if it matches `backend/.env`. Do not run two pytest processes at once
+against one test database. CI (`.github/workflows/backend-ci.yml`) runs the
+full suite against a PostgreSQL 16 service container.
 
-### Retrieval & citation evaluation
+Android: see `android/README.md`.
+
+### Retrieval evaluation
 
 ```bash
 cd backend
-python scripts/eval_retrieval.py
+EVAL_DATABASE_URL=... EVAL_DATABASE_URL_UNPOOLED=... python scripts/eval_retrieval.py
 ```
 
-Runs the ground-truth question set in `data/eval/ground_truth.json` against
-the live, currently-configured pipeline end-to-end (real embeddings, real
-`AI_PROVIDER`) and writes a scored report to
-`data/reports/retrieval_eval_report.md`. See that file after running for
-current numbers — don't take "the chatbot runs" as evidence it's accurate; this
-report is the actual measurement.
-
-## Backup
-
-Two things to back up:
-
-- The Postgres/Neon database (all metadata, chunks, users, conversations,
-  feedback) — Neon retains point-in-time recovery automatically; for a manual
-  snapshot, `pg_dump "$DATABASE_URL_UNPOOLED" > backup.sql`.
-- `data/object_storage/` — the stored original manual files.
-
-`data/gdrive_cache/` is a local download cache keyed by Drive file ID, not a
-source of record — it doesn't need backing up (the manuals live in Drive;
-this is just so a repeat listing doesn't re-download unchanged files).
+Both variables must name a disposable clone of the corpus (for example a Neon
+branch); the script refuses to run against production. It runs
+`data/eval/ground_truth.json` through the configured pipeline and writes
+`data/reports/retrieval_eval_report.md`. The ground-truth set is small and its
+threshold was tuned on the same cases, so it is a regression check, not
+validation for release.
 
 ## Deployment
 
-`docker-compose.yml` containers the app as built. The database is
-Postgres/Neon (`DATABASE_URL`/`DATABASE_URL_UNPOOLED` in `backend/.env`, not
-containerized); object storage and the Drive download cache stay on local
-disk under `./data`. See `docs/ARCHITECTURE.md` for the broader
-production-architecture roadmap (durable job queue, multi-instance scaling).
+`backend/Dockerfile` builds the service (non-root user, embedding model baked
+in, `--timeout-keep-alive 650` for proxies that hold idle connections).
+`docker-compose.yml` runs one container for local or single-host use:
 
 ```bash
+cp backend/.env.example backend/.env       # then edit
+echo GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME=<key file name in backend/> > .env
+docker compose config                       # verify interpolation before starting
 docker compose up --build
-docker compose exec app python scripts/ingest.py
 ```
+
+Production checklist:
+
+1. `APP_ENV=production`, a real `SECRET_KEY`, both database URLs, Drive
+   settings and `ANTHROPIC_API_KEY` (when `AI_PROVIDER=anthropic`) set.
+2. Object storage (`LOCAL_STORAGE_DIR`) on durable, backed-up storage; the
+   Drive cache (`GDRIVE_CACHE_DIR`) may be ephemeral.
+3. Interactive API docs (`/docs`, `/redoc`, `/openapi.json`) are disabled
+   whenever `APP_ENV` is not `development`; the checked-in
+   `backend/openapi.json` is the client contract.
+4. One application replica unless durable storage, external scheduling and
+   shared rate limiting are in place. See `docs/PRODUCTION_READINESS.md`
+   (deployment topology gate) before scaling out.
+
+## Backup and restore
+
+- Database: Neon point-in-time recovery, and `pg_dump "$DATABASE_URL_UNPOOLED"`
+  for manual snapshots. A timed restore drill into an isolated environment is a
+  release gate; no drill is recorded yet.
+- `data/object_storage/`: the stored original manuals and rendered pages.
+- `data/gdrive_cache/` is a download cache, not a source of record.
 
 ## Administrator guide
 
-From `/admin`:
+From `/admin`: manuals and metadata (every correction is audited), the review
+queue (approve documents and machine links), duplicates, ingestion reports,
+query tester, feedback and unanswered questions, invitations and accounts.
+Deactivating a manual removes it from retrieval and is audited; reactivating it
+as the current revision goes through the rollback path.
 
-- **Manuals & metadata** — see every indexed document, its auto-detected
-  manufacturer/model/doc-type/revision, and correct any of it (every edit is
-  logged with who/why for audit).
-- **Duplicates** — every exact-hash and near-duplicate match found during
-  ingestion.
-- **Ingestion reports** — trigger a re-index and inspect the full per-file
-  report (indexed / duplicate / partial / failed / unsupported, with reasons).
-- **Query tester** — run any question through retrieval and see the exact
-  passages that would be handed to the answer generator, before generation.
-- **Feedback & gaps** — technician feedback and frequently unanswered
-  questions (manual-coverage gap signal).
+## Releases
 
-There is no in-app upload: add a manual to the shared Drive folder, then
-either use "Run re-index now" above or wait for the next automated sync
-(see "Google Drive as the document source" below).
-
-## Google Drive as the document source
-
-`GoogleDriveSource` (`app/ingestion/sources.py`) lists a shared folder via a
-service account, streams each file to `data/gdrive_cache/` keyed by Drive
-file ID, verifies the downloaded bytes against Drive's own advertised
-checksum before caching them, and hashes the cached bytes (Drive only
-exposes an md5 checksum; the rest of the pipeline assumes real SHA-256
-throughout). No `changes.list`/page-token incremental sync -- a full listing
-every re-index is cheap at this corpus size, and the existing sha256
-skip-if-unchanged logic already makes repeat listings idempotent.
-
-Ingestion is both scheduled and manually triggerable, not manual-only:
-`app/ingestion/scheduler.py` runs the same sync path automatically every
-`INGESTION_SYNC_INTERVAL_MINUTES` (default 6h, disabled if
-`GOOGLE_DRIVE_FOLDER_ID` is blank), and "Run re-index now" in the admin UI
-(or `python scripts/ingest.py`) runs it on demand at any time -- e.g. right
-after adding files to Drive, instead of waiting for the next scheduled sync.
-`GET /api/admin/ingestion/status` reports whether the scheduler is enabled,
-when the last successful sync finished, and flags the corpus as stale if
-that exceeds the configured SLA.
-
-`GoogleDriveSource` is the only real document source; there is no
-local-directory fallback used against a real corpus. The test suite exercises
-the ingestion pipeline against `FakeDirectorySource`
-(`tests/ingestion/fakes.py`), a small directory-scanning stand-in pointed at
-synthetic tmp-directory fixtures, so pipeline logic can be tested without
-live Drive access.
+Backend CI and Android CI run on every change. Signed Android builds come from
+the manually triggered `Android release` workflow, which fails when any signing
+secret is missing. Record each distributed build with
+`docs/RELEASE_RECORD_TEMPLATE.md`.
