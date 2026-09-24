@@ -83,9 +83,9 @@ class AppNavSessionExpiryTest {
         assertTrue("PersistentCookieJar must have stored the session cookie from the fake login", ApiClient.hasSession())
     }
 
-    // P1-23 (external review, 2026-09-21): AppNav's own LaunchedEffect(Unit)
-    // now fetches GET /api/config as its first request on every composition
-    // -- every test below that calls composeTestRule.setContent { AppNav(...) }
+    // AppNav's own LaunchedEffect(Unit) fetches GET /api/config as its
+    // first request on every composition -- every test below that calls
+    // composeTestRule.setContent { AppNav(...) }
     // must enqueue this first, ahead of whatever that test's own scenario
     // needs, the same way setUp()'s fake login already comes first.
     private fun configOkResponse() = MockResponse().setResponseCode(200)
@@ -108,7 +108,7 @@ class AppNavSessionExpiryTest {
 
     @Test
     fun a401OnTheFirstAuthenticatedRequestRedirectsToLogin() {
-        // AppNav's own launch-time /me check (P0A-1) runs first and must
+        // AppNav's own launch-time /me check runs first and must
         // succeed here so Home actually mounts -- this test is about the
         // 401 that MachinesViewModel.init{}'s GET api/machines/recent gets
         // once MachinesScreen enters composition, not about /me itself.
@@ -133,10 +133,10 @@ class AppNavSessionExpiryTest {
         assertFalse("AppNav must have consumed the flag via onSessionExpiredHandled()", ApiClient.sessionExpired.value)
     }
 
-    // P1-17 (external review, 2026-09-21): the launch-time /me check used to
-    // treat ANY non-2xx response identically to a 401 -- a transient outage
-    // (500/503/429) during cold launch signed a technician out of a
-    // perfectly valid session, the same as a genuinely revoked one.
+    // The launch-time /me check must not treat ANY non-2xx response
+    // identically to a 401 -- a transient outage (500/503/429) during cold
+    // launch must not sign a technician out of a perfectly valid session,
+    // the same as a genuinely revoked one would be.
     @Test
     fun aTransientServerErrorOnTheStartupMeCallDoesNotSignOut() {
         server.enqueue(configOkResponse())
@@ -161,8 +161,8 @@ class AppNavSessionExpiryTest {
         )
     }
 
-    // P1-23 (external review, 2026-09-21): maintenance_mode from GET
-    // /api/config must block the app entirely -- not just Home, since there
+    // maintenance_mode from GET /api/config must block the app entirely
+    // -- not just Home, since there
     // is nothing useful to do at Login either during an incident.
     @Test
     fun maintenanceModeBlocksTheAppBeforeHomeOrLoginRenders() {
@@ -229,17 +229,18 @@ class AppNavSessionExpiryTest {
         assertTrue(ApiClient.hasSession())
     }
 
-    // P0A-1 exit gate: "No state, label, message, evidence, saved status, or
-    // selection from one account is visible after another account signs in."
-    // Drives a real conversation open via UI clicks (not just setting
+    // No state, label, message, evidence, saved status, or selection from
+    // one account may be visible after another account signs in. Drives a
+    // real conversation open via UI clicks (not just setting
     // HomeSelectionViewModel fields directly), then forces a session expiry
     // and asserts that logging back in -- even as the SAME account, which is
     // the harder case since a stale label collision wouldn't be visible as an
     // obviously wrong account -- lands back on the machine list, not straight
-    // into the old conversation. Before this fix, AppNav's sessionExpired
-    // handler left HomeSelectionViewModel untouched (it's Activity-scoped,
-    // not tied to the HOME back-stack entry the way the NavHost-cleared
-    // ViewModels are), so a fresh login could reopen the old conversation.
+    // into the old conversation. AppNav's sessionExpired handler must clear
+    // HomeSelectionViewModel too -- it's Activity-scoped, not tied to the
+    // HOME back-stack entry the way the NavHost-cleared ViewModels are, so
+    // leaving it untouched would let a fresh login reopen the old
+    // conversation.
     @Test
     fun sessionExpiryClearsTheSelectedConversationSoALaterLoginStartsClean() {
         server.enqueue(configOkResponse())
@@ -323,7 +324,7 @@ class AppNavSessionExpiryTest {
         composeTestRule.onNodeWithText("Ask about a machine").assertExists()
     }
 
-    // P0A-4: Routes.chat() used to interpolate the machine label directly
+    // Routes.chat() must not interpolate the machine label directly
     // into the route string ("chat/$id?label=$label"). A "/" would split it
     // into extra path segments (breaking route matching entirely); "&" or
     // "%" would corrupt the query value; a real model label ("AJ/AX 100 &
@@ -377,9 +378,8 @@ class AppNavSessionExpiryTest {
         composeTestRule.onNodeWithText(trickyLabel).assertExists()
     }
 
-    // P0A-1 exit gate + test list item 10: a technician must always be able
-    // to sign out of THIS device, even if the server can't be reached to
-    // revoke the session server-side.
+    // A technician must always be able to sign out of THIS device, even if
+    // the server can't be reached to revoke the session server-side.
     @Test
     fun logoutClearsTheLocalSessionEvenWhenTheServerIsUnreachable() {
         server.shutdown()
@@ -389,11 +389,11 @@ class AppNavSessionExpiryTest {
         assertFalse("logout must clear the local session even when the server call fails", ApiClient.hasSession())
     }
 
-    // P1-17: logout() used to await the network call before clearing local
-    // state -- a dead/slow connection could leave the app looking signed in
-    // for up to the full 90s read timeout after the tap. Local state
-    // (including sessionExpired, which AppNav's redirect reacts to) must
-    // flip immediately; the server call is best-effort only, afterward.
+    // logout() must not await the network call before clearing local
+    // state -- a dead/slow connection could otherwise leave the app looking
+    // signed in for up to the full 90s read timeout after the tap. Local
+    // state (including sessionExpired, which AppNav's redirect reacts to)
+    // must flip immediately; the server call is best-effort only, afterward.
     @OptIn(DelicateCoroutinesApi::class)
     @Test
     fun logoutSignalsSessionExpiredWellBeforeASlowServerCallCompletes() {
@@ -403,7 +403,7 @@ class AppNavSessionExpiryTest {
 
         // Polling a short deadline, not a fixed sleep -- proves this happens
         // fast, not merely "eventually" within a window a slow CI runner
-        // could satisfy even under the old, wrong ordering.
+        // could satisfy even if the network call were awaited first.
         val deadline = System.currentTimeMillis() + 1_000
         while (System.currentTimeMillis() < deadline && !ApiClient.sessionExpired.value) {
             Thread.sleep(10)

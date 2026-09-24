@@ -80,7 +80,7 @@ private object Routes {
     const val HISTORY = "history"
     const val SAVED_ANSWERS = "saved_answers"
     const val CHAT = "chat/{conversationId}?label={label}"
-    // P0A-4: a raw machine label interpolated directly into the route could
+    // A raw machine label interpolated directly into the route could
     // break navigation entirely (a "/" splits it into extra path segments)
     // or corrupt the query value ("&", "?", "%"). android.net.Uri.encode is
     // used deliberately, not java.net.URLEncoder: Navigation's own route
@@ -92,20 +92,19 @@ private object Routes {
 }
 
 /**
- * P0A-1: a stored session cookie used to be treated as proof of a valid
- * signed-in user -- `hasSession()` only checks that *something* is saved,
- * not that the server still honors it (expired, revoked, or the account was
- * disabled since the cookie was written). `Checking` gates the very first
- * frame on a real `/me` call so a stale/invalid cookie lands on Login before
- * any account-scoped screen ever renders, instead of flashing Home and then
+ * A stored session cookie alone is not proof of a valid signed-in user --
+ * `hasSession()` only checks that *something* is saved, not that the server
+ * still honors it (expired, revoked, or the account was disabled since the
+ * cookie was written). `Checking` gates the very first frame on a real
+ * `/me` call so a stale/invalid cookie lands on Login before any
+ * account-scoped screen ever renders, instead of flashing Home and then
  * bouncing back via the 401 interceptor.
  */
 private enum class LaunchSessionState { Checking, SignedIn, SignedOut }
 
-// P1-23 (external review, 2026-09-21): GET /api/config carries maintenance
-// state and a minimum supported version, but nothing in Android ever
-// fetched it -- a maintenance incident or a forced-upgrade decision had no
-// way to reach a technician through the app itself.
+// GET /api/config carries maintenance state and a minimum supported
+// version, so a maintenance incident or a forced-upgrade decision can reach
+// a technician through the app itself.
 private data class BlockingConfigState(val title: String, val message: String, val supportContact: String)
 
 @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
@@ -177,11 +176,10 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
                         ApiClient.onSessionExpiredHandled()
                         LaunchSessionState.SignedOut
                     } else {
-                        // P1-17 (external review, 2026-09-21): a temporary
-                        // 500/503/429 here used to be treated identically to
-                        // a 401 -- an outage during cold launch signed a
-                        // technician out of a perfectly valid session. Only
-                        // 401 (get_current_user's own "session expired or
+                        // A temporary 500/503/429 here must not be treated
+                        // like a 401, or an outage during cold launch would
+                        // sign a technician out of a perfectly valid
+                        // session. Only 401 (get_current_user's own "session expired or
                         // invalid" / "user no longer exists" / "disabled"
                         // rejections -- see app/auth/deps.py) is proof the
                         // session itself is bad; anything else is a server
@@ -210,28 +208,24 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
     // Machines/History/Chat ViewModels are), so popUpTo(0) below does NOT
     // clear it on its own -- without HomeContent's own DisposableEffect (see
     // below) actually doing that, a later login as a different account could
-    // reopen the prior account's selected conversation id/label (P0A-1).
-    // This effect deliberately does NOT clear selection itself: found live
-    // on the Tab A9+ (2026-08-26), via a genuinely reproducible instrumented
-    // -test failure invisible to any JVM test, that clearing
+    // reopen the prior account's selected conversation id/label.
+    // This effect deliberately does NOT clear selection itself: clearing
     // selection.selectedId here -- reactively, from code that runs
     // independently of whether Home has actually left composition yet --
     // changes the `key(selection.selectedId ?: -1)` wrapping SinglePaneHome
     // while Home might still be transiently composed, recomposing a
     // brand-new MachinesScreen/MachinesViewModel (and firing its own
     // recentMachines() call) in the gap before this navigate() call's own
-    // backstack change actually removes Home from the tree. That stray,
-    // then-cancelled request desynced a test's MockWebServer response queue
-    // -- but the same race is real against a live server too, just
-    // harmless-looking there (an extra request that loses its race with a
-    // real backend). Reordering navigate() before the clear did NOT fix
-    // this (confirmed by rerunning the same instrumented test) -- Compose
-    // batches snapshot-state writes made without an intervening suspension
-    // into the same recomposition pass regardless of source order, so
-    // whichever runs first in the recomposer's own (unspecified) scope
-    // -processing order still wins. The only reliable fix is to make the
-    // clear happen as an actual consequence of Home leaving composition,
-    // not a reactive side effect racing against it.
+    // backstack change actually removes Home from the tree -- a stray
+    // request that loses its race with a real backend, but one that can
+    // desync a test's MockWebServer response queue. Reordering navigate()
+    // before the clear does not fix this -- Compose batches snapshot-state
+    // writes made without an intervening suspension into the same
+    // recomposition pass regardless of source order, so whichever runs
+    // first in the recomposer's own (unspecified) scope-processing order
+    // still wins. The only reliable fix is to make the clear happen as an
+    // actual consequence of Home leaving composition, not a reactive side
+    // effect racing against it.
     //
     // Guarded on launchState != Checking: the launch-time /me call above
     // runs through the same authExpiryInterceptor as every other request, so
@@ -328,7 +322,7 @@ private fun HomeContent(selection: HomeSelectionViewModel, isExpanded: Boolean) 
     // popUpTo(0), which removes Home entirely) -- not as a reactive side
     // effect racing against that removal (see the long comment on AppNav's
     // sessionExpired LaunchedEffect for why that races and fails on a real
-    // device, P0A-1 found 2026-08-26). onDispose only runs once Home is
+    // device). onDispose only runs once Home is
     // actually gone, so there's no window left for `key(selection.selectedId
     // ?: -1)` below to see a changed value and recompose a fresh
     // SinglePaneHome/MachinesViewModel while Home is still technically

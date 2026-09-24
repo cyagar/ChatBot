@@ -46,11 +46,10 @@ class HistoryViewModel : ViewModel() {
         }
     }
 
-    // P1-11 (external review, 2026-09-21): the backend has supported cursor
-    // pagination on GET /conversations since Phase 1, but nothing in Android
-    // ever passed a cursor -- a technician with more than one page of history
-    // (limit=20) had no way to see anything older than that. Appends onto
-    // the existing list rather than replacing it, the opposite of refresh().
+    // Passes a cursor to GET /conversations so a technician with more than
+    // one page of history (limit=20) can see anything older than that.
+    // Appends onto the existing list rather than replacing it, the
+    // opposite of refresh().
     fun loadMore() {
         val cursor = _state.value.nextCursor ?: return
         if (_state.value.loadingMore) return

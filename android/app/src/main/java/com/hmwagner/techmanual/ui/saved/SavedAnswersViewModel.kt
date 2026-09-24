@@ -18,10 +18,8 @@ data class SavedAnswersUiState(
 )
 
 /**
- * P2-33 (independent follow-up review): the backend's saved-answers
- * capability (POST /messages/{id}/save, used from ChatScreen's "Save" link)
- * had no discover/browse surface in Android -- a technician could mark an
- * answer saved but never see the list again. This is that list, mirroring
+ * The discover/browse surface for the backend's saved-answers capability
+ * (POST /messages/{id}/save, used from ChatScreen's "Save" link) -- mirrors
  * HistoryViewModel's shape/no-init-refresh pattern (the screen's own
  * LaunchedEffect(Unit) covers first load).
  */
@@ -49,9 +47,7 @@ class SavedAnswersViewModel : ViewModel() {
         }
     }
 
-    // P1-11 (external review, 2026-09-21): same gap as HistoryViewModel.loadMore
-    // -- the backend has paginated GET /saved-answers since Phase 1, but
-    // nothing in Android ever requested a page past the first.
+    // Requests a page past the first, same as HistoryViewModel.loadMore.
     fun loadMore() {
         val cursor = _state.value.nextCursor ?: return
         if (_state.value.loadingMore) return
@@ -74,9 +70,8 @@ class SavedAnswersViewModel : ViewModel() {
         }
     }
 
-    // P1-21 (external review, 2026-09-21): this list had no way to remove an
-    // entry -- see routes_chat.py's unsave_answer (POST .../unsave, added
-    // alongside this). Removes the row optimistically so the tap feels
+    // Removes an entry from this list (see routes_chat.py's unsave_answer,
+    // POST .../unsave). Removes the row optimistically so the tap feels
     // immediate; a failure restores it via a plain refresh() rather than
     // trying to re-insert the row in the right spot by hand.
     fun unsave(messageId: Int) {

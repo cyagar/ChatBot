@@ -28,57 +28,53 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * P0A-5: MessageBubble's clarifying-options, citation-chip, and
- * Helpful/Incorrect/Save rows used to be plain `Row`s, which don't wrap --
- * enough items (or long enough labels) at a narrow phone width or large
- * font scale render past the card's edge with no way to reach the
- * off-screen ones. Fixed with `FlowRow`.
+ * MessageBubble's clarifying-options, citation-chip, and
+ * Helpful/Incorrect/Save rows must use `FlowRow`, not plain `Row`s, which
+ * don't wrap -- enough items (or long enough labels) at a narrow phone
+ * width or large font scale would render past the card's edge with no way
+ * to reach the off-screen ones.
  *
- * The actual pre-fix failure mode (found by dumping the real semantics
- * tree on-device, 2026-08-26) is NOT chips positioned past the container's
- * right edge -- a plain `Row` given a bounded max-width constraint from its
- * `Box(width = ...)` ancestor doesn't let total children width exceed that
- * bound either. Instead, once the first long chip consumes nearly all the
- * available width, every subsequent chip in the same `Row` gets measured
- * with essentially zero remaining width and collapses to a literal
- * zero-size placement (left == right) rather than rendering at all: still
- * present in the semantics tree (so `onNodeWithText` finds it), completely
- * invisible and untappable in practice. So the real assertion is that every
- * chip has a genuinely positive width, not that its right edge stays in
- * bounds -- checking only the latter would trivially "pass" on a collapsed,
- * zero-width chip.
+ * The failure mode a plain `Row` produces is NOT chips positioned past the
+ * container's right edge -- a plain `Row` given a bounded max-width
+ * constraint from its `Box(width = ...)` ancestor doesn't let total
+ * children width exceed that bound either. Instead, once the first long
+ * chip consumes nearly all the available width, every subsequent chip in
+ * the same `Row` gets measured with essentially zero remaining width and
+ * collapses to a literal zero-size placement (left == right) rather than
+ * rendering at all: still present in the semantics tree (so
+ * `onNodeWithText` finds it), completely invisible and untappable in
+ * practice. So the real assertion is that every chip has a genuinely
+ * positive width, not that its right edge stays in bounds -- checking only
+ * the latter would trivially "pass" on a collapsed, zero-width chip.
  *
  * Deliberately not a JVM/Robolectric test: this needs a real Compose
  * layout/measurement pass, which only an instrumented test (or a device)
  * can give an honest answer about.
  *
- * P0A-5 pass 2 (2026-08-26, run for real on the Tab A9+): widens the single
- * 360dp/default-font-scale case above into the width x font-scale matrix
- * the plan's exit gate actually asks for -- 360/411dp (phone), and 700/900dp
- * (Medium/Expanded tablet width classes; this tablet's own screen doesn't
- * reach a narrow width naturally, so these use the same Box-constraint
- * technique as the phone widths) each at both the default and a 200% font
- * scale. Before trusting a `CompositionLocalProvider(LocalDensity provides
- * Density(..., fontScale = X))` override for this, confirmed on-device that
- * it actually reaches AssistChip's rendered text: a throwaway probe showed
- * chip height growing from 48dp (the Material3 minimum touch target, which
- * dominates at default scale) to 56dp at a 2x override on an otherwise
- * identical chip -- real measured growth, not a no-op.
+ * Exercises a width x font-scale matrix: 360/411dp (phone), and 700/900dp
+ * (Medium/Expanded tablet width classes, using the same Box-constraint
+ * technique as the phone widths since a tablet's own screen doesn't reach a
+ * narrow width naturally) each at both the default and a 200% font scale.
+ * The `CompositionLocalProvider(LocalDensity provides Density(...,
+ * fontScale = X))` override was confirmed on-device to actually reach
+ * AssistChip's rendered text -- chip height grows from 48dp (the Material3
+ * minimum touch target, which dominates at default scale) to 56dp at a 2x
+ * override on an otherwise identical chip, real measured growth, not a
+ * no-op.
  *
- * NOT covered by this file, and still open per the plan's exit gate:
- * portrait/landscape and split-screen are not exercised as literal device
- * rotations or multi-window states here -- MessageBubble has no
- * orientation- or window-mode-conditional code (confirmed by inspection),
- * so the width matrix above is taken as covering the same layout paths a
- * real rotation or split-screen would hit, but that is a reasoned
- * equivalence, not a device observation of rotation/multi-window itself.
- * Keyboard-open is genuinely different in kind (a height, not width,
- * change) and isn't simulated here at all -- see the README's P0A-5 bullet
- * for what's known about `imePadding()` there instead of a test that fakes
- * an IME. A human accessibility-service listening session and a real-phone
- * run are both still open -- neither is possible from this environment (no
- * phone hardware here, and TalkBack must never be enabled programmatically
- * on this tablet).
+ * NOT covered by this file: portrait/landscape and split-screen are not
+ * exercised as literal device rotations or multi-window states here --
+ * MessageBubble has no orientation- or window-mode-conditional code
+ * (confirmed by inspection), so the width matrix above is taken as
+ * covering the same layout paths a real rotation or split-screen would
+ * hit, but that is a reasoned equivalence, not a device observation of
+ * rotation/multi-window itself. Keyboard-open is genuinely different in
+ * kind (a height, not width, change) and isn't simulated here at all --
+ * see the README for what's known about `imePadding()` there instead of a
+ * test that fakes an IME. A human accessibility-service listening session
+ * and a real-phone run are both still open -- neither is possible from
+ * this environment (no phone hardware here, and TalkBack must never be
+ * enabled programmatically on this tablet).
  */
 @RunWith(AndroidJUnit4::class)
 class ChatScreenLayoutTest {

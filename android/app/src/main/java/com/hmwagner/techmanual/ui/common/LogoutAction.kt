@@ -10,7 +10,7 @@ import com.hmwagner.techmanual.network.ApiClient
 import kotlinx.coroutines.launch
 
 /**
- * P0A-1: a visible logout action, meant to be dropped into every signed-in
+ * A visible logout action, meant to be dropped into every signed-in
  * screen's TopAppBar `actions`. Sets ApiClient.sessionExpired on completion,
  * which is exactly the flag AppNav's existing 401-redirect already reacts
  * to -- a deliberate logout needs the identical "go to login and drop every

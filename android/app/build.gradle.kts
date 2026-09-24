@@ -7,11 +7,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-// P0A-6: BASE_URL used to be a hardcoded personal LAN IP checked into git,
-// with no way to change it without editing this file and rebuilding. Now
-// read from local.properties (already gitignored -- see local.properties.example
-// for the keys) or an environment variable of the same name, so a per-developer
-// or CI endpoint never needs a source edit or a commit.
+// BASE_URL is read from local.properties (already gitignored -- see
+// local.properties.example for the keys) or an environment variable of the
+// same name, so a per-developer or CI endpoint never needs a source edit or
+// a commit.
 val localProperties = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
@@ -83,14 +82,14 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
-            // P1-22 (external review, 2026-09-21): debug and release used to
-            // share one applicationId -- installing a signed release build
-            // over an existing debug install (or vice versa) fails with an
+            // Debug and release must not share one applicationId, or
+            // installing a signed release build over an existing debug
+            // install (or vice versa) fails with an
             // INSTALL_FAILED_UPDATE_INCOMPATIBLE-style signature mismatch,
-            // forcing an uninstall (and losing any local data) first. The
-            // standard fix: only debug gets a distinct id, so the two can
-            // coexist on the same device; release keeps the real
-            // applicationId technicians actually install.
+            // forcing an uninstall (and losing any local data) first. Only
+            // debug gets a distinct id, so the two can coexist on the same
+            // device; release keeps the real applicationId technicians
+            // actually install.
             applicationIdSuffix = ".debug"
             // Dev backend reachable over plain HTTP; src/debug/res/xml/
             // network_security_config_debug.xml permits cleartext broadly
@@ -130,14 +129,13 @@ android {
 // release-assembling task actually executes; assembleDebug,
 // testDebugUnitTest, and connectedDebugAndroidTest never evaluate it.
 //
-// P1-22 (external review, 2026-09-21): the old check was only
-// startsWith("https://") plus an exact placeholder comparison -- it would
-// happily pass "https://" alone, a value with an embedded space, or a URL
-// missing the trailing slash Retrofit's Retrofit.Builder().baseUrl()
-// requires (that one fails at runtime with IllegalArgumentException on the
-// very first API call, not here at build time). Now parsed with
-// java.net.URI and checked for a real https scheme, a non-blank host, and
-// the trailing slash Retrofit actually needs.
+// Must not be just startsWith("https://") plus an exact placeholder
+// comparison -- that would happily pass "https://" alone, a value with an
+// embedded space, or a URL missing the trailing slash Retrofit's
+// Retrofit.Builder().baseUrl() requires (that one fails at runtime with
+// IllegalArgumentException on the very first API call, not here at build
+// time). Parsed with java.net.URI and checked for a real https scheme, a
+// non-blank host, and the trailing slash Retrofit actually needs.
 tasks.register("verifyReleaseBaseUrl") {
     doLast {
         check(releaseBaseUrl != releaseBaseUrlPlaceholder) {

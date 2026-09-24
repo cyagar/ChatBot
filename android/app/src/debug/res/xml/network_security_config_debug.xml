@@ -1,5 +1,5 @@
 <network-security-config>
-    <!-- P0A-6: BASE_URL (app/build.gradle.kts) is now configurable per
+    <!-- BASE_URL (app/build.gradle.kts) is configurable per
          developer/CI via local.properties or an env var, with no fixed set
          of hosts known at build time; a per-host allowlist here would
          defeat that (a new LAN IP would need a source edit here too, even

@@ -46,13 +46,12 @@ interface ApiService {
         @Query("cursor") cursor: String? = null,
     ): Response<List<ConversationOut>>
 
-    // P1-13 (external review, 2026-09-21): the only prior way to refresh a
-    // conversation's own record was listConversations() (fetches every
-    // conversation, the wrong tool for "did this one's machine change") or
-    // setConversationMachine()'s response (only reachable via that one
-    // action) -- ChatViewModel had no way to learn that the server resolved
-    // a machine for this conversation through any other path (a mention in
-    // the question, a clarification answered another way).
+    // Lets ChatViewModel refresh a single conversation's own record directly
+    // -- listConversations() fetches every conversation (the wrong tool for
+    // "did this one's machine change"), and setConversationMachine()'s
+    // response is only reachable via that one action, not via other paths
+    // that can resolve a machine (a mention in the question, a
+    // clarification answered another way).
     @GET("api/conversations/{conversationId}")
     suspend fun getConversation(@Path("conversationId") conversationId: Int): Response<ConversationOut>
 

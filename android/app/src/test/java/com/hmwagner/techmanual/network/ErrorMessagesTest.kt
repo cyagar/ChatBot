@@ -14,9 +14,8 @@ import org.junit.Test
 import retrofit2.Retrofit
 
 /**
- * P2-07 (external review, 2026-09-21): describeError() is what actually
- * reads the backend's correlation_id and surfaces it in a user-facing
- * error message. Uses a real MockWebServer + Retrofit round trip (not a
+ * describeError() reads the backend's correlation_id and surfaces it in a
+ * user-facing error message. Uses a real MockWebServer + Retrofit round trip (not a
  * hand-built Response) since Response.errorBody() behavior is tied to a
  * real OkHttp response.
  */

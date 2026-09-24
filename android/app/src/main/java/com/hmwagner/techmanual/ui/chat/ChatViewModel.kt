@@ -43,9 +43,9 @@ data class ChatUiState(
     // message is that user turn) and is still working on it, or died before
     // finishing. Deliberately a separate flag from pendingEchoUncertain --
     // "definitely accepted, still generating" and "no idea if this was even
-    // received" are different situations and need different copy (P0A-2;
-    // collapsing them into one "uncertain" label showed "Connection lost"
-    // over a question the server had already accepted).
+    // received" are different situations and need different copy --
+    // collapsing them into one "uncertain" label would show "Connection lost"
+    // over a question the server had already accepted.
     val pendingEchoStillProcessing: Boolean = false,
     val composerText: String = "",
     val sending: Boolean = false,
@@ -54,17 +54,17 @@ data class ChatUiState(
     val evidence: EvidenceOut? = null,
     val evidenceDocumentId: Int? = null,
     val evidenceLoading: Boolean = false,
-    // P0A-4: non-2xx and exceptions used to leave both evidence and this
-    // null, so the sheet (gated on evidenceLoading || evidence != null)
-    // never even opened -- the request silently failed with no visible
+    // A non-2xx or exception must not leave both evidence and this null,
+    // or the sheet (gated on evidenceLoading || evidence != null) would
+    // never even open -- the request would silently fail with no visible
     // error and no way to retry. evidenceCitation is retained so Retry can
     // redrive the exact same request without the caller re-supplying it.
     val evidenceError: String? = null,
     val evidenceCitation: CitationOut? = null,
     val savedMessageIds: Set<Int> = emptySet(),
-    // P1-02 (external review, 2026-09-21): each rated message's own rating,
-    // keyed by message id -- mirrors savedMessageIds so a reload shows
-    // "already rated" instead of resetting the buttons to blank.
+    // Each rated message's own rating, keyed by message id -- mirrors
+    // savedMessageIds so a reload shows "already rated" instead of
+    // resetting the buttons to blank.
     val feedbackByMessageId: Map<Int, String> = emptyMap(),
 )
 
@@ -78,14 +78,13 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
     // LazyColumn keys list items on MessageOut.id (see ChatScreen).
     private var nextLocalMessageId = -1
 
-    // P0-07 fix, take 2 (external review, 2026-09-21): the general `sending`
-    // flag is not precise enough to guard `messages` in loadMessages() below
-    // -- selectClarifyingMachine() also sets sending=true and then calls
-    // loadMessages() itself as its OWN update mechanism (not a concurrent
-    // unrelated refresh), and guarding on `sending` there blocked that
-    // legitimate path from ever seeing its reload's messages (broke
-    // "confirming a clarifying machine keeps the composer locked..."). This
-    // flag is scoped specifically to performSend()'s own askQuestion() call
+    // The general `sending` flag is not precise enough to guard `messages`
+    // in loadMessages() below -- selectClarifyingMachine() also sets
+    // sending=true and then calls loadMessages() itself as its OWN update
+    // mechanism (not a concurrent unrelated refresh), and guarding on
+    // `sending` there would block that legitimate path from ever seeing its
+    // reload's messages. This flag is scoped specifically to performSend()'s
+    // own askQuestion() call
     // being in flight, which is the one and only scenario an UNRELATED
     // refresh() (e.g. pull-to-refresh) can race against.
     private var askQuestionInFlight = false
@@ -106,13 +105,13 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
     private suspend fun loadMessages() {
         _state.value = _state.value.copy(loadingHistory = true, error = null)
         try {
-            // P1-13 (external review, 2026-09-21): fetched every reload, not
-            // just after selectClarifyingMachine() -- otherwise state.conversation
-            // stays null (and the toolbar falls back to the stale label
-            // passed through navigation) whenever the server resolves a
-            // machine for this conversation through any other path (a
-            // mention in the question). Best-effort: a failure here must
-            // never block the messages themselves from loading.
+            // Fetched every reload, not just after selectClarifyingMachine()
+            // -- otherwise state.conversation stays null (and the toolbar
+            // falls back to the stale label passed through navigation)
+            // whenever the server resolves a machine for this conversation
+            // through any other path (a mention in the question).
+            // Best-effort: a failure here must never block the messages
+            // themselves from loading.
             val convResp = try {
                 ApiClient.service.getConversation(conversationId)
             } catch (e: CancellationException) {
@@ -136,18 +135,18 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                 // reload landing in that window must not race the original
                 // send: clearing pendingEcho out from under it, or showing a
                 // false "still waiting" banner over a question that hasn't
-                // even had a chance to fail yet (P0A-2).
+                // even had a chance to fail yet.
                 val sendInFlight = current.sending
                 // A pending question is only actually answered once the
-                // reload's own last message is the assistant's reply -- this
-                // used to unconditionally clear pendingEcho on ANY successful
-                // GET, which silently dropped the "still processing"
-                // affordance the moment a duplicate-Idempotency-Key 409 (see
-                // performSend) reloaded a conversation whose last persisted
-                // row was still just the user's own turn (the answer never
-                // finished generating, or the server crashed mid-attempt),
-                // or even a reload that found nothing persisted at all yet
-                // (the original POST may never have reached the server).
+                // reload's own last message is the assistant's reply --
+                // unconditionally clearing pendingEcho on ANY successful GET
+                // would silently drop the "still processing" affordance the
+                // moment a duplicate-Idempotency-Key 409 (see performSend)
+                // reloaded a conversation whose last persisted row was still
+                // just the user's own turn (the answer never finished
+                // generating, or the server crashed mid-attempt), or even a
+                // reload that found nothing persisted at all yet (the
+                // original POST may never have reached the server).
                 // Either way, the question must stay visibly pending and
                 // recoverable, not look complete or vanish.
                 val answered = loaded.isNotEmpty() && loaded.last().role == "assistant"
@@ -169,22 +168,21 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                 // Rehydrate saved state from the server's own record, not
                 // just the messages list itself -- a freshly (re)created
                 // ChatViewModel (rotation between panes, an app restart, or
-                // simply leaving and re-entering this conversation)
-                // previously started this map empty every time, so the
-                // button reset to unmarked and a re-tap silently duplicated
-                // the saved_answers row server-side (found via live tablet
-                // testing 2026-08-25).
+                // simply leaving and re-entering this conversation) would
+                // otherwise start this map empty every time, so the button
+                // would reset to unmarked and a re-tap would silently
+                // duplicate the saved_answers row server-side.
                 _state.value = current.copy(
-                    // External review P0-07 (2026-09-21): this assignment used
-                    // to run unconditionally, even while performSend()'s own
-                    // POST was still awaiting its response -- so a
-                    // pull-to-refresh landing in that window could load the
-                    // server's already-persisted user+assistant turns into
-                    // `messages` here, and when the original POST's response
-                    // then arrived, performSend's success handler
-                    // unconditionally appended its own synthetic user turn +
-                    // the same (already-present) assistant answer on top --
-                    // the server-assigned answer id ended up in `messages`
+                    // This assignment must not run unconditionally while
+                    // performSend()'s own POST is still awaiting its
+                    // response -- otherwise a pull-to-refresh landing in
+                    // that window could load the server's already-persisted
+                    // user+assistant turns into `messages` here, and when
+                    // the original POST's response then arrives,
+                    // performSend's success handler unconditionally appends
+                    // its own synthetic user turn + the same
+                    // (already-present) assistant answer on top -- the
+                    // server-assigned answer id would end up in `messages`
                     // twice, which LazyColumn(items, key={it.id}) treats as a
                     // duplicate-key error. Deliberately guarded on the
                     // narrower askQuestionInFlight, not the general
@@ -314,7 +312,7 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                     // prevent, so keep the same pending echo/key and check
                     // whether it's actually finished now. No point setting an
                     // "already sent, checking…" message of our own here --
-                    // loadMessages() (P0A-2) immediately resets `error` on
+                    // loadMessages() immediately resets `error` on
                     // entry anyway and owns the real "still unanswered"
                     // status/copy once it knows whether the reload actually
                     // found a reply.
@@ -322,14 +320,14 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
                     loadMessages()
                 }
                 else -> {
-                    // External review P0-06 (2026-09-21): this used to restore
-                    // echo.content into the composer unconditionally -- but
-                    // composerText was cleared to "" only at the START of this
-                    // same send() call; if the technician typed a NEW question
-                    // while this one was still failing server-side, that draft
-                    // is what's sitting in composerText right now, and
-                    // restoring the OLD failed question over it silently threw
-                    // the newer draft away. Only restore when the composer is
+                    // Must not restore echo.content into the composer
+                    // unconditionally -- composerText was cleared to "" only
+                    // at the START of this same send() call, so if the
+                    // technician typed a NEW question while this one was
+                    // still failing server-side, that draft is what's
+                    // sitting in composerText right now, and restoring the
+                    // OLD failed question over it would silently throw the
+                    // newer draft away. Only restore when the composer is
                     // still empty (nothing newer has been typed); otherwise
                     // leave the newer draft alone and adjust the message
                     // accordingly, since "your draft wasn't lost" would be
@@ -425,8 +423,7 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
         }
     }
 
-    // P1-21 (external review, 2026-09-21): the Save button was permanently
-    // disabled once tapped, with no way to undo it from the chat screen.
+    // Lets a technician undo a save from the chat screen.
     fun unsaveAnswer(messageId: Int) {
         viewModelScope.launch {
             try {
@@ -460,18 +457,17 @@ class ChatViewModel(private val conversationId: Int) : ViewModel() {
         }
     }
 
-    // External review P0-08 (2026-09-21): each citation tap used to start an
-    // uncancelled coroutine, with no cancellation on dismiss and no check
-    // that a response still belonged to the citation currently open. Tapping
-    // citation B while A was still loading let A's response land last and
-    // overwrite B's evidence/page under B's still-displayed citation header
-    // -- a direct safety risk, since technicians use citations to verify
-    // manual instructions. Fixed with the two guards below: cancelling the
-    // previous load's Job before starting a new one (covers both a new tap
-    // and dismissal), and comparing a monotonically increasing request token
-    // before applying any success/error, so even a response that slips past
-    // cancellation (already in flight when cancel() was called) is ignored
-    // if it's not for the request that's still current.
+    // Each citation tap must cancel any previous load and never let a stale
+    // response apply -- without that, tapping citation B while A was still
+    // loading could let A's response land last and overwrite B's
+    // evidence/page under B's still-displayed citation header, a direct
+    // safety risk since technicians use citations to verify manual
+    // instructions. Guarded two ways: cancelling the previous load's Job
+    // before starting a new one (covers both a new tap and dismissal), and
+    // comparing a monotonically increasing request token before applying
+    // any success/error, so even a response that slips past cancellation
+    // (already in flight when cancel() was called) is ignored if it's not
+    // for the request that's still current.
     private var evidenceJob: kotlinx.coroutines.Job? = null
     private var evidenceRequestToken = 0
 

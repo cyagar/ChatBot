@@ -227,7 +227,7 @@ class MachinesViewModelTest {
 
     @Test
     fun `search waits out the debounce before contacting the server`() {
-        // P0A-3: a real request per keystroke is exactly what this must NOT
+        // A real request per keystroke is exactly what this must NOT
         // do -- assert the debounce delay genuinely holds the request back,
         // not just that the final result is eventually correct. Uses
         // takeRequest's own real (short) timeout, not an immediate
@@ -276,10 +276,10 @@ class MachinesViewModelTest {
 
     @Test
     fun `a slow response for an older query cannot overwrite a newer query's results`() {
-        // P0A-3 regression: search() used to launch an uncancelled coroutine
-        // on every keystroke -- an older, slower response landing AFTER a
-        // newer one used to silently replace its results with stale data.
-        // Deterministic via a blocking dispatcher (same pattern as
+        // search() must cancel the previous coroutine on every keystroke --
+        // an older, slower response landing AFTER a newer one must not
+        // silently replace its results with stale data. Deterministic via a
+        // blocking dispatcher (same pattern as
         // ChatViewModelTest's clarifying-machine race test), not timing
         // luck: the "H" response is held back on the server side until
         // after "Ho"'s has already been applied, then finally released.
@@ -330,12 +330,11 @@ class MachinesViewModelTest {
 
     @Test
     fun `a touchMachine failure does not block navigation or report the conversation as failed`() {
-        // P0A-3 regression: touchMachine used to be awaited INSIDE
-        // selectMachine's own try block, before onCreated -- a network
-        // exception there reported total failure even though the
-        // conversation was already committed server-side, so it never
-        // opened, and a retry could create a second, empty conversation for
-        // the same machine.
+        // touchMachine must not be awaited INSIDE selectMachine's own try
+        // block, before onCreated -- a network exception there would report
+        // total failure even though the conversation was already committed
+        // server-side, so it would never open, and a retry could create a
+        // second, empty conversation for the same machine.
         server.enqueue(jsonResponse("[]"))
         vm = MachinesViewModel()
         awaitRequestCount(1)
@@ -371,9 +370,8 @@ class MachinesViewModelTest {
 
     @Test
     fun `refresh cancelling a still-debouncing search does not leave loading stuck`() {
-        // P0A-3 regression (caught in review, not by an earlier test):
-        // search()'s debounce job used to be the ONLY place that ever
-        // cleared `loading`. refresh()'s searchJob?.cancel() -- needed so a
+        // search()'s debounce job must not be the ONLY place that clears
+        // `loading`. refresh()'s searchJob?.cancel() -- needed so a
         // pull-to-refresh doesn't race a stale search -- could cancel that
         // job before it ever reached search(), stranding `loading = true`
         // forever even though the refresh itself completed successfully.

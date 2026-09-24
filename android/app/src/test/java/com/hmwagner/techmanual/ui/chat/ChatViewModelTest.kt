@@ -70,11 +70,11 @@ class ChatViewModelTest {
     private fun jsonResponse(body: String) =
         MockResponse().setResponseCode(200).setBody(body).addHeader("Content-Type", "application/json")
 
-    // P1-13 (external review, 2026-09-21): loadMessages() now issues a
-    // GET .../conversations/{id} (see ChatViewModel) before its GET
-    // .../messages -- every plain server.enqueue()-based (not Dispatcher
-    // -based, which routes by path and needs no change) refresh()/init
-    // trigger needs one more enqueued response ahead of the messages one.
+    // loadMessages() issues a GET .../conversations/{id} (see ChatViewModel)
+    // before its GET .../messages -- every plain server.enqueue()-based (not
+    // Dispatcher-based, which routes by path and needs no change)
+    // refresh()/init trigger needs one more enqueued response ahead of the
+    // messages one.
     private fun conversationJsonResponse(machineLabel: String? = null) = jsonResponse(
         """{"id": 1, "machine_id": null, "machine_label": ${machineLabel?.let { "\"$it\"" } ?: "null"},
             "started_at": "2026-08-24T00:00:00Z", "updated_at": "2026-08-24T00:00:00Z"}"""
@@ -171,11 +171,9 @@ class ChatViewModelTest {
 
     @Test
     fun `a refresh landing while send is in flight cannot cause a duplicate message once send completes`() {
-        // P0-07 (external review, 2026-09-21): loadMessages() used to
-        // overwrite `messages` from a concurrent GET even while sendInFlight
-        // was true (only pendingEcho/its status flags were guarded, not
-        // `messages` itself). If that GET already showed the server's
-        // persisted answer to the question the client's own POST was still
+        // loadMessages() must not overwrite `messages` from a concurrent GET
+        // while sendInFlight is true. If that GET already shows the server's
+        // persisted answer to the question the client's own POST is still
         // awaiting a response for, performSend's success handler then
         // unconditionally appended its own synthetic user turn + the SAME
         // answer object on top -- the server-assigned answer id ended up in
@@ -214,14 +212,13 @@ class ChatViewModelTest {
 
     @Test
     fun `a failed send does not overwrite a newer draft typed while it was still in flight`() {
-        // P0-06 (external review, 2026-09-21): the failure handler used to
-        // restore the failed question's text into the composer
-        // unconditionally. composerText is cleared to "" only at the START
-        // of send() -- if the technician started typing their NEXT question
-        // while this one was still failing server-side, that newer draft is
-        // what's sitting in composerText when the failure arrives, and
-        // overwriting it with the old failed text silently threw the newer
-        // draft away.
+        // The failure handler must not restore the failed question's text
+        // into the composer unconditionally. composerText is cleared to ""
+        // only at the START of send() -- if the technician started typing
+        // their NEXT question while this one was still failing server-side,
+        // that newer draft is what's sitting in composerText when the
+        // failure arrives, and overwriting it with the old failed text
+        // would silently throw the newer draft away.
         val releaseSend = CountDownLatch(1)
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
@@ -402,14 +399,14 @@ class ChatViewModelTest {
 
     @Test
     fun `a 409 whose reload finds only the persisted user turn keeps the question visibly pending`() {
-        // P0A-2 regression: the favorable case above (reload already has the
-        // assistant's reply) was the only one covered. This is the harder,
-        // and more common, case a server crash or a still-generating answer
-        // actually produces: the duplicate-key POST returns 409, but the
-        // reload's own last message is still just the user's own turn --
-        // loadMessages() used to unconditionally clear pendingEcho on ANY
-        // successful GET regardless, making the retry/processing affordance
-        // vanish while no answer exists at all.
+        // Covers the harder, and more common, case a server crash or a
+        // still-generating answer actually produces (the favorable case,
+        // where reload already has the assistant's reply, is covered
+        // above): the duplicate-key POST returns 409, but the reload's own
+        // last message is still just the user's own turn -- loadMessages()
+        // must not unconditionally clear pendingEcho on ANY successful GET
+        // regardless, or the retry/processing affordance would vanish while
+        // no answer exists at all.
         var askCount = 0
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when {
@@ -453,14 +450,13 @@ class ChatViewModelTest {
 
     @Test
     fun `refresh picks up a machine the server resolved for this conversation`() {
-        // P1-13 (external review, 2026-09-21): ChatScreen's toolbar used to
-        // read only the label passed through navigation -- a snapshot from
-        // whenever the screen was opened, never updated when the server
-        // resolved a machine for the conversation through some other path
-        // (a mention in the question). state.conversation is now refreshed
-        // on every loadMessages() call, not just after
-        // selectClarifyingMachine(); this pins that it actually reaches the
-        // ViewModel's state.
+        // ChatScreen's toolbar must not read only the label passed through
+        // navigation -- a snapshot from whenever the screen was opened,
+        // never updated when the server resolves a machine for the
+        // conversation through some other path (a mention in the
+        // question). state.conversation is refreshed on every
+        // loadMessages() call, not just after selectClarifyingMachine();
+        // this pins that it actually reaches the ViewModel's state.
         assertNull("no machine resolved yet at setUp()", vm.state.value.conversation?.machine_label)
 
         server.enqueue(conversationJsonResponse(machineLabel = "Bunn-O-Matic Corporation Axiom"))
@@ -491,7 +487,7 @@ class ChatViewModelTest {
 
     @Test
     fun `refresh cannot clear an in-flight pending echo when nothing has been persisted yet`() {
-        // P0A-2: a pull-to-refresh (ChatScreen's PullToRefreshBox calls the
+        // A pull-to-refresh (ChatScreen's PullToRefreshBox calls the
         // same refresh() -> loadMessages() this test drives directly) must
         // never make an uncertain pending question look resolved just
         // because the reload happened to succeed -- an empty reload here
@@ -520,7 +516,7 @@ class ChatViewModelTest {
 
     @Test
     fun `a refresh landing while the original send is still in flight cannot misreport or clear its pendingEcho`() {
-        // P0A-2: ChatScreen's PullToRefreshBox has no guard against pulling
+        // ChatScreen's PullToRefreshBox has no guard against pulling
         // to refresh while a send is genuinely still in flight (a real
         // answer takes 20-30s per ApiClient.kt's own comment, plenty of time
         // for an impatient pull). That reload's own GET can easily return
@@ -571,13 +567,12 @@ class ChatViewModelTest {
 
     @Test
     fun `a non-2xx evidence response surfaces a visible, retryable error instead of silently closing the sheet`() {
-        // P0A-4 regression: openCitation used to check neither isSuccessful
-        // nor anything else on failure -- resp.body() is simply null for a
-        // non-2xx response, so evidence stayed null and evidenceLoading just
-        // went back to false. ChatScreen only shows the sheet for
-        // (evidenceLoading || evidence != null), so a failed request closed
-        // it completely silently, with nothing to retry. Covers the codes
-        // the plan calls out: 401, 403, 404, 500 -- all take the same
+        // openCitation must check isSuccessful, not just resp.body() -- the
+        // body is simply null for a non-2xx response, so a bare null check
+        // would leave evidence null and evidenceLoading false. ChatScreen
+        // only shows the sheet for (evidenceLoading || evidence != null),
+        // so a failed request would close it completely silently, with
+        // nothing to retry. Covers 401, 403, 404, 500 -- all take the same
         // isSuccessful-false branch, so one loop is real coverage, not
         // four copies of the same assertion.
         for (code in listOf(401, 403, 404, 500)) {
@@ -649,13 +644,12 @@ class ChatViewModelTest {
 
     @Test
     fun `tapping citation B while A is still loading shows B's evidence, never A's stale response`() {
-        // P0-08 (external review, 2026-09-21): each citation tap used to
-        // start an uncancelled coroutine with no check that a response still
-        // belonged to the currently-open citation. A (chunk 1) is delayed
-        // behind a latch; B (chunk 2) is tapped and resolves first; A is then
-        // released and must NOT be allowed to overwrite B's already-displayed
-        // evidence -- a direct safety risk, since technicians use citations
-        // to verify manual instructions.
+        // Each citation tap must cancel any previous load and check that a
+        // response still belongs to the currently-open citation. A (chunk 1)
+        // is delayed behind a latch; B (chunk 2) is tapped and resolves
+        // first; A is then released and must NOT be allowed to overwrite
+        // B's already-displayed evidence -- a direct safety risk, since
+        // technicians use citations to verify manual instructions.
         val citationA = testCitation.copy(chunk_id = 1, document_id = 1)
         val citationB = testCitation.copy(chunk_id = 2, document_id = 2)
         val releaseA = CountDownLatch(1)
@@ -689,11 +683,11 @@ class ChatViewModelTest {
 
     @Test
     fun `dismissing the sheet while a load is still in flight prevents it from reopening`() {
-        // P0-08: dismissEvidence used to only clear state -- a response that
-        // arrived after dismissal still ran its success handler and set
-        // evidence/evidenceLoading again, which the sheet's own visibility
-        // condition (evidenceLoading || evidence != null) would read as
-        // "reopen".
+        // dismissEvidence must do more than clear state -- a response that
+        // arrives after dismissal must not run its success handler and set
+        // evidence/evidenceLoading again, or the sheet's own visibility
+        // condition (evidenceLoading || evidence != null) would read that
+        // as "reopen".
         val release = CountDownLatch(1)
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {

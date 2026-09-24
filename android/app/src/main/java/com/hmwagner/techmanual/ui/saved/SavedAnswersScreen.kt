@@ -134,11 +134,9 @@ private fun SavedAnswerRow(saved: SavedAnswerOut, onClick: () -> Unit, onRemove:
             Column {
                 Text(saved.machine_label ?: "No machine selected", style = MaterialTheme.typography.labelMedium)
                 if (saved.answer.has_withdrawn_source) {
-                    // P0-13 (external review, 2026-09-21): a saved answer's
-                    // source can be withdrawn AFTER it was saved -- this list
-                    // is exactly the "bookmarks" case the finding calls out,
-                    // so the warning must show here, not just after opening
-                    // the full conversation.
+                    // A saved answer's source can be withdrawn AFTER it was
+                    // saved -- this bookmarks list must show the warning
+                    // here, not just after opening the full conversation.
                     Text(
                         "Source withdrawn -- do not rely on this",
                         color = MaterialTheme.colorScheme.error,

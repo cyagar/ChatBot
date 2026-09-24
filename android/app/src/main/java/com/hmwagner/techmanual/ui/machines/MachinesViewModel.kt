@@ -65,7 +65,7 @@ class MachinesViewModel : ViewModel() {
      * deliberate user action, so a failure here does surface an error.
      */
     fun refresh() {
-        // Shares searchJob with onQueryChange() below (P0A-3): cancelling
+        // Shares searchJob with onQueryChange() below: cancelling
         // any pending/in-flight search before a pull-to-refresh avoids a
         // wasted duplicate request for the same query, and -- the direction
         // that actually matters -- lets a keystroke landing DURING a refresh
@@ -105,9 +105,9 @@ class MachinesViewModel : ViewModel() {
         }
     }
 
-    // The one in-flight (or debouncing) search job, if any -- P0A-3: search()
-    // used to launch a brand new, uncancelled coroutine on every keystroke,
-    // so an older, slower response could land AFTER a newer one and silently
+    // The one in-flight (or debouncing) search job, if any -- search() must
+    // not launch a brand new, uncancelled coroutine on every keystroke, or
+    // an older, slower response could land AFTER a newer one and silently
     // overwrite its results with stale data. Cancelling the previous job
     // before starting a new one closes that at the source; the query-match
     // check inside search() below is a second, independent guard for the
@@ -185,7 +185,7 @@ class MachinesViewModel : ViewModel() {
             // flight -- searchJob's own cancellation is the first line of
             // defense, but this check is what actually prevents a response
             // that was ALREADY in flight when a newer keystroke landed from
-            // overwriting that newer query's results (P0A-3).
+            // overwriting that newer query's results.
             if (_state.value.query != q) return
             if (resp.isSuccessful) {
                 _state.value = _state.value.copy(loading = false, results = resp.body().orEmpty())
@@ -210,12 +210,12 @@ class MachinesViewModel : ViewModel() {
                     val conv = resp.body()!!
                     _state.value = _state.value.copy(creatingConversation = false)
                     onCreated(conv.id, conv.machine_label)
-                    // Best-effort and independently observable (P0A-3): this
-                    // used to be awaited HERE, before onCreated -- if it threw
-                    // (a network exception between the two calls), the whole
-                    // function's catch block reported total failure even
-                    // though the conversation was already committed
-                    // server-side, so it never opened AND a retry could
+                    // Fired best-effort, after onCreated, not awaited before
+                    // it -- awaiting it here would mean a thrown exception
+                    // (a network exception between the two calls) makes the
+                    // whole function's catch block report total failure
+                    // even though the conversation was already committed
+                    // server-side, so it would never open AND a retry could
                     // create a second, empty conversation for the same
                     // machine. touchMachine is a recency/favorites
                     // convenience, not part of the conversation itself -- its

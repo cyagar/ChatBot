@@ -58,10 +58,9 @@ data class CitationOut(
     val section_heading: String? = null,
     val revision: String? = null,
     val excerpt: String,
-    // P0-13 (external review, 2026-09-21): the source document's CURRENT
-    // review/withdrawal status, computed fresh by the backend on every
-    // hydration -- an emergency withdrawal retroactively flags every
-    // historical citation that pointed at it.
+    // The source document's CURRENT review/withdrawal status, computed
+    // fresh by the backend on every hydration -- an emergency withdrawal
+    // retroactively flags every historical citation that pointed at it.
     val source_withdrawn: Boolean = false,
 )
 
@@ -83,16 +82,15 @@ data class MessageOut(
     val retry_count: Int = 0,
     val created_at: String,
     val is_saved: Boolean = false,
-    // P0-13: true when any citation's source has been withdrawn or lost
-    // approval since this answer was generated -- the UI must suppress
+    // True when any citation's source has been withdrawn or lost approval
+    // since this answer was generated -- the UI must suppress
     // action-oriented styling and show a clear warning instead of presenting
     // this as current, trustworthy advice.
     val has_withdrawn_source: Boolean = false,
-    // P1-02 (external review, 2026-09-21): the requesting user's own most
-    // recent rating for this answer ("helpful" | "incorrect" |
-    // "missing_info"), or null if never rated -- lets a reload show "already
-    // rated" instead of resetting to blank buttons, the same reason
-    // is_saved exists.
+    // The requesting user's own most recent rating for this answer
+    // ("helpful" | "incorrect" | "missing_info"), or null if never rated --
+    // lets a reload show "already rated" instead of resetting to blank
+    // buttons, the same reason is_saved exists.
     val feedback_rating: String? = null,
 )
 
@@ -114,12 +112,10 @@ data class EvidenceOut(
     val has_page_image: Boolean = false,
 )
 
-// P2-07 (external review, 2026-09-21): defined since Phase 1 but never
-// actually parsed anywhere -- every error message shown to a technician was
-// a generic "(code 500)" with no reference the backend's own logs could be
-// searched by, even though every error response already carries one (see
-// backend/app/api/errors.py's error_body). ErrorMessages.kt's
-// correlationSuffix() is what actually reads this now.
+// Every error response carries a correlation id the backend's own logs can
+// be searched by (see backend/app/api/errors.py's error_body).
+// ErrorMessages.kt's correlationSuffix() reads this to surface it in every
+// error message shown to a technician.
 @Serializable
 data class ApiErrorBody(val detail: String? = null, val correlation_id: String? = null)
 
@@ -131,9 +127,8 @@ data class SavedAnswerOut(
     val answer: MessageOut,
 )
 
-// P1-23 (external review, 2026-09-21): GET /api/config existed since Phase 1
-// but nothing in Android ever called it -- maintenance mode and a minimum
-// supported version had no way to reach a technician.
+// Backs GET /api/config -- maintenance mode and a minimum supported
+// version reach a technician through this.
 @Serializable
 data class ConfigOut(
     val maintenance_mode: Boolean,

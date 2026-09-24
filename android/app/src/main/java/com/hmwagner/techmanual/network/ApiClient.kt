@@ -39,7 +39,7 @@ object ApiClient {
     // screen, clearing every account-scoped screen along the way -- otherwise
     // a signed-in screen either shows a raw "code 401" error forever with no
     // way back in, or (logout) just keeps showing the previous account's data
-    // with no server session behind it (P0A-1).
+    // with no server session behind it.
     private val _sessionExpired = MutableStateFlow(false)
     val sessionExpired: StateFlow<Boolean> = _sessionExpired
 
@@ -48,29 +48,23 @@ object ApiClient {
     }
 
     /**
-     * P0A-1: a visible, explicit sign-out, reachable from every signed-in
-     * screen. Always ends the local session even if the server can't be
-     * reached -- a technician must never be stuck unable to sign out (or
-     * into a different account) just because the network is down.
+     * A visible, explicit sign-out, reachable from every signed-in screen.
+     * Always ends the local session even if the server can't be reached --
+     * a technician must never be stuck unable to sign out (or into a
+     * different account) just because the network is down. Local state is
+     * cleared first, unconditionally, so a dead connection can never leave
+     * the app looking signed in while the (best-effort) server call is
+     * still in flight or timing out.
      *
-     * P1-17 (external review, 2026-09-21): this used to await the network
-     * call BEFORE clearing local state -- on a dead connection, the 90s read
-     * timeout could leave the app looking signed in for up to 90 seconds
-     * after the tap. Local state is now cleared first, unconditionally, and
-     * the server call is fired after as best-effort only.
-     *
-     * Also, despite what this comment used to claim, POST /api/auth/logout
-     * does NOT revoke anything server-side -- it only deletes the response
-     * cookie (see app/auth/routes.py's logout). The session JWT itself is
-     * stateless and stays valid until its natural expiry
-     * (session_ttl_minutes) unless the user's token_version is bumped
-     * (what disable/enable does, and the only real server-side revocation
-     * this backend has). This logout is local-only: it stops THIS app from
-     * presenting the cookie again, nothing more. A stolen/copied cookie
-     * value would remain valid until it expires on its own. Documented here
-     * accurately rather than silently changing to a real server-side
-     * revocation, which would sign the user out of every other device too --
-     * a bigger behavior change than a comment fix should make unasked.
+     * POST /api/auth/logout does NOT revoke anything server-side -- it only
+     * deletes the response cookie (see app/auth/routes.py's logout). The
+     * session JWT itself is stateless and stays valid until its natural
+     * expiry (session_ttl_minutes) unless the user's token_version is
+     * bumped (what disable/enable does, and the only real server-side
+     * revocation this backend has). This logout is local-only: it stops
+     * THIS app from presenting the cookie again, nothing more. A
+     * stolen/copied cookie value would remain valid until it expires on its
+     * own.
      */
     suspend fun logout() {
         // Cancelling in-flight calls here, before clearing, closes a race:

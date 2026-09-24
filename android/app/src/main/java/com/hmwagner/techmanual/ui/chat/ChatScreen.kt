@@ -105,19 +105,15 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                     Column {
                         Text("Chat")
                         Text(
-                            // P1-13 (external review, 2026-09-21): this used
-                            // to read the `machineLabel` nav argument only --
-                            // a snapshot from whenever this screen was
-                            // opened, never updated. state.conversation is
-                            // refreshed on every load/refresh (see
-                            // ChatViewModel.loadMessages) and is the
-                            // authoritative source once it has loaded --
-                            // including a genuinely null machine_label,
-                            // which must win over a stale non-null nav
-                            // argument, not fall back to it. The nav
-                            // argument is only a first-paint fallback before
-                            // that first load completes (state.conversation
-                            // still null).
+                            // state.conversation is refreshed on every
+                            // load/refresh (see ChatViewModel.loadMessages)
+                            // and is the authoritative source once it has
+                            // loaded -- including a genuinely null
+                            // machine_label, which must win over a stale
+                            // non-null nav argument, not fall back to it.
+                            // The `machineLabel` nav argument is only a
+                            // first-paint fallback before that first load
+                            // completes (state.conversation still null).
                             state.conversation?.let { it.machine_label ?: "No machine selected" }
                                 ?: machineLabel ?: "No machine selected",
                             style = MaterialTheme.typography.bodySmall,
@@ -168,13 +164,12 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                                 saved = state.savedMessageIds.contains(msg.id),
                                 onFeedback = { rating -> vm.submitFeedback(msg.id, rating) },
                                 feedback = state.feedbackByMessageId[msg.id],
-                                // P0-05 (external review, 2026-09-21): a
-                                // clarifying-question message's chips used to
-                                // stay live forever, in every loaded message,
-                                // not just the one still awaiting resolution
-                                // -- resuming a pending clarification appends
-                                // a NEW assistant message rather than
-                                // mutating the old one, so an older
+                                // A clarifying-question message's chips must
+                                // stay live only on the message still
+                                // awaiting resolution, not on every loaded
+                                // message -- resuming a pending clarification
+                                // appends a NEW assistant message rather
+                                // than mutating the old one, so an older
                                 // clarifying message's options remain in
                                 // state.messages unchanged after being
                                 // resolved. Only the LAST message in the
@@ -239,7 +234,7 @@ private fun PendingUserBubble(
                         Text("Searching approved manuals…", style = MaterialTheme.typography.labelSmall)
                     }
                 } else if (stillProcessing) {
-                    // P0A-2: the server DEFINITELY has this exact question
+                    // The server DEFINITELY has this exact question
                     // (a reload found its own persisted user turn with no
                     // reply after it yet) and is still working on it, or
                     // died before finishing -- deliberately NOT the same
@@ -369,8 +364,7 @@ private fun MessageBubble(
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
 
                 if (msg.has_withdrawn_source) {
-                    // P0-13 (external review, 2026-09-21): a source cited by
-                    // this answer has since been withdrawn (emergency
+                    // A source cited by this answer has since been withdrawn (emergency
                     // deactivation) or lost approval -- shown first, above
                     // even safety_warnings, so it can't be missed in a
                     // history reload or a saved answer opened later. The
@@ -436,7 +430,7 @@ private fun MessageBubble(
                 }
 
                 if (msg.clarifying_options.isNotEmpty()) {
-                    // FlowRow (P0A-5), not Row -- a plain Row doesn't wrap,
+                    // FlowRow, not Row -- a plain Row doesn't wrap,
                     // so enough clarifying options (or long enough labels)
                     // at a narrow phone width or large font scale render
                     // past the card's edge with no way to reach the
@@ -463,7 +457,7 @@ private fun MessageBubble(
 
                 if (msg.citations.isNotEmpty()) {
                     Text("Sources", style = MaterialTheme.typography.labelMedium)
-                    // FlowRow (P0A-5) -- same overflow risk as the
+                    // FlowRow -- same overflow risk as the
                     // clarifying-options row above, worse here since a
                     // long answer can carry many citations.
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -503,9 +497,7 @@ private fun MessageBubble(
                 // just produce a silent, confusing error on tap.
                 if (msg.role == "assistant" && !msg.is_clarifying_question && !isNoAnswer && msg.answer_status == "completed") {
                     TextButton(onClick = onSave) { Text(if (saved) "Saved" else "Save") }
-                    // P1-02 (external review, 2026-09-21): the app had no way
-                    // to submit answer feedback at all -- these three chips
-                    // are a lightweight per-answer rating, kept re-tappable
+                    // A lightweight per-answer rating, kept re-tappable
                     // (not disabled once set) so a technician can correct a
                     // mis-tap.
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -577,11 +569,11 @@ private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: ()
             if (state.evidenceLoading) {
                 CircularProgressIndicator()
             } else if (state.evidenceError != null) {
-                // P0A-4: this used to be unreachable -- a non-2xx or a
-                // thrown exception left both evidence and this null, and
-                // the sheet is only shown for (evidenceLoading || evidence
-                // != null), so the request just silently failed with no
-                // visible error and no way to retry.
+                // A non-2xx or thrown exception must not leave both
+                // evidence and this null -- the sheet is only shown for
+                // (evidenceLoading || evidence != null), so the request
+                // would otherwise silently fail with no visible error and
+                // no way to retry.
                 Text(state.evidenceError, color = MaterialTheme.colorScheme.error)
                 TextButton(onClick = onRetry) { Text("Retry") }
             } else if (state.evidence != null) {

@@ -4,13 +4,11 @@ import kotlinx.serialization.json.Json
 import retrofit2.Response
 
 /**
- * P2-07 (external review, 2026-09-21): "correlation IDs are already in the
- * error envelope; show them in Android/admin errors" -- admin.js already
- * does this (P1-08's showError/api()); this is the Android side. Every
- * error response body already carries a correlation_id
- * (backend/app/api/errors.py's error_body), but nothing in Android ever
- * read it -- a technician's "couldn't save (code 500)" report gave support
- * nothing to search the backend's logs by.
+ * Every error response body carries a correlation_id
+ * (backend/app/api/errors.py's error_body); reading it here lets a
+ * technician's "couldn't save (code 500)" report give support something to
+ * search the backend's logs by, matching admin.js's showError/api() on the
+ * web side.
  */
 private val errorJson = Json { ignoreUnknownKeys = true }
 

@@ -36,11 +36,10 @@ import com.hmwagner.techmanual.network.ConversationOut
 import com.hmwagner.techmanual.ui.common.LogoutAction
 
 /**
- * Past conversations across all machines, most recently updated first (the
- * same GET /conversations the backend already exposed for P1-3 -- this is
- * the Android UI for it, which didn't exist yet). Tapping one calls
- * `onConversationSelected` with its id/machine_label directly -- no new
- * conversation is created, unlike picking a machine from MachinesScreen.
+ * Past conversations across all machines, most recently updated first, via
+ * GET /conversations. Tapping one calls `onConversationSelected` with its
+ * id/machine_label directly -- no new conversation is created, unlike
+ * picking a machine from MachinesScreen.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
