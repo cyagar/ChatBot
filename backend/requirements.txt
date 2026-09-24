@@ -13,7 +13,7 @@
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
 pydantic[email]==2.13.4
-pydantic-settings==2.7.0
+pydantic-settings==2.15.0
 
 # --- Database (Postgres/Neon) ---
 psycopg[binary]==3.2.10
