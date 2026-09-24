@@ -22,8 +22,8 @@ class VersionCompareTest {
 
     @Test
     fun `a demo suffix is ignored, comparing only the leading numeric parts`() {
-        assertFalse(isVersionBelowMinimum("0.1.0-demo", "0.1.0"))
-        assertTrue(isVersionBelowMinimum("0.1.0-demo", "0.2.0"))
+        assertFalse(isVersionBelowMinimum("0.1.0-rc1", "0.1.0"))
+        assertTrue(isVersionBelowMinimum("0.1.0-rc1", "0.2.0"))
     }
 
     @Test

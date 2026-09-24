@@ -31,7 +31,7 @@ we think it is" has no answer.
 - **APK SHA-256:** (`sha256sum app-release.apk` or the CI job's own output)
 - **Signing certificate fingerprint** (`apksigner verify --print-certs`,
   the SHA-256 line):
-- **Built by:** CI run (link to the `build-release-candidate` job) / local
+- **Built by:** CI run (link to the `Android release` workflow run) / local
   machine (note whose)
 
 ## Signing key custody

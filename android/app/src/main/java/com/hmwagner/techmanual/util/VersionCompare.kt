@@ -2,9 +2,8 @@ package com.hmwagner.techmanual.util
 
 /**
  * Best-effort dotted-numeric-version comparison for BuildConfig.VERSION_NAME
- * against the backend's minimum_supported_version. Neither string is guaranteed proper semver -- this app's own
- * versionName is "0.1.0-demo" -- so this only compares the leading run of
- * dot-separated integers and ignores any trailing suffix. Fails open
+ * against the backend's minimum_supported_version. Neither string is guaranteed proper semver, so this only
+ * compares the leading run of dot-separated integers and ignores any trailing suffix. Fails open
  * (returns false, "not below minimum") on anything it can't confidently
  * parse as at least one integer: an ambiguous or malformed version string is
  * not grounds to lock a technician out of the app.

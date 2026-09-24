@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     # Compared against nothing automatically -- there is no client-submitted
     # app-version header/field this checks against yet. Kept in sync by hand
     # with android/app/build.gradle.kts's versionName for now.
-    minimum_supported_version: str = "0.1.0-demo"
+    minimum_supported_version: str = "0.1.0"
     # A real support inbox/URL for this deployment. The default below is a
     # placeholder, not a live inbox -- set this explicitly before treating
     # /api/config's support_contact as something a technician can actually

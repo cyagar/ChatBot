@@ -53,12 +53,11 @@ android {
 
     defaultConfig {
         applicationId = "com.hmwagner.techmanual"
-        // Placeholder pending the Phase 0 fleet inventory (plan section 6) --
-        // this is not a real minSdk decision, just a safe floor for the demo.
+        // java.time (no desugaring) and adaptive launcher icons both need API 26.
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0-demo"
+        versionCode = 2
+        versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

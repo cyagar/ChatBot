@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Open manual: two pages meeting at the spine, inside the 66dp safe zone. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,36 L52,40 L52,74 L30,70 Z" />
+    <path
+        android:fillColor="#E6EEF5"
+        android:pathData="M56,40 L78,36 L78,70 L56,74 Z" />
+    <path
+        android:fillColor="#1F4E79"
+        android:pathData="M35,45 L47,47.2 L47,49.2 L35,47 Z M35,51 L47,53.2 L47,55.2 L35,53 Z M35,57 L47,59.2 L47,61.2 L35,59 Z" />
+    <path
+        android:fillColor="#1F4E79"
+        android:pathData="M61,47.2 L73,45 L73,47 L61,49.2 Z M61,53.2 L73,51 L73,53 L61,55.2 Z M61,59.2 L73,57 L73,59 L61,61.2 Z" />
+</vector>
