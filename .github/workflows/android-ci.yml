@@ -29,7 +29,7 @@ jobs:
       # even with an old launcher JVM -- see android/README.md's Prerequisites
       # section) -- the launcher JVM setup-java provides here doesn't need to
       # match it.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: "temurin"
           java-version: "17"
