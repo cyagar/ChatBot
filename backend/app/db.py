@@ -148,6 +148,9 @@ def split_sql_statements(script: str) -> list[str]:
     return statements
 
 
+_MIGRATION_LOCK_KEY = 7_302_614_001
+
+
 def run_migrations() -> list[str]:
     """Apply any .sql files in migrations/ not yet recorded in schema_migrations.
     Safe to call repeatedly (idempotent).
@@ -178,6 +181,9 @@ def run_migrations() -> list[str]:
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
             "version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
         )
+        # Serializes concurrent instance starts; the applied set is read only
+        # after the lock is held so a waiter sees what the winner applied.
+        conn.execute("SELECT pg_advisory_lock(%s)", (_MIGRATION_LOCK_KEY,))
         already = {r["version"] for r in conn.execute("SELECT version FROM schema_migrations").fetchall()}
         for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
             version = path.stem
@@ -188,5 +194,5 @@ def run_migrations() -> list[str]:
                 conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
             applied.append(version)
     finally:
-        conn.close()
+        conn.close()  # closing the session releases the advisory lock
     return applied

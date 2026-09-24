@@ -1,0 +1,37 @@
+name: Security scan
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "backend/**"
+      - ".github/workflows/security.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/security.yml"
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install scanners
+        run: pip install pip-audit bandit
+
+      # B608 flags f-string SQL built only from constants and placeholder lists.
+      - name: Static analysis (bandit)
+        run: bandit -r app -ll -s B608
+
+      - name: Known vulnerabilities in pinned dependencies (pip-audit)
+        run: pip-audit -r requirements.txt --no-deps --disable-pip

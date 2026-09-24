@@ -852,3 +852,26 @@ def test_p1_08_admin_actions_centrally_disable_show_errors_and_recover_from_401(
     assert source.count("guardedClick(") + source.count("guardedSubmit(") >= 12, (
         "expected most of admin.js's ~15 network-calling handlers to be wrapped"
     )
+
+
+def test_migrations_wait_for_a_concurrent_migrator_to_finish(test_env):
+    import threading
+    import time
+
+    import psycopg
+
+    from app.config import get_settings
+    from app.db import _MIGRATION_LOCK_KEY, run_migrations
+
+    holder = psycopg.connect(get_settings().database_url_unpooled, autocommit=True)
+    holder.execute("SELECT pg_advisory_lock(%s)", (_MIGRATION_LOCK_KEY,))
+    finished = threading.Event()
+    try:
+        worker = threading.Thread(target=lambda: (run_migrations(), finished.set()), daemon=True)
+        worker.start()
+        time.sleep(1.5)
+        assert not finished.is_set(), "a second migrator must wait while another instance holds the lock"
+    finally:
+        holder.execute("SELECT pg_advisory_unlock(%s)", (_MIGRATION_LOCK_KEY,))
+        holder.close()
+    assert finished.wait(20)

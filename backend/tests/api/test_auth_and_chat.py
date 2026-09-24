@@ -814,3 +814,29 @@ def test_rate_limit_enforced(test_env, monkeypatch):
         for i in range(4)
     ]
     assert 429 in statuses, f"expected a 429 among {statuses} after exceeding the 2/minute limit"
+
+
+def test_operator_password_reset_changes_the_password_and_ends_existing_sessions(test_env):
+    from app.auth.password_reset import reset_password
+
+    _register("reset-me@example.com", password="original-pass-1")
+    assert client.get("/api/auth/me").status_code == 200
+
+    reset_password("Reset-Me@example.com", "brand-new-pass-2")
+
+    assert client.get("/api/auth/me").status_code == 401, "the old session must stop working"
+    assert client.post(
+        "/api/auth/login", json={"email": "reset-me@example.com", "password": "original-pass-1"}
+    ).status_code == 401
+    assert client.post(
+        "/api/auth/login", json={"email": "reset-me@example.com", "password": "brand-new-pass-2"}
+    ).status_code == 200
+    with get_conn() as conn:
+        assert conn.execute("SELECT 1 FROM audit_events WHERE event_type = 'password_reset'").fetchone()
+
+
+def test_password_reset_for_an_unknown_account_fails(test_env):
+    from app.auth.password_reset import reset_password
+
+    with pytest.raises(LookupError):
+        reset_password("nobody@example.com", "some-password-1")
