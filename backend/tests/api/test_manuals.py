@@ -94,3 +94,17 @@ def test_p2_03_a_page_over_the_render_pixel_budget_is_rejected_not_rendered(test
         assert "pixel budget" in resp.json()["detail"].lower()
     finally:
         get_settings.cache_clear()
+
+
+def test_the_page_cache_is_bounded_by_bytes_and_evicts_least_recently_used():
+    from app.api.routes_manuals import _ByteBoundedCache
+
+    cache = _ByteBoundedCache(max_bytes=100)
+    cache.put("a", b"x" * 40)
+    cache.put("b", b"x" * 40)
+    assert cache.get("a") is not None  # a is now the most recently used
+    cache.put("c", b"x" * 40)  # 120 bytes total: evicts b, the least recently used
+    assert cache.get("b") is None
+    assert cache.get("a") is not None and cache.get("c") is not None
+    cache.put("huge", b"x" * 101)
+    assert cache.get("huge") is None, "an entry over the whole budget is not cached"

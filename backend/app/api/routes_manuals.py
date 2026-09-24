@@ -10,14 +10,16 @@ the id is a DB primary key, not a filename.
 
 from __future__ import annotations
 
-from functools import lru_cache
+import threading
+from collections import OrderedDict
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 
 from app.auth.deps import CurrentUser, get_current_user
 from app.config import get_settings
 from app.db import get_conn
+from app.rate_limit import limiter
 
 router = APIRouter(prefix="/api/manuals", tags=["manuals"])
 
@@ -105,8 +107,63 @@ def get_manual_file(document_id: int, user: CurrentUser = Depends(get_current_us
 _PAGE_IMAGE_DPI = 150
 
 
-@lru_cache(maxsize=256)
+PAGE_IMAGE_RATE_LIMIT = "60/minute"
+# Rendering is CPU- and memory-heavy: at most this many pages render at once.
+_MAX_CONCURRENT_RENDERS = 2
+_render_slots = threading.BoundedSemaphore(_MAX_CONCURRENT_RENDERS)
+
+
+class _ByteBoundedCache:
+    """Least-recently-used cache bounded by total bytes, not entry count.
+    Keys embed the content-addressed storage path, so a changed manual never
+    hits a stale entry."""
+
+    def __init__(self, max_bytes: int):
+        self._max_bytes = max_bytes
+        self._bytes = 0
+        self._entries: OrderedDict[tuple, bytes] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            value = self._entries.get(key)
+            if value is not None:
+                self._entries.move_to_end(key)
+            return value
+
+    def put(self, key, value: bytes) -> None:
+        if len(value) > self._max_bytes:
+            return
+        with self._lock:
+            if key in self._entries:
+                self._bytes -= len(self._entries.pop(key))
+            self._entries[key] = value
+            self._bytes += len(value)
+            while self._bytes > self._max_bytes:
+                _, evicted = self._entries.popitem(last=False)
+                self._bytes -= len(evicted)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._bytes = 0
+
+
+_page_cache = _ByteBoundedCache(max_bytes=get_settings().page_image_cache_mb * 1024 * 1024)
+
+
 def _render_page_png(document_id: int, storage_path: str, page_number: int) -> bytes:
+    key = (document_id, storage_path, page_number)
+    cached = _page_cache.get(key)
+    if cached is not None:
+        return cached
+    with _render_slots:
+        png = _render_page_png_uncached(storage_path, page_number)
+    _page_cache.put(key, png)
+    return png
+
+
+def _render_page_png_uncached(storage_path: str, page_number: int) -> bytes:
     import fitz  # local import: this module is only needed when a PDF page is requested
 
     settings = get_settings()
@@ -129,7 +186,10 @@ def _render_page_png(document_id: int, storage_path: str, page_number: int) -> b
 
 
 @router.get("/{document_id}/pages/{page_number}/image")
-def get_page_image(document_id: int, page_number: int, user: CurrentUser = Depends(get_current_user)):
+@limiter.limit(PAGE_IMAGE_RATE_LIMIT)
+def get_page_image(
+    document_id: int, page_number: int, request: Request, user: CurrentUser = Depends(get_current_user)
+):
     doc = _get_document(document_id, allow_unapproved=user.role == "administrator")
     if doc["file_type"] != "pdf":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Page images are only available for PDF manuals.")

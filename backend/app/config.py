@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     # page count, decompressed pixel dimensions, or OCR time.
     max_pdf_pages: int = 2000
     max_page_render_pixels: int = 40_000_000  # ~40MP; a real manual page at 300dpi is well under this
+    page_image_cache_mb: int = 64
     ocr_timeout_seconds: int = 30
 
     rate_limit_per_minute: int = 60

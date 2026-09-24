@@ -4221,7 +4221,7 @@
     },
     "/readyz": {
       "get": {
-        "description": "/healthz only proves the process is running -- useful as a liveness\nprobe, but says nothing about whether this instance can actually serve a\ncitation, which needs a reachable database, readable object storage, and\na corpus that has synced recently enough to trust. Checked directly\nrather than assumed.\n\nNo auth, same as /healthz -- a deployment platform's readiness probe\ncarries no credentials, and this deliberately reports only booleans/a\ntimestamp, never a filename or manual title, so it stays safe to expose\npublicly. Reuses routes_config.py's own _corpus_status rather than a\nthird copy of the same staleness math (routes_admin.py's ingestion\nstatus endpoint is the second).",
+        "description": "Readiness: can this instance serve a cited answer right now. Fails\n(503) when the database or storage is unavailable, when no approved,\ncurrent, machine-linked document is retrievable, or when that cannot be\ndetermined. A corpus that is usable but stale, or an ingestion run that\nlooks stuck, is reported as \"degraded\"/\"stuck\" with HTTP 200 so a load\nbalancer keeps serving while alerting can act on the body.\n\n/healthz is the liveness probe (the process is up). No auth, and only\nbooleans and status strings are returned, never a filename or manual\ntitle, so this is safe to expose publicly.",
         "operationId": "readyz_readyz_get",
         "responses": {
           "200": {
