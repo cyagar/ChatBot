@@ -121,6 +121,53 @@ def test_deactivating_already_deactivated_document_404s(test_env):
     assert resp.status_code == 404
 
 
+def test_deactivate_logs_an_audit_event(test_env):
+    with get_conn() as conn:
+        doc_id = _seed_document(conn)
+    _register_admin()
+
+    resp = client.post(f"/api/admin/documents/{doc_id}/deactivate", params={"reason": "Source withdrawn."})
+    assert resp.status_code == 200
+
+    with get_conn() as conn:
+        event = conn.execute(
+            "SELECT * FROM audit_events WHERE event_type = 'document_deactivated' AND target_id = %s",
+            (doc_id,),
+        ).fetchone()
+    assert event is not None
+    assert event["detail"] == "Source withdrawn."
+
+
+def test_reactivate_restores_a_deactivated_document_to_the_default_listing(test_env):
+    with get_conn() as conn:
+        doc_id = _seed_document(conn)
+    _register_admin()
+
+    client.post(f"/api/admin/documents/{doc_id}/deactivate")
+    resp = client.post(f"/api/admin/documents/{doc_id}/reactivate", params={"reason": "Deactivated by mistake."})
+    assert resp.status_code == 200
+
+    listing = client.get("/api/admin/documents").json()
+    assert any(d["id"] == doc_id for d in listing)
+
+    with get_conn() as conn:
+        event = conn.execute(
+            "SELECT * FROM audit_events WHERE event_type = 'document_reactivated' AND target_id = %s",
+            (doc_id,),
+        ).fetchone()
+    assert event is not None
+    assert event["detail"] == "Deactivated by mistake."
+
+
+def test_reactivating_a_document_that_is_not_deactivated_404s(test_env):
+    with get_conn() as conn:
+        doc_id = _seed_document(conn)
+    _register_admin()
+
+    resp = client.post(f"/api/admin/documents/{doc_id}/reactivate")
+    assert resp.status_code == 404
+
+
 def test_direct_upload_endpoint_removed(test_env):
     """Ingestion is Drive-only now -- manuals go in the shared Drive folder,
     not through a local upload endpoint that could drift out of sync with it.

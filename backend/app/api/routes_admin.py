@@ -54,8 +54,9 @@ class DocumentOut(BaseModel):
     review_status: str
     reviewed_at: datetime | None
     needs_reprocessing: bool
+    deactivated_at: datetime | None
 
-    @field_serializer("ingested_at", "reviewed_at")
+    @field_serializer("ingested_at", "reviewed_at", "deactivated_at")
     def _ser_ts(self, v: datetime | None) -> str | None:
         return iso_utc(v)
 
@@ -87,6 +88,7 @@ def _row_to_document(conn, row) -> DocumentOut:
             and (row["extraction_version"] != CURRENT_EXTRACTION_VERSION
                  or row["chunking_version"] != CURRENT_CHUNKING_VERSION)
         ),
+        deactivated_at=row["deactivated_at"],
     )
 
 
@@ -247,6 +249,32 @@ def deactivate_document(document_id: int, reason: str = "Deactivated by administ
         )
         if result.rowcount == 0:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found or already deactivated.")
+        log_audit_event(conn, "document_deactivated", actor_user_id=admin.id,
+                         target_type="document", target_id=document_id, detail=reason)
+    return {"ok": True}
+
+
+@router.post("/documents/{document_id}/reactivate")
+def reactivate_document(document_id: int, reason: str = "Reactivated by administrator.",
+                         admin: CurrentUser = Depends(require_admin)):
+    """Undoes deactivate_document. Only clears deactivated_at -- does not touch
+    review_status or is_current_revision, since a document deactivated for a
+    reason other than "it was superseded" (e.g. deactivated by mistake, or a
+    withdrawn manual reinstated after correction) may need either left exactly
+    as they were. If this document was superseded by another that is now the
+    active one for the same source_ref, an administrator must resolve that
+    overlap explicitly afterward (PATCH .../documents/{id} to correct
+    is_current_revision, or deactivate the other one) -- reactivation alone
+    does not infer which of two active documents should win."""
+    with get_conn() as conn:
+        result = conn.execute(
+            "UPDATE documents SET deactivated_at = NULL WHERE id = %s AND deactivated_at IS NOT NULL",
+            (document_id,),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Document not found or not deactivated.")
+        log_audit_event(conn, "document_reactivated", actor_user_id=admin.id,
+                         target_type="document", target_id=document_id, detail=reason)
     return {"ok": True}
 
 

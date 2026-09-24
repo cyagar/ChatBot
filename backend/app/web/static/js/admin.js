@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { tab: "documents", user: null, documents: [], duplicates: [], runs: [], ingestionStatus: null, feedback: [], unanswered: [], queryResult: null, machines: [], allMachines: [], reviewQueue: [], invitations: [], lastInvite: null };
+const state = { tab: "documents", user: null, documents: [], showDeactivated: false, duplicates: [], runs: [], ingestionStatus: null, feedback: [], unanswered: [], queryResult: null, machines: [], allMachines: [], reviewQueue: [], invitations: [], lastInvite: null };
 const root = document.getElementById("admin-app");
 
 async function api(path, options = {}) {
@@ -138,7 +138,7 @@ const TABS = [
 async function loadTab() {
   if (state.tab === "review") state.reviewQueue = await api("/api/admin/review-queue");
   if (state.tab === "documents") {
-    state.documents = await api("/api/admin/documents");
+    state.documents = await api(`/api/admin/documents${state.showDeactivated ? "?include_deactivated=true" : ""}`);
     if (state.allMachines.length === 0) state.allMachines = await api("/api/admin/machines");
   }
   if (state.tab === "duplicates") state.duplicates = await api("/api/admin/duplicates");
@@ -292,15 +292,17 @@ function renderAccess() {
 // --- Documents / metadata correction ---
 
 function renderDocuments() {
+  const activeCount = state.documents.filter((d) => !d.deactivated_at).length;
   return `
     <h1>Manuals &amp; metadata</h1>
-    <p class="text-dim">${state.documents.length} active document(s). Correct auto-detected metadata below — every edit is logged for audit.</p>
+    <p class="text-dim">${activeCount} active document(s). Correct auto-detected metadata below — every edit is logged for audit.</p>
+    <label class="text-sm"><input type="checkbox" id="show-deactivated-toggle" ${state.showDeactivated ? "checked" : ""} /> Show deactivated (for reactivation/rollback)</label>
     <table class="admin-table">
       <thead><tr><th>File</th><th>Status</th><th>Review</th><th>Manufacturer</th><th>Doc type</th><th>Title</th><th>Revision</th><th>Machines</th><th></th></tr></thead>
       <tbody>
         ${state.documents.map((d) => `
-          <tr>
-            <td>${esc(d.original_filename)}<br><span class="text-dim text-sm">${d.file_type} · ${d.page_count ?? "?"} pages${d.is_current_revision ? "" : " · SUPERSEDED"}</span></td>
+          <tr${d.deactivated_at ? ' class="deactivated-row"' : ""}>
+            <td>${esc(d.original_filename)}<br><span class="text-dim text-sm">${d.file_type} · ${d.page_count ?? "?"} pages${d.is_current_revision ? "" : " · SUPERSEDED"}${d.deactivated_at ? " · DEACTIVATED" : ""}</span></td>
             <td><span class="status-badge ${d.status}">${d.status}</span>${d.status_reason ? `<div class="text-xs text-dim max-w-xs">${esc(d.status_reason)}</div>` : ""}</td>
             <td><span class="status-badge ${d.review_status}">${esc(d.review_status)}</span></td>
             <td>${esc(d.manufacturer || "—")}</td>
@@ -310,7 +312,9 @@ function renderDocuments() {
             <td>${d.machines.map(esc).join(", ") || "—"}</td>
             <td>
               <button class="ghost edit-doc-btn" data-id="${d.id}">Edit</button>
-              <button class="ghost deactivate-btn" data-id="${d.id}">Deactivate</button>
+              ${d.deactivated_at
+                ? `<button class="ghost reactivate-btn" data-id="${d.id}">Reactivate</button>`
+                : `<button class="ghost deactivate-btn" data-id="${d.id}">Deactivate</button>`}
             </td>
           </tr>
           <tr class="edit-row hidden" data-edit-for="${d.id}">
@@ -579,9 +583,22 @@ function wireTabEvents() {
     guardedClick(btn, async () => {
       if (!confirm("Deactivate this manual? It will be removed from search but kept for audit.")) return;
       await api(`/api/admin/documents/${btn.dataset.id}/deactivate`, { method: "POST" });
-      state.documents = await api("/api/admin/documents");
+      state.documents = await api(`/api/admin/documents${state.showDeactivated ? "?include_deactivated=true" : ""}`);
       render();
     });
+  });
+  root.querySelectorAll(".reactivate-btn").forEach((btn) => {
+    guardedClick(btn, async () => {
+      if (!confirm("Reactivate this manual? It will become searchable again.")) return;
+      await api(`/api/admin/documents/${btn.dataset.id}/reactivate`, { method: "POST" });
+      state.documents = await api(`/api/admin/documents${state.showDeactivated ? "?include_deactivated=true" : ""}`);
+      render();
+    });
+  });
+  root.querySelector("#show-deactivated-toggle")?.addEventListener("change", async (e) => {
+    state.showDeactivated = e.target.checked;
+    state.documents = await api(`/api/admin/documents${state.showDeactivated ? "?include_deactivated=true" : ""}`);
+    render();
   });
   root.querySelectorAll(".edit-form[data-id]").forEach((form) => {
     // Only a genuine interaction with the machine picker marks it touched --
@@ -614,7 +631,7 @@ function wireTabEvents() {
         reason: fd.get("reason"),
       };
       await api(`/api/admin/documents/${form.dataset.id}`, { method: "PATCH", body: JSON.stringify(payload) });
-      state.documents = await api("/api/admin/documents");
+      state.documents = await api(`/api/admin/documents${state.showDeactivated ? "?include_deactivated=true" : ""}`);
       render();
     });
   });

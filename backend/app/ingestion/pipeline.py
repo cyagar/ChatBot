@@ -85,7 +85,7 @@ def _record_lock_failure(run_id: int | None, trigger: str, detail: str) -> None:
 @dataclass
 class FileOutcome:
     filename: str
-    status: str          # indexed | duplicate | partial | failed | unsupported | skipped_unchanged | skipped
+    status: str          # indexed | duplicate | partial | failed | unsupported | skipped_unchanged | skipped | missing_from_source
     detail: str | None
     document_id: int | None = None
     chunk_count: int = 0
@@ -224,6 +224,28 @@ def _ingest_all_locked(
 
     try:
         files = source.list_files()
+
+        # An active document whose source_ref no longer appears in this
+        # listing is reported, never auto-deactivated -- a missing Drive file
+        # could mean it was deleted, renamed, or moved out of the shared
+        # folder, and only a human can tell which; see
+        # docs/DRIVE_RECONCILIATION_RUNBOOK.md for how an administrator acts
+        # on this.
+        seen_refs = {sf.source_ref for sf in files}
+        with get_conn() as conn:
+            missing = conn.execute(
+                "SELECT id, original_filename, source_ref FROM documents "
+                "WHERE source_system = %s AND deactivated_at IS NULL AND source_ref != ALL(%s)",
+                (source.source_system, list(seen_refs)),
+            ).fetchall()
+        for m in missing:
+            detail = (
+                f"Active document's source_ref ({m['source_ref']}) was not present in this "
+                "run's listing -- possibly deleted, renamed, or moved out of the shared folder."
+            )
+            with get_conn() as conn:
+                _record_event(conn, run_id, m["original_filename"], "missing_from_source", detail, m["id"])
+            report.outcomes.append(FileOutcome(m["original_filename"], "missing_from_source", detail, document_id=m["id"]))
 
         # Items the source noticed but couldn't/wouldn't include get the same
         # visibility as every other outcome -- an ingestion_events row and a

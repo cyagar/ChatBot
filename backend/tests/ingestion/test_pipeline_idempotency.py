@@ -245,15 +245,13 @@ def test_relocated_corpus_root_does_not_create_a_duplicate_row(test_env, make_pd
     assert active_count == 1, "relocating the corpus root must not create a duplicate document row"
 
 
-def test_document_missing_from_a_later_listing_is_not_deactivated(test_env, make_pdf, manuals_dir):
-    """The pipeline iterates whatever files a listing happens to return but
-    has no reconciliation step for active rows a listing doesn't mention
-    (see PRODUCTION_READINESS.md). A manual temporarily absent from a source
-    listing (Drive outage, a partial page, a file briefly unshared) must not
-    be deactivated just because one run's listing didn't include it -- there
-    is no 'complete, verified listing' concept implemented to safely tell
-    that apart from a real removal, so the current, deliberately
-    conservative behavior is: never deactivate on absence alone."""
+def test_document_missing_from_a_later_listing_is_reported_not_deactivated(test_env, make_pdf, manuals_dir):
+    """A manual absent from a source listing (Drive outage, a partial page, a
+    file briefly unshared, or a real deletion/rename) is reported as
+    'missing_from_source' -- visible in the ingestion report and admin UI,
+    same as any other outcome -- but never auto-deactivated. Only a human,
+    following docs/DRIVE_RECONCILIATION_RUNBOOK.md, can tell an outage apart
+    from a real removal."""
     pdf = make_pdf(["Content about the fryer oil filtration schedule."], name="fryer.pdf")
     shutil.copy(pdf, manuals_dir / pdf.name)
     source = FakeDirectorySource(manuals_dir)
@@ -266,16 +264,22 @@ def test_document_missing_from_a_later_listing_is_not_deactivated(test_env, make
 
     (manuals_dir / pdf.name).unlink()  # the file disappears from the next listing
     second = ingest_all(source=source, embed=False)
-    assert second.counts() == {}, "an empty listing must not itself produce any outcome for the missing file"
+    assert second.counts() == {"missing_from_source": 1}
+    assert second.outcomes[0].document_id == original_id
 
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id, deactivated_at FROM documents WHERE id = %s", (original_id,)
         ).fetchone()
+        event = conn.execute(
+            "SELECT event, document_id FROM ingestion_events WHERE run_id = %s AND event = 'missing_from_source'",
+            (second.run_id,),
+        ).fetchone()
     assert row["deactivated_at"] is None, (
-        "a document absent from one listing must stay active -- there is no safe way yet to "
+        "a document absent from one listing must stay active -- there is no safe way to "
         "distinguish a real removal from an outage or a partial listing"
     )
+    assert event is not None and event["document_id"] == original_id
 
 
 def test_failed_replacement_does_not_retire_the_still_good_active_document(test_env, make_pdf, manuals_dir):
