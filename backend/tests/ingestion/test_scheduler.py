@@ -5,11 +5,8 @@ No real sleeping or Drive access: ingest_all() and asyncio.sleep() are both
 monkeypatched, and every test cancels the loop after a bounded number of
 ticks rather than waiting on a real interval.
 
-The loop sleeps BEFORE its first sync, not after (a deliberate choice: it
-starts on every container restart, and syncing immediately would turn every
-restart into an unconditional live Drive listing/download -- see the
-function's own docstring). Tests that need to observe one ingest_all() call
-therefore let the first fake sleep() return normally and cancel on the
+The loop waits BEFORE its first sync. Tests that need to observe one
+ingest_all() call let the first fake sleep() return normally and cancel on the
 second one, rather than cancelling on the first."""
 
 from __future__ import annotations
@@ -60,7 +57,7 @@ def test_loop_sleeps_before_its_first_sync_then_calls_ingest_all(test_env, monke
         asyncio.run(scheduler.run_scheduled_sync_loop())
 
     assert calls == [(None, True, "scheduled")], "must not sync before the first sleep completes"
-    assert sleep_calls == [5 * 60, 5 * 60]
+    assert sleep_calls == [scheduler.FIRST_SYNC_MIN_DELAY_SECONDS, 5 * 60]
 
 
 def test_loop_survives_a_concurrent_manual_run_holding_the_lock(test_env, monkeypatch):
@@ -87,7 +84,7 @@ def test_loop_survives_a_concurrent_manual_run_holding_the_lock(test_env, monkey
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(scheduler.run_scheduled_sync_loop())
 
-    assert sleep_calls == [5 * 60, 5 * 60], "a locked-out tick must still proceed to sleep for the next one"
+    assert sleep_calls == [scheduler.FIRST_SYNC_MIN_DELAY_SECONDS, 5 * 60], "a locked-out tick must still proceed to sleep for the next one"
 
 
 def test_loop_survives_an_unexpected_exception(test_env, monkeypatch):
@@ -113,7 +110,7 @@ def test_loop_survives_an_unexpected_exception(test_env, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(scheduler.run_scheduled_sync_loop())
 
-    assert sleep_calls == [5 * 60, 5 * 60]
+    assert sleep_calls == [scheduler.FIRST_SYNC_MIN_DELAY_SECONDS, 5 * 60]
 
 
 def test_cancellation_during_a_sync_propagates_without_an_extra_sleep(test_env, monkeypatch):
@@ -138,6 +135,31 @@ def test_cancellation_during_a_sync_propagates_without_an_extra_sleep(test_env, 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(scheduler.run_scheduled_sync_loop())
 
-    assert sleep_calls == [5 * 60], (
+    assert sleep_calls == [scheduler.FIRST_SYNC_MIN_DELAY_SECONDS], (
         "exactly one sleep (before the sync that got cancelled) -- no second sleep afterward"
     )
+
+
+def test_first_wait_is_short_when_the_corpus_has_never_synced(test_env):
+    assert scheduler._seconds_until_next_sync(360) == scheduler.FIRST_SYNC_MIN_DELAY_SECONDS
+
+
+def test_first_wait_is_the_rest_of_the_interval_when_the_corpus_is_fresh(test_env):
+    from app.db import get_conn
+
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO ingestion_runs (status, finished_at) VALUES ('completed', now() - interval '100 minutes')"
+        )
+    wait = scheduler._seconds_until_next_sync(360)
+    assert 259 * 60 < wait <= 260 * 60
+
+
+def test_first_wait_is_short_when_the_last_sync_is_older_than_the_interval(test_env):
+    from app.db import get_conn
+
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO ingestion_runs (status, finished_at) VALUES ('completed', now() - interval '20 hours')"
+        )
+    assert scheduler._seconds_until_next_sync(360) == scheduler.FIRST_SYNC_MIN_DELAY_SECONDS

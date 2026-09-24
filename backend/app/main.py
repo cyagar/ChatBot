@@ -47,6 +47,12 @@ async def lifespan(_app: FastAPI):
     if applied:
         print(f"Applied migrations: {applied}")
 
+    from app.ingestion.pipeline import recover_interrupted_runs
+
+    recovered = recover_interrupted_runs()
+    if recovered:
+        print(f"Marked {recovered} interrupted ingestion run(s) as failed")
+
     # The automated corpus-freshness loop only starts when Drive is actually
     # configured -- get_document_source() itself would raise RuntimeError
     # otherwise, and this avoids that error firing on every tick in any

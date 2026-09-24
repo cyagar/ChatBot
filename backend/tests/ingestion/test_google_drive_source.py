@@ -146,6 +146,19 @@ def test_unchanged_checksum_is_not_redownloaded(tmp_path):
     assert calls == ["f1"], "an unchanged checksum must reuse the cached file, not re-download"
 
 
+def test_a_file_with_no_reported_size_is_not_redownloaded_every_run(tmp_path):
+    page = {"files": [{"id": "f1", "name": "manual.pdf",
+                        "mimeType": "application/pdf", "md5Checksum": "same-checksum"}]}
+    source, service, calls = _make_source(tmp_path, [page], {"f1": b"AAA"})
+    source.list_files()
+    assert calls == ["f1"]
+
+    service._files._pages = [page]
+    service._files.list_calls = 0
+    source.list_files()
+    assert calls == ["f1"], "an unknown size must not invalidate a cache entry whose checksum matches"
+
+
 def test_rename_does_not_leave_a_stale_cache_file_fetchable(tmp_path):
     """A rename must not leave the old cache file behind where fetch()'s
     glob(file_id + "__*") could return either one -- after a rename, fetch()
@@ -216,6 +229,8 @@ def test_undownloadable_files_are_skipped(tmp_path):
 
     assert calls == []
     assert files == []
+    skips = source.pop_skipped()
+    assert len(skips) == 1 and skips[0].is_error, "a manual the service account cannot read is a missing manual"
 
 
 def test_fetch_before_any_listing_raises(tmp_path):
@@ -511,6 +526,7 @@ def test_oversized_file_is_skipped_before_download_and_reported(tmp_path):
     assert len(skips) == 1
     assert skips[0].filename == "huge.pdf"
     assert "MB" in skips[0].reason
+    assert skips[0].is_error, "an oversized manual is missing from the corpus"
 
 
 def test_file_exactly_at_the_size_limit_is_not_skipped(tmp_path):

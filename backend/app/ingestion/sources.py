@@ -246,7 +246,7 @@ class GoogleDriveSource(DocumentSource):
 
             def __init__(self, fileobj):
                 self._fileobj = fileobj
-                self.md5 = hashlib.md5()
+                self.md5 = hashlib.md5(usedforsecurity=False)  # Drive only advertises md5; integrity check, not security
                 self.bytes_written = 0
 
             def write(self, chunk: bytes) -> int:
@@ -341,11 +341,13 @@ class GoogleDriveSource(DocumentSource):
                     logger.warning("Skipping Drive file %s (%r): service account lacks download "
                                     "permission.", file_id, name)
                     self._pending_skips.append(SkippedFile(
-                        name, "The service account does not have permission to download this file."))
+                        name, "The service account does not have permission to download this file.",
+                        is_error=True))
                     continue
 
                 md5 = f.get("md5Checksum")
                 modified_time = f.get("modifiedTime")
+                size_reported = f.get("size") is not None
                 reported_size = int(f.get("size") or 0)
 
                 if reported_size > self.max_file_size_bytes:
@@ -353,7 +355,8 @@ class GoogleDriveSource(DocumentSource):
                                     file_id, name, reported_size, self.max_file_size_bytes)
                     self._pending_skips.append(SkippedFile(
                         name, f"File is {reported_size / (1024 * 1024):.1f} MB, exceeding the "
-                        f"{self.max_file_size_bytes // (1024 * 1024)} MB per-file limit."))
+                        f"{self.max_file_size_bytes // (1024 * 1024)} MB per-file limit.",
+                        is_error=True))
                     continue
 
                 cache_path = self._cache_path(file_id, name)
@@ -363,7 +366,7 @@ class GoogleDriveSource(DocumentSource):
                     entry is not None
                     and entry.get("cache_filename") == cache_path.name
                     and cache_path.exists()
-                    and cache_path.stat().st_size == reported_size
+                    and (not size_reported or cache_path.stat().st_size == reported_size)
                     and (
                         (md5 is not None and entry.get("md5Checksum") == md5)
                         or (md5 is None and entry.get("modifiedTime") == modified_time)

@@ -418,7 +418,7 @@ def test_unsupported_file_retried_after_capability_change_updates_in_place(test_
     assert total_rows == 1, "an unchanged outcome must update the row in place, not churn new rows every run"
 
 
-def test_p1_05_an_all_failed_run_is_marked_completed_with_errors_not_completed(test_env, manuals_dir):
+def test_an_all_failed_run_is_marked_failed_not_completed(test_env, manuals_dir):
     """had_error must flip on a HANDLED extraction failure too (extract()
     returning status="failed" rather than raising, e.g. a corrupt/unreadable
     PDF), not only on a raised exception -- otherwise a run where every file
@@ -431,8 +431,8 @@ def test_p1_05_an_all_failed_run_is_marked_completed_with_errors_not_completed(t
 
     with get_conn() as conn:
         run = conn.execute("SELECT status FROM ingestion_runs WHERE id = %s", (report.run_id,)).fetchone()
-    assert run["status"] == "completed_with_errors", (
-        f"a run where every file failed extraction must not report status='completed' -- got {run['status']!r}"
+    assert run["status"] == "failed", (
+        f"a run where every file failed extraction must not count as a sync -- got {run['status']!r}"
     )
 
 
@@ -477,6 +477,40 @@ def test_p1_05_a_source_level_download_failure_is_a_real_error_not_an_intentiona
 
     with get_conn() as conn:
         run = conn.execute("SELECT status FROM ingestion_runs WHERE id = %s", (report.run_id,)).fetchone()
-    assert run["status"] == "completed_with_errors", (
-        f"a source-reported download failure must mark the run unhealthy -- got {run['status']!r}"
+    assert run["status"] == "failed", (
+        f"a run whose only outcome is a download failure must not count as a sync -- got {run['status']!r}"
     )
+
+
+def test_a_run_with_some_failures_and_some_successes_is_completed_with_errors(test_env, manuals_dir):
+    import fitz
+
+    (manuals_dir / "corrupt.pdf").write_bytes(b"not a real pdf, just garbage bytes")
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "Replace the heating element every 12 months.")
+    doc.save(manuals_dir / "good.pdf")
+    doc.close()
+
+    report = ingest_all(source=FakeDirectorySource(manuals_dir), embed=False)
+
+    with get_conn() as conn:
+        run = conn.execute("SELECT status FROM ingestion_runs WHERE id = %s", (report.run_id,)).fetchone()
+    assert run["status"] == "completed_with_errors"
+
+
+def test_recover_interrupted_runs_fails_orphans_only_when_no_ingestion_is_running(test_env):
+    from app.ingestion.pipeline import _release_db_lock, _try_acquire_db_lock, recover_interrupted_runs
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO ingestion_runs (status) VALUES ('running')")
+
+    holder = _try_acquire_db_lock()
+    try:
+        assert recover_interrupted_runs() == 0, "a live run on another worker must never be touched"
+    finally:
+        _release_db_lock(holder)
+
+    assert recover_interrupted_runs() == 1
+    with get_conn() as conn:
+        assert conn.execute("SELECT status FROM ingestion_runs").fetchone()["status"] == "failed"
+        assert conn.execute("SELECT 1 FROM ingestion_events WHERE event = 'failed'").fetchone()

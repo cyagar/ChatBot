@@ -71,6 +71,28 @@ def _release_db_lock(conn: psycopg.Connection) -> None:
         conn.close()
 
 
+def recover_interrupted_runs() -> int:
+    """Marks runs still 'running' as failed when no ingestion is actually
+    running anywhere: holding the ingestion advisory lock proves that, so an
+    orphan left by a killed process is never confused with a live run on
+    another worker. Returns the number of runs recovered."""
+    lock_conn = _try_acquire_db_lock()
+    if lock_conn is None:
+        return 0
+    try:
+        with get_conn() as conn:
+            runs = conn.execute("SELECT id FROM ingestion_runs WHERE status = 'running'").fetchall()
+            for r in runs:
+                conn.execute(
+                    "UPDATE ingestion_runs SET status='failed', finished_at=now() WHERE id = %s", (r["id"],)
+                )
+                _record_event(conn, r["id"], "(run)", "failed",
+                              "Interrupted: the process stopped before this run finished.", None)
+        return len(runs)
+    finally:
+        _release_db_lock(lock_conn)
+
+
 def _record_lock_failure(run_id: int | None, trigger: str, detail: str) -> None:
     if run_id is None:
         return
@@ -304,7 +326,16 @@ def _ingest_all_locked(
             _record_event(conn, run_id, "(run)", "failed", f"Ingestion run aborted: {e}", None)
         raise
 
-    final_status = "completed_with_errors" if had_error else "completed"
+    # A run in which nothing succeeded is a failure, not a partial success: it
+    # must not count as a fresh sync.
+    any_success = any(
+        o.status in ("indexed", "partial", "duplicate", "skipped_unchanged", "unsupported")
+        for o in report.outcomes
+    )
+    if had_error and not any_success:
+        final_status = "failed"
+    else:
+        final_status = "completed_with_errors" if had_error else "completed"
     with get_conn() as conn:
         conn.execute(
             "UPDATE ingestion_runs SET status=%s, finished_at=now() WHERE id = %s",
