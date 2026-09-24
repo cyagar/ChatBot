@@ -57,6 +57,10 @@ class Settings(BaseSettings):
 
     ai_provider: str = "local_extractive"
     anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-5"
+    # Rejected model responses can repeat manual excerpts and technician
+    # questions; they are only written to the log when explicitly enabled.
+    log_rejected_model_output: bool = False
 
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     # Pinned commit SHA, not a branch name -- "main" can silently change what

@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from app.providers.base import parse_and_validate
+from app.providers.base import NO_ANSWER_TEXT, parse_and_validate
 from app.retrieval.search import RetrievedChunk
 
 
@@ -95,8 +95,8 @@ def test_real_conflict_among_cited_passages_is_detected_independently():
     raw = json.dumps({
         "is_no_answer": False,
         "claims": [
-            {"text": "One revision specifies 25 ft-lb.", "cited_excerpt_numbers": [1]},
-            {"text": "A later revision specifies 30 ft-lb.", "cited_excerpt_numbers": [2]},
+            {"text": "Torque the fitting to 25 ft-lb.", "cited_excerpt_numbers": [1]},
+            {"text": "Torque the fitting to 30 ft-lb.", "cited_excerpt_numbers": [2]},
         ],
         "steps": [], "warnings": [],
     })
@@ -118,7 +118,7 @@ def test_genuinely_supported_answer_passes():
         "is_no_answer": False,
         "claims": [
             {"text": "Error E4 indicates an open thermistor circuit.", "cited_excerpt_numbers": [1]},
-            {"text": "The replacement part is 81-118-31.", "cited_excerpt_numbers": [1]},
+            {"text": "Replace sensor part 81-118-31.", "cited_excerpt_numbers": [1]},
         ],
         "steps": [{"text": "Disconnect power at the breaker.", "cited_excerpt_numbers": [2]}],
         "warnings": [{"text": "WARNING: Disconnect power at the breaker before servicing the sensor.", "cited_excerpt_numbers": [2]}],
@@ -145,7 +145,7 @@ def test_p2_08_each_claim_and_step_carries_an_inline_marker_for_its_own_citation
             {"text": "Error E4 indicates an open thermistor circuit.", "cited_excerpt_numbers": [1]},
             {"text": "The replacement part is 81-118-31.", "cited_excerpt_numbers": [2]},
         ],
-        "steps": [{"text": "Order part 81-118-31 and replace the sensor.", "cited_excerpt_numbers": [1, 2]}],
+        "steps": [{"text": "Replacement part 81-118-31.", "cited_excerpt_numbers": [1, 2]}],
         "warnings": [],
     })
     result = parse_and_validate(raw, passages, "test")
@@ -161,7 +161,7 @@ def test_p2_08_each_claim_and_step_carries_an_inline_marker_for_its_own_citation
     assert f"[{citation_index[2]}]" in part_line
     assert f"[{citation_index[1]}]" not in part_line
 
-    step_line = next(l for l in lines if "Order part" in l)
+    step_line = next(l for l in lines if l.startswith("1."))
     assert f"[{citation_index[1]}]" in step_line and f"[{citation_index[2]}]" in step_line
 
 
@@ -219,29 +219,25 @@ def test_no_answer_path_does_not_require_claims():
     result = parse_and_validate(raw, passages, "test")
     assert result is not None
     assert result.is_no_answer is True
-    assert result.answer == "The excerpts don't cover this question."
+    assert result.answer == NO_ANSWER_TEXT
 
 
-def test_no_answer_explanation_with_fabricated_technical_content_is_rejected():
-    """is_no_answer must not skip every claim/warning check, or a fabricated,
-    specific instruction could reach the technician disguised as an "I
-    couldn't find this" message. No cited excerpt backs "600V" at all, since
-    no_answer_explanation has no citation mechanism -- a genuine non-answer
-    has no reason to state a voltage."""
+def test_no_answer_explanation_with_fabricated_technical_content_is_never_displayed():
+    """The model's no-answer prose has no excerpt to be checked against, so it
+    is never shown: the technician sees the server's fixed text instead."""
     passages = [_passage(1, 1, "This manual does not cover high-voltage interlock procedures.")]
     raw = json.dumps({
         "is_no_answer": True,
         "no_answer_explanation": "You can bypass the interlock at 600V to proceed.",
         "claims": [], "steps": [], "warnings": [],
     })
-    assert parse_and_validate(raw, passages, "test") is None
+    result = parse_and_validate(raw, passages, "test")
+    assert result.is_no_answer is True
+    assert result.answer == NO_ANSWER_TEXT
+    assert "600V" not in result.answer
 
 
 def test_no_answer_explanation_without_technical_content_still_passes():
-    """The fix must not reject ordinary, harmless non-answers that happen to
-    mention a plain small number with no letters attached (e.g. "page 2")
-    -- only identifier/measurement-shaped tokens matter, same rule
-    _material_tokens already applies to real claims."""
     passages = [_passage(1, 1, "Irrelevant excerpt.")]
     raw = json.dumps({
         "is_no_answer": True,
@@ -255,12 +251,6 @@ def test_no_answer_explanation_without_technical_content_still_passes():
 
 
 def test_no_answer_explanation_naming_the_machine_is_not_rejected():
-    """A machine name like "Ultra-1/Ultra-2" has digits scattered in it
-    ("1", "2"), which _material_tokens would otherwise flag the same as a
-    fabricated part number. The machine name is prompt-given context (see
-    AnthropicProvider.generate's "Selected machine:" line), not something
-    the model could be fabricating, so parse_and_validate takes it as a
-    parameter and exempts its own tokens from this check."""
     passages = [_passage(1, 1, "This manual covers routine maintenance only.")]
     raw = json.dumps({
         "is_no_answer": True,
@@ -271,7 +261,7 @@ def test_no_answer_explanation_naming_the_machine_is_not_rejected():
     result = parse_and_validate(raw, passages, "test", machine_label="Ultra-1/Ultra-2")
     assert result is not None
     assert result.is_no_answer is True
-    assert "Ultra-1/Ultra-2" in result.answer
+    assert result.answer == NO_ANSWER_TEXT
 
 
 def test_claim_naming_the_machine_is_not_rejected():
@@ -283,7 +273,7 @@ def test_claim_naming_the_machine_is_not_rejected():
     raw = json.dumps({
         "is_no_answer": False,
         "claims": [{
-            "text": "The excerpts cover the 12 month maintenance schedule for the Ultra-1/Ultra-2.",
+            "text": "Replace hopper drum seal every 12 months for the Ultra-1/Ultra-2.",
             "cited_excerpt_numbers": [1],
         }],
         "steps": [], "warnings": [],
@@ -384,7 +374,7 @@ def test_p0_01_warning_negation_adversarial_table(excerpt, warning, expect_suppo
     passages = [_passage(1, 1, excerpt)]
     raw = json.dumps({
         "is_no_answer": False,
-        "claims": [{"text": "This is general guidance with no measurement or part number in it.", "cited_excerpt_numbers": [1]}],
+        "claims": [{"text": excerpt, "cited_excerpt_numbers": [1]}],
         "steps": [],
         "warnings": [{"text": warning, "cited_excerpt_numbers": [1]}],
     })
@@ -411,3 +401,59 @@ def test_claim_naming_the_machine_plus_an_unrelated_fabrication_is_still_rejecte
         "steps": [], "warnings": [],
     })
     assert parse_and_validate(raw, passages, "test", machine_label="Ultra-1/Ultra-2") is None
+
+
+_SAFETY_PASSAGE = "Before service, disconnect power. Keep all guards installed during operation."
+
+
+def _single_claim(text, passage_text=_SAFETY_PASSAGE, *, as_step=False):
+    passages = [_passage(1, 1, passage_text)]
+    item = [{"text": text, "cited_excerpt_numbers": [1]}]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [] if as_step else item,
+        "steps": item if as_step else [],
+        "warnings": [],
+    })
+    return parse_and_validate(raw, passages, "test")
+
+
+@pytest.mark.parametrize("text", [
+    "The machine is safe to operate with all guards removed.",
+    "Bypass the safety interlock and operate with the cover removed.",
+    "Remove the guards during operation.",
+    "May operate while energized.",
+])
+def test_unsupported_qualitative_instruction_is_rejected(text):
+    assert _single_claim(text) is None
+    assert _single_claim(text, as_step=True) is None
+
+
+def test_a_dropped_prohibition_is_rejected():
+    assert _single_claim("Remove the guard during operation.", "Do not remove the guard during operation.") is None
+
+
+def test_a_kept_prohibition_passes():
+    assert _single_claim("Do not remove the guard during operation.", "Do not remove the guard during operation.")
+
+
+def test_inverted_order_is_rejected():
+    passage = "Disconnect power. Remove the cover."
+    assert _single_claim("Remove the cover. Disconnect power.", passage, as_step=True) is None
+    assert _single_claim("Disconnect power. Remove the cover.", passage, as_step=True) is not None
+
+
+@pytest.mark.parametrize("text", [
+    "Before service, disconnect power.",
+    "Disconnect power.",
+    "Keep all guards installed during operation.",
+    "Keep guards installed.",
+])
+def test_a_claim_made_of_the_excerpts_own_words_passes(text):
+    assert _single_claim(text) is not None
+
+
+def test_a_reworded_permission_is_rejected_even_with_the_same_topic():
+    passage = "Only a qualified technician may open the control panel."
+    assert _single_claim("A qualified technician may open the control panel.", passage) is None
+    assert _single_claim("Only a qualified technician may open the control panel.", passage) is not None

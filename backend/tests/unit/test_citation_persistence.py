@@ -45,7 +45,7 @@ def test_parse_and_validate_keeps_only_the_cited_subset():
     passages = [_passage(i, 1, f"excerpt {i}") for i in range(1, 7)]
     raw = json.dumps({
         "is_no_answer": False,
-        "claims": [{"text": "Two of the six retrieved excerpts support this.", "cited_excerpt_numbers": [2, 5]}],
+        "claims": [{"text": "Excerpt 2 and excerpt 5.", "cited_excerpt_numbers": [2, 5]}],
         "steps": [],
         "warnings": [],
     })
@@ -64,7 +64,7 @@ class _SubsetCitingProvider(AIProvider):
     def generate(self, question, machine_label, passages, history=None):
         raw = json.dumps({
             "is_no_answer": False,
-            "claims": [{"text": "Two of the six retrieved excerpts support this.", "cited_excerpt_numbers": [2, 5]}],
+            "claims": [{"text": "Excerpt 2 and excerpt 5.", "cited_excerpt_numbers": [2, 5]}],
             "steps": [],
             "warnings": [],
         })
@@ -129,8 +129,8 @@ class _ReverseOrderCitingProvider(AIProvider):
         raw = json.dumps({
             "is_no_answer": False,
             "claims": [
-                {"text": "The later excerpt states the primary fact.", "cited_excerpt_numbers": [5]},
-                {"text": "The earlier excerpt adds a supporting detail.", "cited_excerpt_numbers": [2]},
+                {"text": "Excerpt 5.", "cited_excerpt_numbers": [5]},
+                {"text": "Excerpt 2.", "cited_excerpt_numbers": [2]},
             ],
             "steps": [], "warnings": [],
         })

@@ -23,7 +23,7 @@ import json
 import httpx
 import pytest
 
-from app.providers.base import ProviderError
+from app.providers.base import NO_ANSWER_TEXT, ProviderError
 from app.retrieval.search import RetrievedChunk
 
 
@@ -181,7 +181,7 @@ def test_anthropic_no_answer_explanation_mentioning_the_machine_name_is_not_reje
     )
     result = anthropic_provider.generate("How to do electrical setup", "Ultra-1/Ultra-2", [_passage()])
     assert result.is_no_answer is True
-    assert result.answer == explanation, "the model's real explanation, not the generic fallback"
+    assert result.answer == NO_ANSWER_TEXT, "the fixed server text, never the model's prose"
 
 
 def test_anthropic_no_answer_explanation_with_an_unrelated_material_token_still_falls_back(
@@ -201,8 +201,8 @@ def test_anthropic_no_answer_explanation_with_an_unrelated_material_token_still_
     )
     result = anthropic_provider.generate("Why?", "Ultra-1/Ultra-2", [_passage()])
     assert result.is_no_answer is True
-    assert result.answer != explanation
-    assert "could not produce a verified" in result.answer.lower()
+    assert result.answer == NO_ANSWER_TEXT
+    assert "600V" not in result.answer
 
 
 def test_anthropic_claim_mentioning_the_machine_name_is_not_rejected(anthropic_provider, monkeypatch):
@@ -217,7 +217,7 @@ def test_anthropic_claim_mentioning_the_machine_name_is_not_rejected(anthropic_p
     response = json.dumps({
         "is_no_answer": False, "no_answer_explanation": None,
         "claims": [{
-            "text": "The excerpts cover the 12 month maintenance schedule for the Ultra-1/Ultra-2.",
+            "text": "Replace hopper drum seal every 12 months for the Ultra-1/Ultra-2.",
             "cited_excerpt_numbers": [1],
         }],
         "steps": [], "warnings": [],
@@ -227,7 +227,7 @@ def test_anthropic_claim_mentioning_the_machine_name_is_not_rejected(anthropic_p
     )
     result = anthropic_provider.generate("What can I ask you?", "Ultra-1/Ultra-2", [passage])
     assert result.is_no_answer is False
-    assert "12 month maintenance" in result.answer.lower()
+    assert "every 12 months" in result.answer.lower()
 
 
 def test_anthropic_claim_with_an_unrelated_material_token_still_falls_back(anthropic_provider, monkeypatch):

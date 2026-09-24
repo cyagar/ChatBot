@@ -23,7 +23,6 @@ from app.providers.base import (
     parse_and_validate,
 )
 
-MODEL = "claude-sonnet-5"
 # The SDK's own max_retries is layered UNDER generate()'s application-level
 # "repair" retry (a second full _call() when the first response fails
 # parse_and_validate) -- not a substitute for it, since a transport-level
@@ -45,8 +44,9 @@ _JSON_SHAPE_INSTRUCTION = (
     '"claims": [{"text": "...", "cited_excerpt_numbers": [1]}], '
     '"steps": [{"text": "...", "cited_excerpt_numbers": [1]}], '
     '"warnings": [{"text": "...", "cited_excerpt_numbers": [3]}]}. '
-    "If the excerpts don't support an answer, set is_no_answer to true and put your "
-    "explanation in no_answer_explanation; leave claims/steps/warnings empty. "
+    "If the excerpts don't support an answer, set is_no_answer to true, set "
+    "no_answer_explanation to a short reason (it is not shown to the technician), and leave "
+    "claims/steps/warnings empty. "
     "Otherwise leave no_answer_explanation null and put every material fact in its own "
     "claims entry, every repair/check action in its own steps entry, and every warning "
     "(quoted verbatim from its excerpt) in its own warnings entry -- each entry's "
@@ -78,6 +78,8 @@ class AnthropicProvider(AIProvider):
                 "It's an unconditional requirements.txt dependency -- run "
                 "'pip install -r requirements.txt' to install it."
             ) from e
+        self._model = settings.anthropic_model
+        self._log_rejected_output = settings.log_rejected_model_output
         self._client = anthropic.Anthropic(
             api_key=settings.anthropic_api_key, timeout=REQUEST_TIMEOUT_SECONDS, max_retries=MAX_RETRIES,
         )
@@ -115,9 +117,9 @@ class AnthropicProvider(AIProvider):
                     "number that doesn't exist, or included a claim/step/warning whose number, "
                     "identifier, or wording is not actually present verbatim in the excerpt(s) "
                     "it cited. Reply again with ONLY valid JSON in the exact shape requested, "
-                    "double-checking that every number and every warning you write is copied "
-                    "exactly from its cited excerpt, or set is_no_answer to true if the "
-                    "excerpts don't support an answer."
+                    "copying each claim, step and warning from its cited excerpt's own wording "
+                    "(dropping words only, keeping every negation, in the excerpt's order), or "
+                    "set is_no_answer to true if the excerpts don't support an answer."
                 ),
             },
         ]
@@ -126,17 +128,17 @@ class AnthropicProvider(AIProvider):
         if result is not None:
             return result
 
-        # Neither attempt survived parse_and_validate -- log both raw
-        # responses server-side (never shown to the technician) so an
-        # administrator investigating a run of UNVERIFIED_ANSWER replies (the
-        # message's own advice) has something to look at instead of a dead
-        # end. This is the only way to tell a genuine validator false
-        # positive (see parse_and_validate's docstring) apart from an actual
-        # provider problem without instrumenting the code by hand.
-        logger.warning(
-            "Both attempts failed validation for conversation; provider=%s\n--- attempt 1 ---\n%s\n--- attempt 2 ---\n%s",
-            self.name, raw_text, raw_text_2,
-        )
+        if self._log_rejected_output:
+            logger.warning(
+                "Both attempts failed validation; provider=%s\n--- attempt 1 ---\n%s\n--- attempt 2 ---\n%s",
+                self.name, raw_text, raw_text_2,
+            )
+        else:
+            logger.warning(
+                "Both attempts failed validation; provider=%s response_chars=%d,%d "
+                "(set LOG_REJECTED_MODEL_OUTPUT=true to log the responses)",
+                self.name, len(raw_text), len(raw_text_2),
+            )
         return GeneratedAnswer(answer=UNVERIFIED_ANSWER, is_no_answer=True, provider=self.name)
 
     def _call(self, messages: list[dict]) -> str:
@@ -144,7 +146,7 @@ class AnthropicProvider(AIProvider):
             import anthropic
 
             response = self._client.messages.create(
-                model=MODEL,
+                model=self._model,
                 max_tokens=1200,
                 system=SYSTEM_PROMPT,
                 # Without this, the API can enable extended thinking on its own
