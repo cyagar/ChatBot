@@ -95,8 +95,9 @@ size and is a capacity risk to measure before growth (`PRODUCTION_READINESS.md`)
   a no-answer response shows fixed server text, never model prose. Revision
   conflict notes are computed from document metadata, never from the model.
 
-These checks are lexical. They do not prove entailment, and a live-provider,
-live-corpus adversarial evaluation has not been run (`PRODUCTION_READINESS.md`).
+These checks are lexical. They do not prove entailment. The retrieval evaluation
+has been run against the live provider (10 of 11 cases); an adversarial safety
+evaluation has not (`PRODUCTION_READINESS.md`).
 
 ## Chat operations and idempotency
 
@@ -135,14 +136,14 @@ question, which the client resumes).
 
 ## Deployment topology
 
-The owner decision selects Cloud Run, Neon, Secret Manager and object storage
-(`OWNER_DECISION_GATE.md`). The current code assumes a long-lived single
-process: the ingestion scheduler and post-response reindex run in-process,
-source manuals and rendered pages use the local filesystem, and rate limits are
-per process. Running it as documented on Cloud Run therefore needs durable
-storage, an external scheduler and shared rate limiting first; a single
-persistent host avoids those. The topology is an open release gate in
-`PRODUCTION_READINESS.md`.
+Production is one persistent Docker host with one application replica, Neon for
+the database and Caddy for HTTPS (`DEPLOYMENT_SINGLE_HOST.md`,
+`OWNER_DECISION_GATE.md` section 14). One replica is required by the design: the
+ingestion scheduler and post-response reindex run in the web process, manuals
+and rendered pages use the local filesystem, and rate limits are per process.
+Running several replicas, or on a platform with ephemeral disk such as Cloud
+Run, needs durable storage, an external scheduler and shared rate limiting
+first.
 
 ## Process-local caches
 
