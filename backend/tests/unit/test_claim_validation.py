@@ -457,3 +457,61 @@ def test_a_reworded_permission_is_rejected_even_with_the_same_topic():
     passage = "Only a qualified technician may open the control panel."
     assert _single_claim("A qualified technician may open the control panel.", passage) is None
     assert _single_claim("Only a qualified technician may open the control panel.", passage) is not None
+
+
+def test_a_claim_that_is_not_the_excerpts_wording_is_dropped_but_valid_claims_are_kept():
+    passages = [_passage(1, 1, "Disconnect power. Keep all guards installed during operation.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [
+            {"text": "Keep all guards installed during operation.", "cited_excerpt_numbers": [1]},
+            {"text": "Bypass the safety interlock and operate with the cover removed.", "cited_excerpt_numbers": [1]},
+        ],
+        "steps": [], "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test")
+    assert result is not None
+    assert "guards installed" in result.answer
+    assert "Bypass" not in result.answer
+
+
+def test_a_step_that_is_not_the_excerpts_wording_rejects_the_whole_response():
+    passages = [_passage(1, 1, "Disconnect power. Remove the cover.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Disconnect power.", "cited_excerpt_numbers": [1]}],
+        "steps": [{"text": "Bypass the interlock.", "cited_excerpt_numbers": [1]}],
+        "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
+
+
+def test_a_claim_may_not_add_a_negation_the_excerpt_lacks():
+    assert _single_claim("Do not remove the guard during operation.", "Remove the guard during operation.") is None
+
+
+def test_a_reworded_table_label_is_tolerated_but_a_reworded_action_is_not():
+    passage = "PROBABLE CAUSE: Tank Heater failure."
+    assert _single_claim("Possible cause: Tank Heater failure.", passage) is not None
+    assert _single_claim("Replace the tank heater.", "Check the tank heater.") is None
+
+
+def test_a_word_hyphenated_across_a_line_break_in_the_excerpt_still_matches():
+    passage = "Remove the tank lid and clean in-\nside of tank with a deliming agent."
+    assert _single_claim("Remove the tank lid and clean inside of tank with a deliming agent.", passage) is not None
+
+
+def test_failing_items_names_what_did_not_check_out():
+    from app.providers.base import failing_items
+
+    passages = [_passage(1, 1, "Disconnect power. Keep all guards installed during operation.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [
+            {"text": "Disconnect power.", "cited_excerpt_numbers": [1]},
+            {"text": "Bypass the safety interlock.", "cited_excerpt_numbers": [1]},
+        ],
+        "steps": [], "warnings": [],
+    })
+    assert failing_items(raw, passages) == ["Bypass the safety interlock."]
+    assert failing_items("not json", passages) == []

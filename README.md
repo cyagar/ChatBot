@@ -46,8 +46,8 @@ Never commit `.env`, keystores or service-account keys.
 
 Generated answers (`AI_PROVIDER=anthropic`) are checked lexically against
 their cited excerpts: numbers and identifiers must appear verbatim, warnings
-must be quoted, and each claim and step must consist of the excerpt's own words
-in order with its negations kept. A no-answer response shows fixed server text
+must be quoted, and each claim and step must be the excerpt's own wording
+(directions, actions and negations preserved, order kept for actions). A no-answer response shows fixed server text
 rather than model prose. This is a mechanical check, not proof that a statement
 is entailed by its source, so technicians must verify against the cited page.
 

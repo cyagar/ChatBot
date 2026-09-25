@@ -83,9 +83,14 @@ size and is a capacity risk to measure before growth (`PRODUCTION_READINESS.md`)
   `warnings`, each citing excerpts. `parse_and_validate` accepts a response only
   if: numbers, identifiers, units and signs in each claim appear verbatim in its
   cited excerpts; warnings are quoted verbatim without a trimmed negation; each
-  claim and step is made of the cited excerpt's own words in the excerpt's order
-  with its negations and restrictions kept. A failure triggers one repair
-  attempt, then a fixed "could not verify" answer. The technician-visible text is
+  claim and step is the cited excerpt's own wording, lightly trimmed: direction,
+  action and modal words (remove, disconnect, before, must, ...) must appear in
+  the excerpt and keep its order, other words may differ only by a small
+  allowance for reworded labels, and no negation or restriction is added or
+  dropped. A claim that fails is dropped; a failing step or warning, or a
+  number or identifier the excerpt lacks, rejects the response. A rejection
+  triggers one repair attempt that names the failing items, then a fixed "could
+  not verify" answer. The technician-visible text is
   assembled server-side from validated lines with inline `[n]` citation markers;
   a no-answer response shows fixed server text, never model prose. Revision
   conflict notes are computed from document metadata, never from the model.

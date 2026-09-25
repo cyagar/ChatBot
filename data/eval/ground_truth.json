@@ -8,14 +8,14 @@
       "question": "The brewer's water temperature isn't reaching the ready temperature. What should I check?",
       "expected_filename_contains": "AXIOM Series Service & Repair Manual",
       "expected_keywords": ["Tank Heater failure", "Temp Sensor"],
-      "must_not_come_from": ["ITB_ITCB_HV, ICB_TWIN Service & Repair Manual"]
+      "must_not_come_from": ["ITB/ITCB/HV, ICB/TWIN Service & Repair Manual"]
     },
     {
       "id": "similar-model-separation-heating",
       "category": "similar_model_separation",
       "machine": "ITB/ITCB/ITCB-DV HV/ITCB TWIN HV",
       "question": "The brewer's water temperature isn't reaching the ready temperature. What should I check?",
-      "expected_filename_contains": "ITB_ITCB_HV, ICB_TWIN Service & Repair Manual",
+      "expected_filename_contains": "ITB/ITCB/HV, ICB/TWIN Service & Repair Manual",
       "expected_keywords": ["Tank Heater failure", "Temp Sensor"],
       "must_not_come_from": ["AXIOM Series Service & Repair Manual"],
       "note": "Axiom and ITB/ITCB manuals share near-identical templated troubleshooting tables (same wording: 'Temperature Too Low / Heating Time Too Long / Temp Sensor Out Of Range'). This is the real test of acceptance criterion 'information from one model is not incorrectly attributed to another' -- lexical similarity alone cannot distinguish these, only the machine_id filter can."

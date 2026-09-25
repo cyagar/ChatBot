@@ -231,6 +231,17 @@ Answered directly, in response to the independent builder-review backlog
 
 ---
 
+## 14. Deployment topology and answer provider (2026-09-25)
+
+**Decision:** production runs on a single persistent Docker host (one
+application replica, Neon for the database, Caddy for HTTPS), not Cloud Run;
+see `docs/DEPLOYMENT_SINGLE_HOST.md`. Testers and production use the
+Anthropic provider (`AI_PROVIDER=anthropic`). Live evaluation against the
+production corpus copy: 10 of 11 cases passing with the current answer
+validation (one answered from a different excerpt than the ground truth
+expects); the ground-truth set is small and is a regression check, not
+release validation.
+
 ## Open decisions (second audit, 2026-09-24)
 
 Each needs an owner (ceyhun@hmwagner.com unless reassigned) before a broad

@@ -283,7 +283,8 @@ _POLARITY_WORDS = frozenset({"not", "no", "never", "cannot", "without", "only", 
 
 
 def _prose_tokens(text: str) -> list[str]:
-    lowered = text.lower().replace("can't", "cannot").replace("won't", "will not")
+    lowered = re.sub(r"-[ \t]*\r?\n[ \t]*", "", text.lower())  # rejoin words hyphenated across lines
+    lowered = lowered.replace("can't", "cannot").replace("won't", "will not")
     lowered = re.sub(r"n't\b", " not", lowered)
     return re.findall(r"[a-z0-9]+", lowered)
 
@@ -306,24 +307,63 @@ def _is_ordered_subsequence(needle: list[str], haystack: list[str]) -> bool:
     return all(word in it for word in needle)
 
 
+# Words that carry an instruction's direction, action, modality or
+# sequencing. A claim may not contain one the excerpt lacks, and the order of
+# the ones it does contain must follow the excerpt's.
+_CRITICAL_STEMS = frozenset(_stem(w) for w in (
+    "remove install connect disconnect unplug plug open close enable disable engage disengage "
+    "increase decrease raise lower add drain fill turn start stop replace insert tighten loosen "
+    "up down high low hot cold before after first then bypass override defeat ignore skip jumper "
+    "energize lock unlock reset clean delime safe unsafe allow permit prohibit forbid require "
+    "must may should shall always"
+).split())
+
+
+def _unmatched_allowance(word_count: int) -> int:
+    """Non-critical words of a claim that may be missing from the excerpt: a
+    table label or connective the model reworded ("possible" for "probable")."""
+    return 0 if word_count < 5 else 1 if word_count < 12 else 2
+
+
 def _claim_grounded(item_text: str, cited_content: str, machine_label: str | None = None) -> bool:
-    """A lexical check that a claim or step is the cited excerpt's own wording
-    with words dropped, not a rewrite: every meaningful word of the claim occurs
-    in the excerpt, in the same order, and every negation or restriction in the
-    excerpt sentence(s) the claim draws from is kept. This catches inverted,
-    reordered, permission-flipped and invented prose that carries no number or
-    part code. It is not semantic entailment; a claim can still pass by
-    selecting words from an excerpt in a misleading way, so the excerpt stays
-    one tap away as evidence."""
+    """A lexical check that a claim or step is the cited excerpt's own wording,
+    lightly trimmed, not a rewrite:
+
+    - every direction, action or modal word (_CRITICAL_STEMS) in the claim
+      occurs in the excerpt, and when the claim has two or more of them they
+      appear in the excerpt's order;
+    - every other meaningful word occurs too, except a small allowance for
+      reworded labels;
+    - the claim adds no negation or restriction the excerpt lacks, and keeps
+      those in the excerpt sentences it draws from.
+
+    This catches inverted, reordered, permission-flipped and invented prose
+    that carries no number or part code. It is not semantic entailment: a claim
+    can still pass by selecting words from an excerpt in a misleading way, so
+    the excerpt stays one tap away as evidence."""
     machine_stems = set(_content_stems(machine_label or ""))
     claim_stems = [w for w in _content_stems(item_text) if w not in machine_stems]
-    excerpt_stems = _content_stems(cited_content)
     if not claim_stems:
         return True
-    if not _is_ordered_subsequence(claim_stems, excerpt_stems):
+    excerpt_stems = _content_stems(cited_content)
+    excerpt_set = set(excerpt_stems)
+
+    unmatched = [w for w in claim_stems if w not in excerpt_set]
+    if any(w in _CRITICAL_STEMS for w in unmatched):
+        return False
+    if len(unmatched) > _unmatched_allowance(len(claim_stems)):
         return False
 
+    claim_critical = [w for w in claim_stems if w in _CRITICAL_STEMS]
+    if len(claim_critical) >= 2:
+        excerpt_critical = [w for w in excerpt_stems if w in _CRITICAL_STEMS]
+        if not _is_ordered_subsequence(claim_critical, excerpt_critical):
+            return False
+
     claim_polarity = {w for w in _prose_tokens(item_text) if w in _POLARITY_WORDS}
+    excerpt_polarity = {w for w in _prose_tokens(cited_content) if w in _POLARITY_WORDS}
+    if claim_polarity - excerpt_polarity:
+        return False
     claim_set = set(claim_stems)
     for sentence in re.split(r"(?<=[.!?;:])\s+|\n+", cited_content):
         sentence_stems = set(_content_stems(sentence))
@@ -435,6 +475,29 @@ def _item_citations(item: _ClaimItem, passages: list) -> list[Citation]:
     return out
 
 
+def failing_items(raw_text: str, passages: list, machine_label: str | None = None) -> list[str]:
+    """Texts of the claims, steps and warnings in a provider response that do
+    not check out against the excerpts they cite (best effort; empty when the
+    response is not parseable JSON). Used to tell the model what to fix."""
+    try:
+        data = json.loads(re.search(r"\{.*\}", raw_text, re.DOTALL).group(0))
+    except Exception:
+        return []
+    failing: list[str] = []
+    for kind in ("claims", "steps", "warnings"):
+        items = _parse_items(data.get(kind), passages) if isinstance(data, dict) else None
+        for item in items or []:
+            cited = _cited_content(item, passages)
+            if kind == "warnings":
+                ok = _warning_supported(item.text, cited)
+            else:
+                ok = _claim_supported(item.text, cited, machine_label) and _claim_grounded(
+                    item.text, cited, machine_label)
+            if not ok:
+                failing.append(item.text)
+    return failing
+
+
 def parse_and_validate(
     raw_text: str, passages: list, provider_name: str, machine_label: str | None = None
 ) -> GeneratedAnswer | None:
@@ -442,7 +505,8 @@ def parse_and_validate(
     response is malformed, cites a nonexistent excerpt, or contains a
     claim/step/warning that fails its checks against the excerpt(s) it cites:
     numbers and identifiers must appear verbatim, warnings must be quoted, and
-    claims and steps must pass the wording check in _claim_grounded. The caller
+    steps must pass the wording check in _claim_grounded (a claim that fails it
+    is dropped). The caller
     then retries with a repair prompt or falls back to an explicit "could not
     verify" result. The displayed `answer` is assembled here from the checked
     claims and steps, never taken as free prose from the model, and a
@@ -492,12 +556,23 @@ def parse_and_validate(
     if not claims and not steps:
         return None
 
+    # A number or identifier the excerpt lacks rejects the whole response. A
+    # claim (an independent fact) that is not the excerpt's own wording is
+    # dropped; a step or warning that fails rejects the response, since
+    # omitting a step of a procedure could mislead.
+    kept_claims: list[_ClaimItem] = []
     for item in claims + steps:
-        cited = _cited_content(item, passages)
-        if not _claim_supported(item.text, cited, machine_label):
+        if not _claim_supported(item.text, _cited_content(item, passages), machine_label):
             return None
-        if not _claim_grounded(item.text, cited, machine_label):
+    for item in claims:
+        if _claim_grounded(item.text, _cited_content(item, passages), machine_label):
+            kept_claims.append(item)
+    for item in steps:
+        if not _claim_grounded(item.text, _cited_content(item, passages), machine_label):
             return None
+    claims = kept_claims
+    if not claims and not steps:
+        return None
     for item in warnings:
         if not _warning_supported(item.text, _cited_content(item, passages)):
             return None

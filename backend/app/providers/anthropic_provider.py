@@ -20,6 +20,7 @@ from app.providers.base import (
     UNVERIFIED_ANSWER,
     build_context_block,
     build_history_messages,
+    failing_items,
     parse_and_validate,
 )
 
@@ -108,6 +109,12 @@ class AnthropicProvider(AIProvider):
         # One repair attempt: tell the model exactly what was wrong with its own
         # output instead of silently trusting a malformed/unsupported response.
         # Never widen citations on a parse failure.
+        failed = failing_items(raw_text, passages, machine_label)
+        detail = (
+            " These items were not found in the excerpt numbers you cited for them: "
+            + " | ".join(f'"{text[:160]}"' for text in failed[:6]) + "."
+            if failed else ""
+        )
         repair_messages = messages + [
             {"role": "assistant", "content": raw_text},
             {
@@ -119,7 +126,7 @@ class AnthropicProvider(AIProvider):
                     "it cited. Reply again with ONLY valid JSON in the exact shape requested, "
                     "copying each claim, step and warning from its cited excerpt's own wording "
                     "(dropping words only, keeping every negation, in the excerpt's order), or "
-                    "set is_no_answer to true if the excerpts don't support an answer."
+                    "set is_no_answer to true if the excerpts don't support an answer." + detail
                 ),
             },
         ]

@@ -1,0 +1,12 @@
+# TLS termination for the single-host deployment. Caddy obtains and renews a
+# certificate for {$TMA_DOMAIN} automatically; the domain must resolve to this
+# host and ports 80 and 443 must be reachable from the internet.
+{$TMA_DOMAIN} {
+	encode gzip
+	reverse_proxy app:8000 {
+		# Answers can take up to ~90 s (retrieval plus two model calls).
+		transport http {
+			response_header_timeout 120s
+		}
+	}
+}

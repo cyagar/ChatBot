@@ -1,0 +1,30 @@
+# Single persistent host: apply on top of docker-compose.yml.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Requires TMA_DOMAIN in the root .env (see docs/DEPLOYMENT_SINGLE_HOST.md).
+# The application is not published directly; only Caddy (HTTPS) is exposed.
+services:
+  app:
+    ports: !reset []
+    expose:
+      - "8000"
+    environment:
+      - APP_ENV=production
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - TMA_DOMAIN=${TMA_DOMAIN:?set TMA_DOMAIN in the root .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+volumes:
+  caddy_data:
+  caddy_config:
