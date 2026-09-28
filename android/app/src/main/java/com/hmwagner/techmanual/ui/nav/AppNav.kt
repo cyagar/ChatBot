@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
@@ -20,6 +21,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
@@ -117,6 +119,12 @@ private enum class LaunchSessionState { Checking, SignedIn, SignedOut }
 // a technician through the app itself.
 private data class BlockingConfigState(val title: String, val message: String, val supportContact: String)
 
+// Unlike BlockingConfigState, this never prevents the app from being used --
+// config.latest_version/update_url advertise a newer build without requiring
+// it. Both fields on ConfigOut must be non-blank for this to appear at all
+// (see ConfigOut's own doc comment).
+private data class UpdateAvailableState(val version: String, val updateUrl: String)
+
 @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
 @Composable
 fun AppNav(windowSizeClass: WindowSizeClass) {
@@ -130,6 +138,7 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
 
     var launchState by remember { mutableStateOf(LaunchSessionState.Checking) }
     var blockingConfig by remember { mutableStateOf<BlockingConfigState?>(null) }
+    var updateAvailable by remember { mutableStateOf<UpdateAvailableState?>(null) }
     LaunchedEffect(Unit) {
         // Bounded the same way the /me check below is -- a slow/unreachable
         // config endpoint must not meaningfully delay startup, and a
@@ -155,6 +164,16 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
                     supportContact = config.support_contact,
                 )
                 else -> null
+            }
+            // Checked independently of the blocking branch above (not an
+            // `else` on it): a technician stuck below the minimum version
+            // sees the blocking screen regardless, but a technician who is
+            // merely behind the LATEST version -- still above minimum --
+            // should see both Home and this notice, not one or the other.
+            if (blockingConfig == null && config.latest_version.isNotBlank() && config.update_url.isNotBlank() &&
+                isVersionBelowMinimum(BuildConfig.VERSION_NAME, config.latest_version)
+            ) {
+                updateAvailable = UpdateAvailableState(config.latest_version, config.update_url)
             }
         }
         // Skip the session check entirely once blocked -- nothing it could
@@ -277,7 +296,12 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
                     })
                 }
                 composable(Routes.HOME) {
-                    HomeContent(selection = selection, isExpanded = windowSizeClass.widthSizeClass == WindowWidthSizeClass.Expanded)
+                    HomeContent(
+                        selection = selection,
+                        isExpanded = windowSizeClass.widthSizeClass == WindowWidthSizeClass.Expanded,
+                        updateAvailable = updateAvailable,
+                        onDismissUpdate = { updateAvailable = null },
+                    )
                 }
             }
         }
@@ -324,7 +348,12 @@ private fun BlockingConfigScreen(state: BlockingConfigState) {
  * writes the same source of truth regardless of which one is on screen.
  */
 @Composable
-private fun HomeContent(selection: HomeSelectionViewModel, isExpanded: Boolean) {
+private fun HomeContent(
+    selection: HomeSelectionViewModel,
+    isExpanded: Boolean,
+    updateAvailable: UpdateAvailableState?,
+    onDismissUpdate: () -> Unit,
+) {
     val onSelect: (Int, String?) -> Unit = { id, label -> selection.selectedId = id; selection.selectedLabel = label }
 
     // Clears the selection as a genuine CONSEQUENCE of Home leaving
@@ -350,30 +379,81 @@ private fun HomeContent(selection: HomeSelectionViewModel, isExpanded: Boolean) 
         }
     }
 
-    if (isExpanded) {
-        TwoPaneHome(selectedId = selection.selectedId, selectedLabel = selection.selectedLabel, onSelect = onSelect)
-    } else {
-        // Keyed on the selection: confirmed via on-device logging
-        // (2026-08-25, Tab A9+) that the selection state itself survives
-        // switching branches fine, but SinglePaneHome's *own* NavController
-        // doesn't -- Compose reuses the same NavController instance (and
-        // its own remembered/restored back stack) across a branch
-        // removal+reinsertion within one composition, so `startDestination`
-        // below is silently ignored on every re-entry after the first: the
-        // controller already has a "current destination" (whatever it was
-        // showing the last time this branch was active) and NavHost only
-        // consults `startDestination` when there's no existing one. Keying
-        // on the selection forces a genuinely fresh NavController whenever
-        // the selection differs from what it was the last time this branch
-        // was shown, without discarding in-branch nav state (e.g. mid-draft
-        // composer text) when the selection hasn't actually changed.
-        key(selection.selectedId ?: -1) {
-            SinglePaneHome(
-                selectedId = selection.selectedId,
-                selectedLabel = selection.selectedLabel,
-                onSelect = onSelect,
-                onBack = { selection.selectedId = null; selection.selectedLabel = null },
+    Column(Modifier.fillMaxSize()) {
+        // Rendered once here, above both pane layouts, rather than inside
+        // each -- a technician mid-conversation in either layout still sees
+        // it without it interrupting the conversation itself the way a
+        // blocking screen would.
+        updateAvailable?.let { info -> UpdateAvailableBanner(info, onDismiss = onDismissUpdate) }
+        Box(Modifier.weight(1f)) {
+            if (isExpanded) {
+                TwoPaneHome(selectedId = selection.selectedId, selectedLabel = selection.selectedLabel, onSelect = onSelect)
+            } else {
+                // Keyed on the selection: confirmed via on-device logging
+                // (2026-08-25, Tab A9+) that the selection state itself survives
+                // switching branches fine, but SinglePaneHome's *own* NavController
+                // doesn't -- Compose reuses the same NavController instance (and
+                // its own remembered/restored back stack) across a branch
+                // removal+reinsertion within one composition, so `startDestination`
+                // below is silently ignored on every re-entry after the first: the
+                // controller already has a "current destination" (whatever it was
+                // showing the last time this branch was active) and NavHost only
+                // consults `startDestination` when there's no existing one. Keying
+                // on the selection forces a genuinely fresh NavController whenever
+                // the selection differs from what it was the last time this branch
+                // was shown, without discarding in-branch nav state (e.g. mid-draft
+                // composer text) when the selection hasn't actually changed.
+                key(selection.selectedId ?: -1) {
+                    SinglePaneHome(
+                        selectedId = selection.selectedId,
+                        selectedLabel = selection.selectedLabel,
+                        onSelect = onSelect,
+                        onBack = { selection.selectedId = null; selection.selectedLabel = null },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Non-blocking: a dismiss action and a link to update, not a lockout.
+ * Dismissal is in-memory only (this composable's caller holds the state),
+ * so it reappears on the next cold launch until the technician is actually
+ * on `updateAvailable.version` -- deliberate, not a bug: there is no
+ * persistent per-technician "seen this" store, and re-surfacing occasionally
+ * is preferable to a stale build going unnoticed indefinitely because it was
+ * dismissed once weeks ago.
+ */
+@Composable
+private fun UpdateAvailableBanner(info: UpdateAvailableState, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                "Version ${info.version} is available.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.weight(1f),
             )
+            TextButton(onClick = {
+                // Opening this can only fail if the device has no app
+                // capable of handling a browser-style URL at all, which does
+                // not happen on a real device -- caught anyway rather than
+                // crashing the whole app over a tap on a config-supplied link.
+                try {
+                    context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(info.updateUrl)))
+                } catch (_: Exception) {
+                }
+            }) { Text("Update") }
+            TextButton(onClick = onDismiss) { Text("Dismiss") }
         }
     }
 }

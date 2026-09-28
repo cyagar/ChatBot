@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     # /api/config's support_contact as something a technician can actually
     # use.
     support_contact: str = "support@hmwagner.com"
+    # Advertises the newest built APK without requiring it (unlike
+    # minimum_supported_version, nothing blocks on this). Empty by default:
+    # the Android client only shows its update notice when BOTH this and
+    # update_url are set, so an unconfigured deployment stays silent instead
+    # of nagging about an "update" with nowhere to send the technician.
+    latest_version: str = ""
+    update_url: str = ""
 
     # backend/.env.example's own SECRET_KEY placeholder is long enough to
     # slip past a bare `len(secret_key) < 32` check, so a deployment that

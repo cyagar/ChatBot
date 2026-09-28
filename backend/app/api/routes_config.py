@@ -28,6 +28,11 @@ class ConfigOut(BaseModel):
     support_contact: str
     status: str  # "ok" | "degraded"
     status_message: str
+    # Non-blocking, unlike minimum_supported_version: the client shows an
+    # informational "update available" notice, never a lockout, for these.
+    # Either can be blank (see Settings.latest_version's own comment).
+    latest_version: str
+    update_url: str
 
 
 def _corpus_status(settings) -> tuple[str, str]:
@@ -82,4 +87,6 @@ def get_config() -> ConfigOut:
         support_contact=settings.support_contact,
         status=status_,
         status_message=status_message,
+        latest_version=settings.latest_version,
+        update_url=settings.update_url,
     )

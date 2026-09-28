@@ -136,7 +136,9 @@ data class SavedAnswerOut(
 )
 
 // Backs GET /api/config -- maintenance mode and a minimum supported
-// version reach a technician through this.
+// version reach a technician through this. latest_version/update_url are
+// non-blocking (unlike minimum_supported_version): either can be blank,
+// meaning the deployment hasn't configured an update notice.
 @Serializable
 data class ConfigOut(
     val maintenance_mode: Boolean,
@@ -145,4 +147,6 @@ data class ConfigOut(
     val support_contact: String,
     val status: String,
     val status_message: String,
+    val latest_version: String = "",
+    val update_url: String = "",
 )
