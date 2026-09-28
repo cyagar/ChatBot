@@ -99,7 +99,7 @@ def interactive_docs_urls(app_env: str) -> dict[str, str | None]:
 
 
 app = FastAPI(
-    title="Technician Manual Assistant", version="0.1.0", lifespan=lifespan,
+    title="BIB Chat Bot", version="0.1.0", lifespan=lifespan,
     **interactive_docs_urls(get_settings().app_env),
 )
 

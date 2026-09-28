@@ -1,4 +1,4 @@
-# Technician Manual Assistant — Android
+# BIB Chat Bot — Android
 
 The native client: sign in, pick an approved machine, ask a question, read a
 cited answer, open a citation's evidence and page image. It talks directly to the

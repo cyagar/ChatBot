@@ -45,7 +45,7 @@ fun LoginScreen(onLoggedIn: () -> Unit, vm: LoginViewModel = viewModel()) {
                 modifier = Modifier.widthIn(max = 420.dp).padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                Text("Technician Manual Assistant", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
+                Text("BIB Chat Bot", style = androidx.compose.material3.MaterialTheme.typography.headlineSmall)
                 Text("Sign in to look up machine manuals and get grounded answers.")
 
                 OutlinedTextField(

@@ -91,6 +91,10 @@
             "title": "Feature Flags",
             "type": "object"
           },
+          "latest_version": {
+            "title": "Latest Version",
+            "type": "string"
+          },
           "maintenance_message": {
             "title": "Maintenance Message",
             "type": "string"
@@ -114,6 +118,10 @@
           "support_contact": {
             "title": "Support Contact",
             "type": "string"
+          },
+          "update_url": {
+            "title": "Update Url",
+            "type": "string"
           }
         },
         "required": [
@@ -123,7 +131,9 @@
           "minimum_supported_version",
           "support_contact",
           "status",
-          "status_message"
+          "status_message",
+          "latest_version",
+          "update_url"
         ],
         "title": "ConfigOut",
         "type": "object"
@@ -1316,7 +1326,7 @@
     }
   },
   "info": {
-    "title": "Technician Manual Assistant",
+    "title": "BIB Chat Bot",
     "version": "0.1.0"
   },
   "openapi": "3.1.0",

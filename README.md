@@ -1,4 +1,4 @@
-# Technician Manual Assistant
+# BIB Chat Bot
 
 A native Android app and FastAPI backend that let machine technicians ask
 questions about commercial food-service equipment and get answers cited to the

@@ -125,9 +125,9 @@ class AppNavSessionExpiryTest {
         }
 
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
-            composeTestRule.onAllNodesWithText("Technician Manual Assistant").fetchSemanticsNodes().isNotEmpty()
+            composeTestRule.onAllNodesWithText("BIB Chat Bot").fetchSemanticsNodes().isNotEmpty()
         }
-        composeTestRule.onNodeWithText("Technician Manual Assistant").assertExists()
+        composeTestRule.onNodeWithText("BIB Chat Bot").assertExists()
 
         assertFalse("the cleared session must not still look logged in after the redirect", ApiClient.hasSession())
         assertFalse("AppNav must have consumed the flag via onSessionExpiredHandled()", ApiClient.sessionExpired.value)
@@ -187,7 +187,7 @@ class AppNavSessionExpiryTest {
         composeTestRule.onNodeWithText("Contact: help@hmwagner.com").assertExists()
         // Neither Home nor Login must have rendered underneath.
         composeTestRule.onAllNodesWithText("Ask about a machine").assertCountEquals(0)
-        composeTestRule.onAllNodesWithText("Technician Manual Assistant").assertCountEquals(0)
+        composeTestRule.onAllNodesWithText("BIB Chat Bot").assertCountEquals(0)
     }
 
     @Test
@@ -224,7 +224,7 @@ class AppNavSessionExpiryTest {
             server.requestCount,
         )
 
-        val loginNodes = composeTestRule.onAllNodesWithText("Technician Manual Assistant").fetchSemanticsNodes()
+        val loginNodes = composeTestRule.onAllNodesWithText("BIB Chat Bot").fetchSemanticsNodes()
         assertTrue("a successful request must not trigger the session-expiry redirect", loginNodes.isEmpty())
         assertTrue(ApiClient.hasSession())
     }
@@ -298,7 +298,7 @@ class AppNavSessionExpiryTest {
         runBlocking { ApiClient.logout() }
 
         composeTestRule.waitUntil(timeoutMillis = 5_000) {
-            composeTestRule.onAllNodesWithText("Technician Manual Assistant").fetchSemanticsNodes().isNotEmpty()
+            composeTestRule.onAllNodesWithText("BIB Chat Bot").fetchSemanticsNodes().isNotEmpty()
         }
 
         // Re-login through the real LoginScreen UI, not a direct service
