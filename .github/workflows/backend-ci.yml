@@ -48,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           # Matches Dockerfile's python:3.12-slim -- the documented production
           # target, not the 3.14 used for local Windows dev (see Dockerfile's
