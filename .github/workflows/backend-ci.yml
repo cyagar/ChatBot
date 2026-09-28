@@ -63,7 +63,7 @@ jobs:
           # the build.
 
       - name: Cache pip packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: ~/.cache/pip
@@ -74,7 +74,7 @@ jobs:
       # different model later, and turns every run after the first into a
       # cache hit instead of a fresh Hugging Face download.
       - name: Cache embedding model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: ~/.cache/huggingface
