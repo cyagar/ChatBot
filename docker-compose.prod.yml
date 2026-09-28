@@ -27,6 +27,10 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      # Release APKs served at /downloads/* -- see deploy/Caddyfile. Host
+      # directory, not a named volume: the owner replaces its contents
+      # directly (scp a new build in) without going through Docker at all.
+      - ./downloads:/srv/downloads:ro
     depends_on:
       - app
 volumes:

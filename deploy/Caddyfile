@@ -3,6 +3,16 @@
 # host and ports 80 and 443 must be reachable from the internet.
 {$TMA_DOMAIN} {
 	encode gzip
+	# Release APKs, not app data: no auth, world-readable at a path a
+	# technician's browser can hit directly (Android needs an ordinary
+	# https:// URL to run its own "install unknown apps" flow through).
+	# Access control/expiry for this is an open owner decision
+	# (PRODUCTION_READINESS.md) -- fine for testing, not yet for a real
+	# rollout to outside testers.
+	handle_path /downloads/* {
+		root * /srv/downloads
+		file_server
+	}
 	reverse_proxy app:8000 {
 		# Answers can take up to ~90 s (retrieval plus two model calls).
 		transport http {
