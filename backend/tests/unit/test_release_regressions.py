@@ -395,6 +395,10 @@ def test_p0_13_withdrawing_a_source_document_retroactively_flags_history_and_sav
             "'hash-p013', 100, 'indexed', 1, 'service_repair', 'Axiom Manual', true, 'approved') RETURNING id"
         )
         doc_id = doc_cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'approved')",
+            (doc_id,),
+        )
         chunk_cur = conn.execute(
             "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
             "VALUES (%s, 'text', 'brew temperature is 200F', 25, 0) RETURNING id",
@@ -451,6 +455,106 @@ def test_p0_13_withdrawing_a_source_document_retroactively_flags_history_and_sav
     assert saved_after.json()[0]["answer"]["has_withdrawn_source"] is True, (
         "a saved answer (technician bookmark) must also be retroactively flagged, not just live history"
     )
+
+
+def _seed_p104_answer(conn, *, email: str):
+    """Same shape as test_p0_13's fixture: one approved, current, machine-
+    linked document with one cited chunk, one assistant message citing it.
+    Caller must register `email` (see register_test_user) BEFORE opening the
+    connection passed here -- registration makes its own HTTP calls, each
+    opening its own DB connection, and nesting that inside an already-open
+    `with get_conn()` block can exhaust a small connection pool."""
+    conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+    conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+    doc_id = conn.execute(
+        "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+        "file_type, sha256, byte_size, status, manufacturer_id, doc_type, title, is_current_revision, "
+        "review_status) VALUES ('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', "
+        f"'hash-{email}', 100, 'indexed', 1, 'service_repair', 'Axiom Manual', true, 'approved') RETURNING id"
+    ).fetchone()["id"]
+    conn.execute(
+        "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'approved')",
+        (doc_id,),
+    )
+    chunk_id = conn.execute(
+        "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
+        "VALUES (%s, 'text', 'brew temperature is 200F', 25, 0) RETURNING id",
+        (doc_id,),
+    ).fetchone()["id"]
+    user_id = conn.execute("SELECT id FROM users WHERE email = %s", (email,)).fetchone()["id"]
+    conv_id = conn.execute(
+        "INSERT INTO conversations (user_id, machine_id) VALUES (%s, 1) RETURNING id", (user_id,)
+    ).fetchone()["id"]
+    msg_id = conn.execute(
+        "INSERT INTO messages (conversation_id, role, content, machine_id) "
+        "VALUES (%s, 'assistant', 'Brew at 200F.', 1) RETURNING id",
+        (conv_id,),
+    ).fetchone()["id"]
+    conn.execute(
+        "INSERT INTO message_sources (message_id, chunk_id, rank, is_citation, citation_ordinal, excerpt) "
+        "VALUES (%s, %s, 1, true, 1, 'brew temperature is 200F')",
+        (msg_id, chunk_id),
+    )
+    return doc_id, conv_id, msg_id
+
+
+def test_a_revision_demoted_from_current_flags_its_historical_citation(test_env):
+    """A document that loses is_current_revision (a newer revision was
+    promoted over it) must retroactively flag every historical answer that
+    cited it, even though it was never deactivated or re-rejected."""
+    from app.db import get_conn
+    from app.main import app as fastapi_app
+    from fastapi.testclient import TestClient
+    from tests.conftest import register_test_user
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "tech-p104a@example.com")
+    with get_conn() as conn:
+        doc_id, conv_id, msg_id = _seed_p104_answer(conn, email="tech-p104a@example.com")
+
+    before = local_client.get(f"/api/conversations/{conv_id}/messages")
+    before_msg = next(m for m in before.json() if m["id"] == msg_id)
+    assert before_msg["citations"][0]["source_withdrawn"] is False
+
+    with get_conn() as conn:
+        conn.execute("UPDATE documents SET is_current_revision = false WHERE id = %s", (doc_id,))
+
+    after = local_client.get(f"/api/conversations/{conv_id}/messages")
+    after_msg = next(m for m in after.json() if m["id"] == msg_id)
+    assert after_msg["has_withdrawn_source"] is True, (
+        "a revision demoted from current must flag its historical citation even without deactivation"
+    )
+    assert after_msg["citations"][0]["source_withdrawn"] is True
+
+
+def test_a_rejected_machine_link_flags_its_historical_citation(test_env):
+    """A document-machine link that is later rejected must retroactively
+    flag a historical answer generated against that specific link, even
+    though the document itself stays approved and current (it may still be
+    linked -- and valid -- for a different machine)."""
+    from app.db import get_conn
+    from app.main import app as fastapi_app
+    from fastapi.testclient import TestClient
+    from tests.conftest import register_test_user
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "tech-p104b@example.com")
+    with get_conn() as conn:
+        doc_id, conv_id, msg_id = _seed_p104_answer(conn, email="tech-p104b@example.com")
+
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE document_machines SET review_status = 'rejected' WHERE document_id = %s AND machine_id = 1",
+            (doc_id,),
+        )
+
+    after = local_client.get(f"/api/conversations/{conv_id}/messages")
+    after_msg = next(m for m in after.json() if m["id"] == msg_id)
+    assert after_msg["has_withdrawn_source"] is True, (
+        "rejecting the document-machine link the answer was generated against must flag it, even "
+        "though the document itself is still approved and current"
+    )
+    assert after_msg["citations"][0]["source_withdrawn"] is True
 
 
 def test_p0_04_a_an_expired_processing_lease_can_be_reclaimed_instead_of_blocking_forever(monkeypatch, test_env):

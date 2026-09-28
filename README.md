@@ -161,7 +161,8 @@ as the current revision goes through the rollback path.
 
 ## Releases
 
-Backend CI and Android CI run on every change. Signed Android builds come from
+Backend CI runs on every change under `backend/`; Android CI runs on every
+change under `android/`. Signed Android builds come from
 the manually triggered `Android release` workflow, which fails when any signing
 secret is missing. Record each distributed build with
 `docs/RELEASE_RECORD_TEMPLATE.md`.

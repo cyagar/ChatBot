@@ -71,9 +71,11 @@ class CitationOut(BaseModel):
     revision: str | None
     excerpt: str
     # Computed fresh at hydration time from the source document's CURRENT
-    # status, not stored on the message -- an emergency withdrawal or
-    # re-review must retroactively flag every historical answer/saved answer
-    # that cited this document, not just future ones.
+    # state, not stored on the message -- an emergency withdrawal, a
+    # re-review, a newer revision taking over as current, or the specific
+    # document-machine link this answer relied on being rejected, must all
+    # retroactively flag every historical answer/saved answer that cited it,
+    # not just future retrieval.
     source_withdrawn: bool = False
 
 
@@ -104,11 +106,13 @@ class MessageOut(BaseModel):
     # the MOST RECENT rating, not "whether any feedback exists".
     feedback_rating: str | None = None
     is_saved: bool = False
-    # True when ANY citation's source document has since been withdrawn
-    # (deactivated) or lost its approval -- an emergency withdrawal must
-    # retroactively flag every historical answer and saved answer built on
-    # that document, in the technician's live history and bookmarks alike,
-    # not just block new retrieval. The client
+    # True when ANY citation is no longer eligible the way it was when this
+    # answer was generated -- its document was deactivated, lost approval,
+    # stopped being the current revision, or the document-machine link this
+    # answer relied on was rejected. An emergency withdrawal or a later
+    # revision/link-review decision must retroactively flag every historical
+    # answer and saved answer built on that state, in the technician's live
+    # history and bookmarks alike, not just block new retrieval. The client
     # is expected to suppress the answer's action-oriented styling (e.g. "do
     # this") and show a clear warning instead when this is true; the raw
     # content and citations stay intact underneath for admin investigation.
@@ -824,10 +828,13 @@ def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
     # retrieved passage is still kept in message_sources for retrieval-quality
     # auditing, but reload must reproduce exactly what the technician saw, not
     # every candidate that was merely retrieved.
+    message_machine_id = {r["id"]: r["machine_id"] for r in rows} if "machine_id" in rows[0].keys() else {}
+
     citations_by_message: dict[int, list[CitationOut]] = {mid: [] for mid in message_ids}
     src_rows = conn.execute(
         "SELECT ms.message_id, ms.chunk_id, ms.excerpt, c.document_id, d.original_filename, d.title, "
-        "c.page_number, c.section_heading, d.revision, d.deactivated_at, d.review_status "
+        "c.page_number, c.section_heading, d.revision, d.deactivated_at, d.review_status, "
+        "d.is_current_revision "
         "FROM message_sources ms "
         "JOIN chunks c ON c.id = ms.chunk_id "
         "JOIN documents d ON d.id = c.document_id "
@@ -840,10 +847,40 @@ def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
         "ORDER BY ms.message_id, COALESCE(ms.citation_ordinal, ms.rank), ms.rank",
         (message_ids,),
     ).fetchall()
+
+    # (document_id, machine_id) -> that document-machine link's CURRENT
+    # review_status, for every machine any of these messages was actually
+    # generated against. A citation can go stale not only because its own
+    # document was deactivated/rejected, but because the specific link that
+    # made it eligible for THIS machine was since rejected (or superseded by
+    # a newer revision) -- checked against the message's OWN machine_id
+    # (captured at generation time), not the conversation's current one,
+    # which can change after the fact (see retry's own machine_id handling).
+    needed_doc_ids = {s["document_id"] for s in src_rows}
+    needed_machine_ids = {mid for mid in message_machine_id.values() if mid is not None}
+    link_status: dict[tuple[int, int], str] = {}
+    if needed_doc_ids and needed_machine_ids:
+        link_rows = conn.execute(
+            "SELECT document_id, machine_id, review_status FROM document_machines "
+            "WHERE document_id = ANY(%s) AND machine_id = ANY(%s)",
+            (list(needed_doc_ids), list(needed_machine_ids)),
+        ).fetchall()
+        link_status = {(r["document_id"], r["machine_id"]): r["review_status"] for r in link_rows}
+
     for s in src_rows:
         # The document's CURRENT state, evaluated fresh on every
         # hydration -- not what it was when this answer was generated.
-        withdrawn = s["deactivated_at"] is not None or s["review_status"] != "approved"
+        machine_id = message_machine_id.get(s["message_id"])
+        link_withdrawn = (
+            machine_id is not None
+            and link_status.get((s["document_id"], machine_id)) != "approved"
+        )
+        withdrawn = (
+            s["deactivated_at"] is not None
+            or s["review_status"] != "approved"
+            or not s["is_current_revision"]
+            or link_withdrawn
+        )
         citations_by_message[s["message_id"]].append(CitationOut(
             chunk_id=s["chunk_id"], document_id=s["document_id"], filename=s["original_filename"],
             title=s["title"], page_number=s["page_number"], section_heading=s["section_heading"],
@@ -912,7 +949,8 @@ def _hydrate_message(conn, row, user_id: int) -> MessageOut:
 
 _MESSAGE_COLUMNS = (
     "id, role, content, is_clarifying_question, is_no_answer, safety_warnings, conflict_note, "
-    "answer_status, clarifying_options, retry_count, created_at, reply_to_message_id, idempotency_key"
+    "answer_status, clarifying_options, retry_count, created_at, reply_to_message_id, idempotency_key, "
+    "machine_id"
 )
 
 

@@ -29,9 +29,19 @@ Today's session-cookie auth stays as-is; no OAuth/PKCE work in Phase 1.
 
 ## 3. Cloud, region, and managed services
 
-**Decision:** Google Cloud, on a near-zero-cost tier, with the reliability
-tradeoffs that implies (cold starts, no SLA, a database that can pause after
-inactivity) explicitly accepted for a ~20-user internal pilot.
+**Superseded by section 14 (2026-09-25):** production does not run on Cloud
+Run, and does not use Google Cloud Storage, Secret Manager, or Cloud Logging/
+Monitoring. It runs on one persistent Docker host with local disk for object
+storage, `backend/.env` (via Compose's `env_file:`) for secrets, and
+`docker compose logs` for logs — see `docs/DEPLOYMENT_SINGLE_HOST.md`. The
+rest of this section is kept as the historical record of the original
+near-zero-cost-tier reasoning, not as the current selection; only **Database:
+Neon** and **Manual source of truth (section 4): Google Drive** still hold.
+
+**Original decision (2026-08-26), superseded above except where noted:**
+Google Cloud, on a near-zero-cost tier, with the reliability tradeoffs that
+implies (cold starts, no SLA, a database that can pause after inactivity)
+explicitly accepted for a ~20-user internal pilot.
 
 Concrete service selections:
 
@@ -245,13 +255,13 @@ release validation.
 ## Open decisions (second audit, 2026-09-24)
 
 Each needs an owner (ceyhun@hmwagner.com unless reassigned) before a broad
-pilot; none is settled by the code.
+pilot.
 
-1. **Deployment topology.** Cloud Run (section 3) versus one persistent Docker
-   host. The application currently assumes a long-lived single process; see the
-   "Deployment topology" gate in `docs/PRODUCTION_READINESS.md`.
-2. **Answer provider for testers.** `local_extractive` (verbatim passages) or
-   `anthropic` (generated, lexically validated, not entailment-checked).
+1. **Deployment topology — resolved by section 14 (2026-09-25).** One
+   persistent Docker host, not Cloud Run.
+2. **Answer provider for testers — resolved by section 14 (2026-09-25).**
+   `anthropic` (generated, lexically validated against the cited excerpt --
+   see `backend/app/providers/base.py` -- not semantic-entailment-checked).
 3. **Anthropic data terms.** Retention setting, region, contractual position,
    and tester consent wording (`docs/TESTER_ONBOARDING.md`).
 4. **Neon recovery window and restore drill.** Confirm the current plan's

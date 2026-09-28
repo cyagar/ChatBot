@@ -1,0 +1,578 @@
+CHATBOT PRODUCTION-READINESS RE-AUDIT
+=====================================
+
+Repository: https://github.com/cyagar/ChatBot
+Reviewed branch: master
+Reviewed commit: 92852d5f48819211b5734f20ce31660fc12e6550
+Commit date: 2026-09-25
+Audit date: 2026-09-25 UTC
+Prior audited commit: e645486bc75f174153686778749bc172755391b3
+
+
+FINAL VERDICT
+-------------
+
+NO-GO FOR AN UNSUPERVISED PRODUCTION RELEASE.
+
+This version is substantially better than the previously audited version. The
+builders closed many serious correctness, revision-control, workflow, security,
+and ingestion defects. The code is now credible as a late-stage release
+candidate, but it is not yet safe or operationally proven enough for target
+users to rely on during real equipment work.
+
+Three release blockers remain:
+
+1. Generated answers can still pass validation while changing the meaning of
+   cited manual text, and a safety prerequisite can be silently removed.
+2. No immutable, signed release APK has been produced and preserved by the
+   repository's release workflow for this commit. The existing external APK
+   link cannot be tied to the reviewed source from repository evidence.
+3. The selected single-host production deployment has not been exercised, and
+   its documented bind mounts/secret permissions are likely to fail on a clean
+   Linux host because the container runs as UID 10001.
+
+A small, supervised pilot can be considered only after those items are
+contained and the exact APK/deployment are verified. For that pilot, use
+AI_PROVIDER=local_extractive until generated-answer safety has stronger
+evidence, require technicians to open the cited page before acting, name an
+incident owner, and define an immediate stop criterion for any answer that
+contradicts or omits a safety instruction.
+
+
+WHAT THE BUILDERS FIXED WELL
+----------------------------
+
+The following concerns from the previous audit are materially addressed:
+
+- Answers are tied to the exact user question with reply_to_message_id and
+  idempotency keys. The server no longer replays an unrelated answer, and the
+  Android client persists/reconciles an interrupted pending send.
+- A conversation cannot process multiple questions concurrently. Stale client
+  loads are discarded and newer-message pagination exists.
+- The database now enforces one current approved active revision per source
+  and one non-clarifying answer per question. Revision promotion and rollback
+  are atomic and retire sibling revisions.
+- Fixed server-owned no-answer text replaces unverified model prose.
+- Numeric, unit, identifier, warning, negation, and lexical checks are much
+  stronger than before.
+- Interactive API documentation is disabled outside development and the CSP
+  is stricter.
+- Password reset invalidates existing sessions, database constraints cover
+  several important enums, and migrations are serialized with an advisory
+  lock.
+- Ingestion recovers abandoned runs, syncs promptly after a stale restart,
+  and records skipped/failed files more honestly.
+- /readyz, bounded page caching, an Android release workflow, actionlint,
+  backend CI, Android JVM CI, Bandit, pip-audit, and Dependabot were added.
+- The technician PWA and other obsolete implementation paths were removed.
+- Documentation now acknowledges many open gates instead of claiming that a
+  green unit suite alone proves release readiness.
+
+These are significant improvements. The remaining issues are narrower, but
+the first three still determine the release decision.
+
+
+RELEASE BLOCKERS
+================
+
+B-01 — Generated-answer validation is not meaning-preserving
+Severity: BLOCKER / safety
+Owner: development + product safety owner
+
+Evidence:
+
+- backend/app/providers/base.py:328-377 explicitly implements a lexical word
+  check and states that it is not semantic entailment.
+- backend/app/providers/base.py:501-519 repeats that a claim can be made from
+  excerpt words without being entailed by the excerpt.
+- backend/app/providers/base.py:559-575 silently drops an ungrounded "claim"
+  but rejects an ungrounded "step". The model controls which array receives a
+  sentence, so a prerequisite placed in claims can disappear while the action
+  remains.
+- backend/app/providers/base.py:598-606 treats a missing/unknown confidence
+  field as high confidence; only the exact string "low" adds a caveat.
+- Warnings are optional model output. There is no deterministic rule requiring
+  the answer to carry forward a relevant warning or prerequisite found in the
+  cited passage.
+
+Adversarial checks against the current validator accepted all of these
+meaning-changing claims:
+
+  Passage: "Hot water may cause severe burns. The machine is safe when
+  disconnected."
+  Accepted claim: "Hot water is safe."
+
+  Passage: "Do not operate the machine. Guards protect personnel during
+  cleaning."
+  Accepted claim: "Operate the machine; guards protect personnel during
+  cleaning."
+
+  Passage: "The red wire connects terminal A to terminal B. The blue wire
+  connects terminal C to terminal D."
+  Accepted claim: "The red wire connects terminal C to terminal D."
+
+The most important omission case also passed:
+
+  Passage: "Disconnect power before removing the cover. Remove the cover."
+  Model JSON classified "Disconnect power first." as a claim and "Remove the
+  cover." as a step. The first item was silently dropped and the displayed
+  answer became only: "1. Remove the cover. [1]"
+
+This is not a theoretical wording concern. It can remove a prerequisite from a
+repair instruction while retaining the hazardous action.
+
+The recorded 10/11 live evaluation does not close this risk. In
+backend/scripts/eval_retrieval.py, success is primarily based on cited
+filename, chunk type, expected keywords appearing in the cited excerpt,
+clarification/no-answer shape, and withdrawal behavior. It does not compare the
+meaning of the displayed answer with a technician-authored correct answer. An
+opposite answer can cite the right excerpt and contain its vocabulary.
+
+Required change before generated answers reach target users:
+
+1. Do not silently drop any failed claim. Reject the entire model response if
+   any returned claim, step, or warning fails validation.
+2. For the near-term release, constrain displayed generated content to exact,
+   contiguous sentence/span IDs selected from the manual and rendered by the
+   server. Do not let the model freely recombine words across sentences.
+3. Deterministically preserve relevant WARNING/CAUTION/DANGER text and
+   prerequisites associated with a selected procedure. A model deciding to
+   omit them must not make the output appear safe.
+4. Make confidence an enum required by the response schema, or remove it as a
+   safety signal. Self-reported confidence is not a validity check.
+5. Build a held-out, technician-authored safety evaluation with predeclared
+   thresholds. It must include cross-sentence recombination, role/terminal
+   inversion, negation, omitted prerequisites, wrong machine/model, conflicting
+   documents, prompt injection inside a manual, and adversarial questions.
+6. Set the allowed unsafe-answer count to zero for the release set. Record the
+   exact corpus revision, provider/model, prompt, commit, and output.
+
+Acceptable short-term containment: ship the supervised pilot with
+AI_PROVIDER=local_extractive and an explicit citation-verification workflow.
+That is not a substitute for the tests above if Anthropic-generated prose will
+be enabled later.
+
+
+B-02 — The distributable APK has no verifiable provenance
+Severity: BLOCKER / supply chain and release identity
+Owner: release owner
+
+Repository state checked for the reviewed commit:
+
+- Backend CI succeeded on the exact HEAD:
+  https://github.com/cyagar/ChatBot/actions/runs/36097041863
+- Security scan succeeded on the exact HEAD:
+  https://github.com/cyagar/ChatBot/actions/runs/36097042113
+- Android CI succeeded at c950946d, an ancestor after which no Android source
+  changed:
+  https://github.com/cyagar/ChatBot/actions/runs/36067836795
+- Workflow lint succeeded for the relevant workflow revision:
+  https://github.com/cyagar/ChatBot/actions/runs/36067836797
+- The Android release workflow has never run.
+- The repository has no GitHub Release for the current version, no current
+  release tag, and no retained Actions artifact. The only listed tag is the old
+  v0.1.0-audited-baseline.
+- master is not protected.
+
+The shareable APK mentioned by the owner may work, but there is no evidence in
+the repository that it was built from commit 92852d5, points to the intended
+production BASE_URL, uses the release signing identity, or matches a recorded
+hash. A successful debug/JVM build does not prove a signed release build.
+
+Required before distribution:
+
+1. Create an immutable release tag from the approved commit.
+2. Configure the five required release secrets and run Android release from
+   that tag. Prefer restricting workflow_dispatch to a tag/ref or validating
+   that the selected ref is an allowed release tag.
+3. Preserve the signed APK in a durable release/archive; an Actions artifact
+   alone expires.
+4. Record SHA-256, APK signer certificate SHA-256 fingerprint, package name,
+   versionCode/versionName, commit/tag, API base URL, build run URL, build time,
+   and file size in docs/RELEASE_RECORD_TEMPLATE.md.
+5. Compare the distributed-link bytes with the recorded SHA-256.
+6. Verify a clean install and an upgrade install on the Galaxy Tab A9+ and at
+   least one representative company phone. Test login, session expiry,
+   question interruption/retry, citation page opening, offline/reconnect,
+   maintenance mode, minimum-version blocking, and account disablement.
+7. Back up the signing keystore outside GitHub and prove a restore/signing
+   procedure. Losing it prevents trustworthy upgrades; leaking it permits
+   malicious ones.
+8. Protect the release branch/tag and require relevant checks before merge.
+
+
+B-03 — The chosen production deployment is neither proven nor permission-safe
+Severity: BLOCKER / deployment
+Owner: development + operator
+
+The project now chooses one persistent Linux host with Docker Compose and Caddy,
+which matches the application's single-process scheduler/local-storage design
+better than Cloud Run. However, the runbook has not been executed on a clean
+host and likely fails as written:
+
+- backend/Dockerfile:29-32 runs the service as appuser UID 10001.
+- docker-compose.yml:19 bind-mounts host ./data over /data. The ownership set
+  inside the image is hidden by that bind mount. A normal cloned host directory
+  owned by root or the deployment user with mode 0755 is not writable by UID
+  10001, so creation of /data/object_storage and /data/gdrive_cache can fail.
+- docker-compose.yml:20 and :26 bind-mount backend/.env and the Google service
+  account key. docs/DEPLOYMENT_SINGLE_HOST.md:103 says both should be mode 600,
+  but a mode-600 file owned by the host deployment user is not readable by UID
+  10001. Leaving it 0644 avoids the startup failure but exposes secrets to
+  other host users.
+- The runbook has no chown/install command, user-namespace mapping, named-volume
+  initialization, or secrets mechanism that resolves those constraints.
+- No CI job builds the actual Dockerfile, starts the Compose topology, runs
+  migrations, or exercises /readyz through Caddy.
+- No release tag exists even though the first runbook command says to check one
+  out.
+
+Required:
+
+1. Choose and document a safe ownership strategy. For example, create data
+   directories with owner/group 10001 and restrictive permissions, and provide
+   secrets to the container through a mechanism UID 10001 can read without
+   making them world-readable. Named volumes with an explicit initialization
+   step are another option.
+2. Add preflight checks that fail with a clear message when data paths are not
+   writable or mounted secrets are not readable.
+3. Build and smoke-test the production image/Compose files in CI or a staging
+   job. Exercise migrations, /healthz, /readyz, storage read/write, page image
+   rendering, and shutdown/restart.
+4. Deploy the immutable tag to a fresh Linux host using only the runbook. Record
+   every deviation; update the runbook until none is required.
+5. Run a live Neon/Drive/provider smoke test, validate Caddy TLS, then test a
+   rollback to the previous tag.
+
+
+HIGH-PRIORITY FINDINGS
+======================
+
+P1-01 — Authentication rate limits collapse all proxied users into one bucket
+
+backend/app/rate_limit.py:18-30 keys login and registration by the address seen
+by the ASGI request. Caddy supplies the original address through forwarded
+headers, but backend/Dockerfile starts Uvicorn without a forwarded-allow list.
+Uvicorn's default trusted proxy set is localhost; Caddy is a separate Compose
+container. The backend will therefore normally see the Caddy container address,
+so all technicians share the same 10/minute login/register bucket. One client
+or automated retry loop can temporarily block everyone.
+
+Fix: explicitly trust only the internal Caddy address/network, ensure Caddy
+overwrites rather than trusts untrusted incoming forwarding headers, and add a
+deployment-level test proving two real client IPs receive separate buckets
+while a direct client cannot spoof its bucket.
+
+
+P1-02 — /readyz can report a usable corpus when no retrievable chunk exists
+
+backend/app/main.py:207-211 checks only for an approved, active, current
+document with an approved machine link. It does not require an indexed/partial
+document status or even one non-empty chunk. backend/tests/unit/test_readyz.py
+creates no chunks in its happy-path fixture and still expects readiness.
+
+Fix: require at least one eligible non-empty chunk for an approved current
+machine-linked document. Decide whether lexical-only chunks count as ready or
+whether the expected embedding fingerprint must exist, then test both states.
+Also use /readyz, not /healthz, for the Docker healthcheck if the desired
+orchestrator behavior is to restart/quarantine an instance that cannot serve
+answers; otherwise document why the distinction is intentional.
+
+
+P1-03 — Generic metadata editing can create zero current revisions
+
+backend/app/api/routes_admin.py:149-196 exposes is_current_revision through the
+generic PATCH route. Setting true is protected from duplicates by a unique
+index, but setting the only current document to false is allowed, leaving no
+current revision. The admin UI describes this field as "preferred in search,"
+while retrieval actually excludes non-current documents.
+
+Fix: remove is_current_revision from generic metadata correction and the
+checkbox. Change current state only through promotion, rollback, deactivation,
+or another atomic lifecycle command that guarantees the intended invariant.
+
+
+P1-04 — Historical answers can keep a trusted appearance after source changes
+
+backend/app/api/routes_chat.py:828-850 marks a citation withdrawn only when its
+document is deactivated or no longer approved. It does not check
+is_current_revision and does not verify that the document-machine link for the
+message's machine is still approved. A revision can be removed from current
+retrieval, or an incorrect machine association can be rejected, while old and
+saved answers still display the source as valid.
+
+Fix: on hydration, include current-revision state and the relevant
+document_machines approval for the conversation/message machine. Mark the
+answer/citation stale or withdrawn when either is no longer eligible. Add
+regression tests for revision demotion, machine-link rejection, deactivation,
+and document rejection in both conversation history and saved answers.
+
+
+P1-05 — Conflict detection is effectively unreachable and misses real conflicts
+
+backend/app/retrieval/search.py excludes non-current documents by default.
+backend/app/providers/base.py:413-437 emits a conflict only when the cited set
+contains at least one non-current revision. Thus the normal technician path
+cannot trigger the detector. Conversely, two current documents at different
+source paths containing contradictory specifications do not trigger it.
+
+The ingestion/admin text suggesting that revision comparison surfaces conflicts
+at answer time is therefore misleading.
+
+Fix: either remove the ineffective feature/claim, or implement conflict review
+at ingestion/admin time using document identity, revision metadata, and
+structured values. Do not retrieve superseded instructions to technicians just
+to make a warning appear.
+
+
+P1-06 — Production observability is not sufficient for incident response
+
+The project has correlation IDs, but most ordinary 4xx/provider/retrieval paths
+are not logged as structured request events with correlation ID, route, status,
+and latency. Caddy has no access-log configuration. There are no metrics or
+alerts committed for provider failures, readiness degradation, stuck ingestion,
+backup failure, disk pressure, or elevated 5xx rates. An Android error may show
+an ID that an operator cannot reliably search.
+
+Fix: add privacy-safe structured request/error logs, include the correlation ID
+on every error path, configure Caddy access logs with an explicit retention
+policy, and create/verify alerts. Never log question text, conversation history,
+manual excerpts, credentials, cookies, or rejected model output by default.
+
+
+P1-07 — Backup exists, but recovery is not yet a system
+
+deploy/backup.sh creates a pg_dump and object-storage tarball and retains 14
+local copies. It does not encrypt or copy them off-host, generate/verify
+checksums, alert on failure, or prove that database and object-store snapshots
+form a recoverable release point. No timed restore is recorded, and the Neon
+PITR window is still unconfirmed.
+
+Fix: define RPO/RTO, automate encrypted off-host copies, verify checksums, alert
+on missed/failed backups, and perform a timed isolated restore. Confirm that
+restored citation records resolve to restored manual/page files.
+
+
+P1-08 — Test evidence is still incomplete for the actual release environment
+
+Still missing:
+
+- connected Android/emulator tests in CI;
+- signed release lint/build/install evidence;
+- representative phone coverage;
+- offline/reconnect, process death, split-screen/rotation, low-storage, and
+  accessibility validation on the release APK;
+- a production image/Compose smoke test;
+- load/soak testing against the selected single-host/Neon topology;
+- live Google Drive inventory/reconciliation for nested folders, shortcuts,
+  Google-native files, permission loss, renames, and large files;
+- a held-out safety/answer-quality set;
+- supervised UAT with target technicians.
+
+Vector retrieval currently loads eligible embeddings into application memory
+for scoring. This may be acceptable for a small corpus, but it is not measured.
+Record latency, memory, provider timeout rate, and concurrent-user behavior with
+a corpus at or above expected production size.
+
+
+P1-09 — Privacy and operational ownership decisions remain open
+
+docs/TESTER_ONBOARDING.md correctly says Anthropic terms, retention, region,
+tester wording, and legal review must be decided before enabling Anthropic for
+testers. docs/OWNER_DECISION_GATE.md section 14 nevertheless says production
+uses Anthropic. Support/incident/rollback owners, hours, retention/offboarding,
+stop-testing rules, Neon recovery, and evidence for grandfathered manuals are
+also open.
+
+These are release requirements, not optional documentation polish. Complete
+and sign the decision record before broad pilot access.
+
+
+DOCUMENTATION AND IMPLEMENTATION CLEANUP
+========================================
+
+P2-01 — Architecture/decision documents contradict the selected topology
+
+- docs/OWNER_DECISION_GATE.md section 3 still selects Cloud Run, GCS, Secret
+  Manager, and Google Cloud telemetry, while section 14 selects a persistent
+  Docker host with local storage and Caddy.
+- The Open decisions list still asks Cloud Run versus persistent host and
+  local_extractive versus Anthropic even though section 14 declares answers.
+- Backup language varies between relying on Neon PITR and using pg_dump plus
+  object-storage archives.
+- docs/PRODUCTION_READINESS.md still requests a load test against the "real
+  Cloud Run/Neon path."
+- backend/.env.example and backend/Dockerfile retain Cloud Run/GCS comments.
+
+Fix: make section 14 authoritative, delete/supersede obsolete choices, and use
+one consistent deployment, storage, provider, and backup description.
+
+
+P2-02 — Release/readiness documentation overstates current evidence
+
+- README.md says backend and Android CI run "on every change," but both use path
+  filters. Say they run on every relevant backend/Android change.
+- docs/PRODUCTION_READINESS.md marks /readyz closed despite the zero-chunk false
+  positive above.
+- backend/scripts/export_openapi.py says no CI exists, which is stale.
+- The admin UI calls a current revision merely "preferred" even though it is an
+  eligibility requirement.
+- The repository's tracked FinalChanges.txt describes an older audit and commit.
+  Replace it with this report or archive it under docs/history with its reviewed
+  SHA in the filename.
+
+
+P2-03 — Runtime controls are undocumented in the environment template
+
+maintenance_mode, maintenance_message, minimum_supported_version, and
+support_contact exist in backend/app/config.py and are consumed by Android, but
+they are absent from backend/.env.example. minimum_supported_version defaults to
+0.1.0 while the app is 1.0.0, and support_contact is explicitly described in
+code as a placeholder.
+
+Fix: add all four settings to the example and deployment runbook, set real
+production values, and test the exact release APK against maintenance and
+minimum-version states. Note that this is client enforcement; the backend does
+not block older clients.
+
+
+P2-04 — Static quality checks are not part of CI and currently fail
+
+Ruff found 22 issues. The most material is
+backend/app/ingestion/chunking.py:210 referencing undefined ExtractedTable in a
+type annotation. Others include unused settings/imports/locals, an unused
+embedding dimension value, import-order issues in anthropic_provider.py,
+ambiguous variable names, and f-strings without substitutions in the evaluation
+script. Vulture at an 80% threshold did not identify meaningful dead production
+code beyond a likely false positive.
+
+Fix the Ruff findings and add ruff check (plus an agreed formatter/type checker
+if desired) to backend CI. This is cleanup, not the principal release blocker.
+
+
+P2-05 — Comments violate the repository's own comment policy
+
+CLAUDE.md prohibits dates, review attribution, and historical "used to" narration
+inside code comments/docstrings. The current tree contains numerous contrary
+comments, including release-review history and dated phase narration. Keep only
+current invariants and move history to docs/history or commit messages.
+
+
+P2-06 — Supply-chain hardening is partial
+
+Recommended before a wider deployment:
+
+- pin GitHub Actions by full commit SHA rather than mutable major tags;
+- add distributionSha256Sum to gradle-wrapper.properties;
+- enable Gradle dependency verification/locking;
+- scan Android dependencies as well as Python dependencies;
+- enable GitHub secret scanning and CodeQL if available;
+- generate an SBOM and third-party license inventory;
+- pin the Caddy image to a tested immutable digest or exact patch release;
+- add an explicit project license or internal-use notice as appropriate.
+
+
+P2-07 — Pending question text is stored unencrypted in SharedPreferences
+
+The Android pending-send recovery state includes question text and an
+idempotency key. App sandboxing and allowBackup=false reduce exposure, but the
+session cookie already receives stronger Keystore-backed treatment. Consider
+using the same encrypted storage for pending question text, and always clear it
+after confirmed completion, logout, account disablement, and app reset.
+
+
+P2-08 — Remaining database invariants could be stronger
+
+CHECK constraints now cover important values, but document type, chunk type,
+file type, source system, and invitation role remain application-enforced. The
+reply_to_message_id foreign key does not itself prove same conversation or that
+the target is a user message; the route currently enforces those semantics.
+These are defense-in-depth improvements rather than immediate release blockers.
+
+
+VERIFICATION PERFORMED
+======================
+
+Source/repository:
+
+- Remote master and local HEAD both resolved to
+  92852d5f48819211b5734f20ce31660fc12e6550 at final check.
+- Worktree was clean; this audit did not alter the application repository.
+- git diff --check passed.
+- Python compileall passed.
+- admin.js and invite.js passed node --check.
+- pip check reported no broken installed requirements in the review
+  environment.
+
+Tests/static checks:
+
+- Focused local backend run: 168 passed, 277 deselected, with two dependency
+  deprecation warnings. Database/slow/live-Drive tests were intentionally
+  deselected locally.
+- Exact-HEAD backend GitHub Actions run passed the full PostgreSQL-backed suite.
+- Exact-HEAD security workflow passed Bandit and pip-audit as configured.
+- Relevant Android JVM/build workflow passed. Android could not be rerun in the
+  local audit environment because the Gradle distribution was not cached and
+  that host could not reach the distribution service; the remote workflow is
+  the applicable evidence.
+- The Android release workflow has no run, so lintRelease, release signing, APK
+  inspection, and artifact upload remain unproven.
+- Adversarial validator probes exposed the meaning/omission failures recorded
+  under B-01.
+
+Scope limitations:
+
+- No production credentials or private corpus contents were requested or
+  inspected.
+- The external share link/APK bytes were not supplied, so its hash, signer,
+  API URL, version, and commit provenance could not be verified.
+- No production host exists in repository evidence and no live deployment,
+  restore, load test, or target-user session was performed during this audit.
+
+
+ORDERED RELEASE EXIT CHECKLIST
+==============================
+
+The release decision should remain NO-GO until items 1-9 are complete and
+evidence is attached to one immutable tag/artifact:
+
+[ ] 1. Contain B-01: use local_extractive for the supervised pilot, or replace
+        free recombination with exact server-rendered spans and pass the held-out
+        adversarial safety suite with zero unsafe answers.
+[ ] 2. Fix the claim-dropping/prerequisite omission path and add regression
+        tests for every adversarial example in this report.
+[ ] 3. Fix Linux data/secret ownership, proxy IP handling, and the /readyz
+        zero-chunk false positive; add deployment integration tests.
+[ ] 4. Remove generic current-revision editing and correctly invalidate old
+        citations when revision/link approval changes.
+[ ] 5. Reconcile deployment/provider/backup documentation and complete privacy,
+        retention, support, incident, rollback, and stop-test decisions.
+[ ] 6. Deploy a tagged production image on a fresh host; run migrations,
+        ingestion, readiness, TLS, provider, page evidence, restart, and rollback
+        smoke tests.
+[ ] 7. Complete a timed database + object-storage restore and configure off-host
+        backup verification/alerting.
+[ ] 8. Run the signed Android release workflow from the tag and preserve the APK,
+        hash, signing fingerprint, BASE_URL, run URL, and release record.
+[ ] 9. Pass clean-install and upgrade-install testing on tablet and phone,
+        including offline/reconnect, interruption, citation opening, session
+        invalidation, maintenance, and minimum-version paths.
+[ ] 10. Run the held-out corpus/equipment safety evaluation and load/soak test;
+         resolve all unsafe results and set measured capacity limits.
+[ ] 11. Conduct supervised UAT with individual technician accounts and a named
+         on-call owner. Stop immediately on a safety contradiction or omitted
+         prerequisite.
+[ ] 12. After a defined incident-free supervised period, make and record the
+         explicit go/no-go decision for broader production use.
+
+
+BOTTOM LINE
+===========
+
+The builders did real, high-quality remediation, and this is no longer an
+early prototype. It is a release candidate with a good base of tests and much
+better state consistency. It is still not production ready because the core
+promise — that a generated repair answer preserves the cited manual's meaning
+and safety prerequisites — is not yet enforced, and the exact signed APK and
+deployment have not been proven. Close B-01 through B-03 first; the remaining
+P1 items should be completed before broad target-audience testing.

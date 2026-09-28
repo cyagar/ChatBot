@@ -361,7 +361,16 @@ def _excerpt_lines(text: str) -> list[str]:
     # ":"/";" are deliberately not split on: "PROBABLE CAUSE: Tank Heater
     # failure." is one atomic fact in this corpus's troubleshooting tables,
     # and splitting it there would separate the label from what it labels.
-    joined = re.sub(r"\s+", " ", text)
+    #
+    # Only space/tab runs are collapsed here -- a real newline is kept. Word
+    # extraction elsewhere (_prose_tokens) treats "\n" as just another
+    # separator, so this changes nothing for word/coverage matching; it only
+    # keeps the line boundaries _local_polarity needs (see there) for a
+    # sentence that runs across several physically distinct rows with no
+    # sentence-ending punctuation between them at all -- this corpus's
+    # troubleshooting tables and spec/bullet lists commonly do exactly that.
+    joined = re.sub(r"\r\n?", "\n", text)
+    joined = re.sub(r"[ \t]+", " ", joined)
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", joined) if s.strip()]
 
 
@@ -371,12 +380,30 @@ def _claim_clauses(item_text: str) -> list[str]:
     half should be checked against its own best-matching excerpt sentence,
     rather than requiring the whole claim to be concentrated in ONE excerpt
     sentence -- that would also reject every genuine two-step claim. Splits
-    the same way as _excerpt_lines, plus on ";" and standalone "and", the
-    other common ways a model joins two actions into one claim -- unlike
-    excerpt sentences, ";" does separate two clauses of a claim here."""
-    normalized = re.sub(r"\band\b", ".", item_text).replace(";", ".")
-    parts = _excerpt_lines(normalized)
-    return parts or [item_text]
+    the same way as _excerpt_lines, plus on ";", the other common way a model
+    joins two actions into one claim -- unlike excerpt sentences, ";" does
+    separate two clauses of a claim here.
+
+    A standalone "and" is also split, but only when it joins two actions
+    (each side names its own critical/action word, e.g. "disconnect power
+    and remove the cover") -- "and" just as often joins two nouns within ONE
+    clause ("both concept and design", "power, water, and chemicals"), and
+    splitting those apart would send half of one fact off to be grounded
+    (and ordered) separately from the half it belongs with."""
+    parts = _excerpt_lines(item_text.replace(";", "."))
+    clauses: list[str] = []
+    for part in parts:
+        pieces = re.split(r"\band\b", part)
+        merged = [pieces[0]]
+        for piece in pieces[1:]:
+            prev_has_action = any(w in _CRITICAL_STEMS for w in _content_stems(merged[-1]))
+            piece_has_action = any(w in _CRITICAL_STEMS for w in _content_stems(piece))
+            if prev_has_action and piece_has_action:
+                merged.append(piece)
+            else:
+                merged[-1] += " and " + piece
+        clauses.extend(p.strip() for p in merged if p.strip())
+    return clauses or [item_text]
 
 
 def _line_coverage(claim_set: set[str], line: str) -> tuple[float, list[str]]:
@@ -384,6 +411,35 @@ def _line_coverage(claim_set: set[str], line: str) -> tuple[float, list[str]]:
     matched = claim_set & set(line_stems)
     coverage = len(matched) / len(claim_set) if claim_set else 1.0
     return coverage, line_stems
+
+
+def _local_polarity(window: str, claim_set: set[str]) -> set[str]:
+    """Polarity words near where the claim's own content actually matched in
+    `window`, not polarity words anywhere in it.
+
+    `window` is one _excerpt_lines unit -- normally one real sentence, in
+    which case this just scans the whole thing (there is only one physical
+    line, so the loop below never narrows anything). But _excerpt_lines only
+    splits on sentence-ending punctuation, and this corpus's troubleshooting
+    tables and spec/bullet lists commonly run many unrelated facts together
+    on separate physical lines with no punctuation between them at all, so
+    one such table becomes ONE giant "sentence" here. An unrelated "will not
+    operate" on some other row of that table must not poison every claim
+    grounded against a different row in the same table -- scanning pairs of
+    adjacent physical lines (a bullet's header is often wrapped onto the next
+    line) for the one that best overlaps the claim's own words, and reading
+    polarity only from that pair, keeps the check scoped to the claim's own
+    row instead of the whole table."""
+    lines = window.split("\n")
+    if len(lines) <= 1:
+        return {w for w in _prose_tokens(window) if w in _POLARITY_WORDS}
+    best_i, best_overlap = 0, -1
+    for i in range(len(lines) - 1):
+        overlap = len(claim_set & set(_content_stems(lines[i] + " " + lines[i + 1])))
+        if overlap > best_overlap:
+            best_overlap, best_i = overlap, i
+    scope = lines[best_i] + " " + lines[best_i + 1]
+    return {w for w in _prose_tokens(scope) if w in _POLARITY_WORDS}
 
 
 def _clause_grounded(clause_text: str, lines: list[str], machine_stems: set[str]) -> int | None:
@@ -417,7 +473,7 @@ def _clause_grounded(clause_text: str, lines: list[str], machine_stems: set[str]
         if not _is_ordered_subsequence(claim_critical, window_critical):
             return None
 
-    window_polarity = {w for w in _prose_tokens(window) if w in _POLARITY_WORDS}
+    window_polarity = _local_polarity(window, claim_set)
     if claim_polarity != window_polarity:
         return None
     return best_i
