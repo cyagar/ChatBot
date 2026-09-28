@@ -40,6 +40,13 @@ services:
       - LOCAL_STORAGE_DIR=/data/object_storage
       - GDRIVE_CACHE_DIR=/data/gdrive_cache
       - GOOGLE_SERVICE_ACCOUNT_JSON_PATH=/app/${GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME:?set GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME in the root .env}
+      # Compose applies `environment:` after `env_file:`, so this wins even
+      # when backend/.env leaves TESSERACT_CMD blank (as .env.example ships
+      # it) or sets a host-local path that means nothing inside this image --
+      # OCR is silently disabled (app/ingestion/extractors.py) with no
+      # binary configured, so this must not be left to whatever .env happens
+      # to contain.
+      - TESSERACT_CMD=/usr/bin/tesseract
     restart: unless-stopped
     # Bounds a single-instance pilot deployment; raise if ingestion/embedding
     # gets OOM-killed under a larger corpus.

@@ -755,17 +755,6 @@
             ],
             "title": "Doc Type"
           },
-          "is_current_revision": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Is Current Revision"
-          },
           "machine_ids": {
             "anyOf": [
               {

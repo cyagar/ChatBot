@@ -518,33 +518,29 @@ def test_failing_items_names_what_did_not_check_out():
     assert failing_items("not json", passages) == []
 
 
-# --- Regression tests for the second external audit's (Feedback.txt) reported
-# adversarial examples, each reproduced against the pre-fix validator before
-# being fixed here.
-
-def test_audit_b01_a_safety_conclusion_from_the_wrong_clause_is_rejected():
+def test_a_safety_conclusion_from_the_wrong_clause_is_rejected():
     passages = [_passage(1, 1, "Hot water may cause severe burns. The machine is safe when disconnected.")]
     assert _single_claim("Hot water is safe.", passages[0].content) is None
 
 
-def test_audit_b01_a_prohibition_is_not_flipped_by_padding_with_an_unrelated_clause():
+def test_a_prohibition_is_not_flipped_by_padding_with_an_unrelated_clause():
     passages = [_passage(1, 1, "Do not operate the machine. Guards protect personnel during cleaning.")]
     claim = "Operate the machine; guards protect personnel during cleaning."
     assert _single_claim(claim, passages[0].content) is None
 
 
-def test_audit_b01_a_relational_fact_cannot_be_reassembled_from_two_clauses():
+def test_a_relational_fact_cannot_be_reassembled_from_two_clauses():
     excerpt = "The red wire connects terminal A to terminal B. The blue wire connects terminal C to terminal D."
     assert _single_claim("The red wire connects terminal C to terminal D.", excerpt) is None
     assert _single_claim("The red wire connects terminal A to terminal B.", excerpt) is not None
 
 
-def test_audit_b01_a_prerequisite_phrased_as_a_claim_cannot_silently_disappear():
-    """The most serious reported case: the model splits an excerpt into a
-    claim ("Disconnect power first.") and a step ("Remove the cover."). The
-    claim doesn't check out, and the old behavior dropped only the claim,
-    displaying "Remove the cover." with no mention of disconnecting power
-    first. The whole response must be rejected instead."""
+def test_a_prerequisite_phrased_as_a_claim_cannot_silently_disappear():
+    """A model can split an excerpt into a claim ("Disconnect power first.")
+    and a step ("Remove the cover."). If the claim doesn't check out, it must
+    not be dropped while the step still displays -- that would show "Remove
+    the cover." with no mention of disconnecting power first. A failing claim
+    rejects the whole response, the same as a failing step."""
     passages = [_passage(1, 1, "Disconnect power before removing the cover. Remove the cover.")]
     raw = json.dumps({
         "is_no_answer": False,
