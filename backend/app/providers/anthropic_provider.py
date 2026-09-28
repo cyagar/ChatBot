@@ -10,8 +10,6 @@ from __future__ import annotations
 import logging
 
 from app.config import get_settings
-
-logger = logging.getLogger(__name__)
 from app.providers.base import (
     AIProvider,
     GeneratedAnswer,
@@ -23,6 +21,8 @@ from app.providers.base import (
     failing_items,
     parse_and_validate,
 )
+
+logger = logging.getLogger(__name__)
 
 # The SDK's own max_retries is layered UNDER generate()'s application-level
 # "repair" retry (a second full _call() when the first response fails

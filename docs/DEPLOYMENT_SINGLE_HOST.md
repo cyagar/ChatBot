@@ -84,8 +84,11 @@ again. For a data rollback use Neon point-in-time recovery or a branch restore.
 - Point an external uptime monitor at `https://<domain>/readyz` and alert on any
   non-200 response, and on `"corpus": "degraded"` or `"ingestion": "stuck"` in
   the body. `/readyz` only reports booleans and status words.
-- Logs: `docker compose logs -f app`. Each response carries an `X-Correlation-ID`
-  header, and error bodies include the same id.
+- Logs: `docker compose logs -f app`. One line per request (method, path,
+  status, latency, correlation id) plus a full traceback on any unhandled
+  exception. Each response also carries an `X-Correlation-ID` header, and
+  error bodies include the same id, so an id a technician reports (or one an
+  Android crash report shows) is directly greppable in these logs.
 - Disk: alert before `data/` and the Docker volume fill up.
 
 ## Backups

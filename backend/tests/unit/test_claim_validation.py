@@ -153,15 +153,15 @@ def test_p2_08_each_claim_and_step_carries_an_inline_marker_for_its_own_citation
     citation_index = {c.chunk_id: i + 1 for i, c in enumerate(result.citations)}
     lines = result.answer.split("\n")
 
-    e4_line = next(l for l in lines if "E4" in l)
+    e4_line = next(ln for ln in lines if "E4" in ln)
     assert f"[{citation_index[1]}]" in e4_line
     assert f"[{citation_index[2]}]" not in e4_line
 
-    part_line = next(l for l in lines if "81-118-31" in l and l.startswith("-"))
+    part_line = next(ln for ln in lines if "81-118-31" in ln and ln.startswith("-"))
     assert f"[{citation_index[2]}]" in part_line
     assert f"[{citation_index[1]}]" not in part_line
 
-    step_line = next(l for l in lines if l.startswith("1."))
+    step_line = next(ln for ln in lines if ln.startswith("1."))
     assert f"[{citation_index[1]}]" in step_line and f"[{citation_index[2]}]" in step_line
 
 

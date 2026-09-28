@@ -17,7 +17,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from app.config import get_settings
 from app.db import get_conn
 from app.retrieval.embeddings import blob_to_vector, embed_query, embedding_fingerprint
 
@@ -162,7 +161,6 @@ def vector_search(query: str, machine_id: int | None, limit: int = CANDIDATE_POO
         logger.exception("Embedding model unavailable; falling back to lexical-only search")
         return []
 
-    dim = rows[0]["dim"]
     matrix = np.vstack([blob_to_vector(r["vector"], r["dim"]) for r in rows])
     # Vectors are stored L2-normalized, so dot product == cosine similarity.
     scores = matrix @ qvec

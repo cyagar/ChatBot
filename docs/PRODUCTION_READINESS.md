@@ -16,7 +16,7 @@ Owner column: `dev` = builders, `owner` = ceyhun@hmwagner.com.
 
 | Gate | Owner | Status | Evidence / what remains |
 |---|---|---|---|
-| Model prose cannot state an unsupported qualitative instruction | dev | Open | Claims and steps must be the cited excerpt's own wording with directions, actions and negations preserved, and no-answer text is fixed server text (`app/providers/base.py`, `tests/unit/test_claim_validation.py`). Live evaluation (Anthropic, production corpus copy): 10/11. This is a lexical check, not entailment. Remaining: an adversarial safety set (prompt injection, inverted procedures, wrong model) run against the live provider. |
+| Model prose cannot state an unsupported qualitative instruction | dev | Open | Claims and steps are checked clause by clause against their own best-matching excerpt sentence with directions, actions and negations preserved and cross-clause order enforced; any failing claim, step or warning rejects the whole response (nothing is silently dropped), and no-answer text is fixed server text (`app/providers/base.py`, `tests/unit/test_claim_validation.py`). Live evaluation (Anthropic, fresh throwaway Neon branch, 2026-09-28): 9/11 -- the 2 misses are a heavily OCR-garbled scanned source (`scanned-ocr-asq16`; wording, not grounding, is unreconstructable there) and a retrieval-ranking miss unrelated to validation (`safety-warning-cma-180uc`), neither a validator regression. This is a lexical check, not entailment. Remaining: an adversarial safety set (prompt injection, inverted procedures, wrong model) run against the live provider. |
 | Answers are tied to their own question; replays never return another turn's answer | dev | Closed | `messages.reply_to_message_id` + unique answer index; `IDEMPOTENCY_*` / `CONVERSATION_BUSY` codes; `tests/api/test_answer_attempts.py` (includes the Q1/A2 sequence). Reclaimable-attempt model, not a durable queue: a shutdown mid-provider-call loses that attempt's work, and the client resumes it. |
 | Android cannot lose or mislabel a second question | dev | Closed | One pending question at a time, key persisted across process death, replies matched by key and reply link, stale reloads discarded, newest-page loading (`ChatViewModelTest`). Instrumented run on the tablet: pass. |
 | One current revision per manual; rollback is atomic | dev | Closed | Migration 0005 partial unique index, `POST .../rollback`, `tests/api/test_admin.py`. Production had no violations when checked. |
@@ -30,10 +30,10 @@ Owner column: `dev` = builders, `owner` = ceyhun@hmwagner.com.
 | Backend CI green on the release commit | dev | Open | Record the run URL for the tag. |
 | Android workflow valid and jobs run | dev | Open | `android-ci.yml` no longer references `secrets` in step conditions and `workflow-lint.yml` runs actionlint; confirm the first GitHub run creates jobs. |
 | Signed release built by the release workflow and verified | owner | Owner | Needs the five signing secrets in GitHub, the keystore backed up outside the build machine, then a run of **Android release**. |
-| Non-demo version, real icon | dev | Closed | `versionName 1.0.0`, `versionCode 2`, adaptive launcher icon. Increment `versionCode` for every distributed build. |
+| Non-demo version, real icon | dev | Closed | `versionName 1.0.0`, `versionCode 3`, adaptive launcher icon. Increment `versionCode` for every distributed build. |
 | Release record filled for the exact APK; clean and upgrade install tested on tablet and phone | owner | Owner | `RELEASE_RECORD_TEMPLATE.md`. No phone run recorded. |
 | Download link access control, expiry, hash | owner | Owner | Audit the external APK link separately. |
-| Dependency, secret, SAST, license and workflow scans | dev | Open | Added: actionlint, bandit, pip-audit (clean locally), Dependabot. Not added: Android dependency locking/verification, CodeQL, secret scanning (enable in GitHub settings), SBOM/license inventory. |
+| Dependency, secret, SAST, license and workflow scans | dev | Open | Added: actionlint, bandit, pip-audit (clean locally), ruff (`backend-ci.yml`, `backend/ruff.toml`), Dependabot. Not added: Android dependency locking/verification, CodeQL, secret scanning (enable in GitHub settings), SBOM/license inventory. |
 
 ## Deployment and operations
 
@@ -45,7 +45,7 @@ Owner column: `dev` = builders, `owner` = ceyhun@hmwagner.com.
 | Ingestion recovers from a killed run and syncs promptly after restart | dev | Closed | Orphaned `running` rows are failed at startup under the ingestion lock; first sync runs about a minute after start when stale; an all-failed run is `failed`; permission and size skips are run errors. An expected-corpus inventory against the real Drive folder is still needed (owner). |
 | Timed restore into an isolated environment | owner | Owner | Neon PITR window unconfirmed; no drill recorded. |
 | Load test against the real single-host/Neon path | dev | Open | Vector search scans eligible embeddings in process and has not been measured. The page render cache is now byte-bounded and render concurrency limited. |
-| Logs/metrics/alerts with correlation IDs and no raw model output | dev | Open | Rejected model responses are no longer logged by default. Structured logging, metrics and alerts are not built. |
+| Logs/metrics/alerts with correlation IDs and no raw model output | dev | Open | Rejected model responses are no longer logged by default. One structured line per request (method, path template, status, latency, correlation id -- never question text, history, excerpts, bodies or cookies) is now logged for every request, not just unhandled 500s (`app/main.py`'s `correlation_id_middleware`; `logging.basicConfig` at INFO is what makes `docker compose logs app` show anything at all, since nothing configured that before). Metrics and alerts are still not built. |
 
 ## People and policy
 
@@ -60,7 +60,7 @@ Owner column: `dev` = builders, `owner` = ceyhun@hmwagner.com.
 
 | Gate | Owner | Status | Evidence / what remains |
 |---|---|---|---|
-| Invariants enforced by the database | dev | Closed | Migrations 0005 (one current revision), 0006 (one answer per question), 0007 (CHECK constraints), 0008 (conversation idempotency). Applied under an advisory lock. Not yet applied to the production branch: they run when the new build starts. |
+| Invariants enforced by the database | dev | Closed | Migrations 0005 (one current revision), 0006 (one answer per question), 0007 (CHECK constraints: role/status/rating enums), 0008 (conversation idempotency), 0009 (CHECK constraints: chunk_type, documents.doc_type, invitations.role -- file_type and source_system deliberately left open, see the migration's own comment). Applied under an advisory lock. Not yet applied to the production branch: they run when the new build starts. |
 
 ## Tested state
 

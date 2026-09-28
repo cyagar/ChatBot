@@ -439,9 +439,9 @@ def review_queue(admin: CurrentUser = Depends(require_admin)):
                 id=d["id"], original_filename=d["original_filename"], doc_type=d["doc_type"],
                 manufacturer=d["manufacturer"], title=d["title"], status=d["status"],
                 review_status=d["review_status"], ingested_at=d["ingested_at"],
-                links=[PendingLinkOut(machine_id=l["machine_id"], model_name=l["model_name"],
-                                       manufacturer=l["manufacturer"], confidence=l["confidence"],
-                                       review_status=l["review_status"]) for l in links],
+                links=[PendingLinkOut(machine_id=link["machine_id"], model_name=link["model_name"],
+                                       manufacturer=link["manufacturer"], confidence=link["confidence"],
+                                       review_status=link["review_status"]) for link in links],
             ))
     return out
 

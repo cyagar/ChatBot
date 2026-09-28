@@ -353,8 +353,6 @@ def _record_event(conn, run_id: int, filename: str, event: str, detail: str | No
 
 
 def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
-    settings = get_settings()
-
     # --- Idempotency/resume: this exact source file was already processed. ---
     # Keyed on source_ref (not sha256): the same bytes arriving under a *different*
     # source_ref is a duplicate, not a resume, and must fall through to the

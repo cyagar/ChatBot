@@ -59,7 +59,6 @@ def test_p0_03_a_metadata_only_correction_does_not_touch_machine_links(test_env)
     machine_ids (sending it as JSON null, which Pydantic treats identically
     to the field being absent) must leave existing links, rejected ones
     included, completely untouched."""
-    from app.auth.security import hash_password
     from app.db import get_conn
     from app.main import app as fastapi_app
     from fastapi.testclient import TestClient
@@ -376,7 +375,6 @@ def test_p0_13_withdrawing_a_source_document_retroactively_flags_history_and_sav
     message-level has_withdrawn_source) is computed fresh on every
     hydration, from the document's CURRENT state, not what it was when the
     answer was generated."""
-    from app.auth.security import hash_password
     from app.db import get_conn
     from app.main import app as fastapi_app
     from fastapi.testclient import TestClient

@@ -113,7 +113,7 @@ def test_retry_rejects_a_user_message(test_env):
 
     _register("retry3@example.com")
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()
-    ask = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "Why is it not heating?"})
+    client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "Why is it not heating?"})
     user_message_id = [m for m in client.get(f"/api/conversations/{conv['id']}/messages").json()
                         if m["role"] == "user"][0]["id"]
 

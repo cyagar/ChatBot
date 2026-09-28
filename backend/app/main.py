@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -39,6 +41,16 @@ from app.db import get_conn, run_migrations
 from app.rate_limit import limiter
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+
+# Nothing else in this process configures logging -- without a handler,
+# INFO-level records (the access log below) and even the ERROR-level
+# unhandled-exception log (app/api/errors.py) would only reach the default
+# "handler of last resort" (WARNING+, minimally formatted), not a real,
+# greppable line. `docker compose logs app` captures stderr, so this is what
+# actually makes that command show anything.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+access_logger = logging.getLogger("app.access")
 
 
 @asynccontextmanager
@@ -162,10 +174,27 @@ async def correlation_id_middleware(request: Request, call_next):
     by OriginCheckMiddleware above -- which never reaches a route handler --
     still gets one, and the same id that appears in the error body is also
     echoed as a response header for support/log correlation on a *success*
-    response too, not just errors."""
+    response too, not just errors.
+
+    Also logs one structured line per request -- method, path, status,
+    latency, correlation id, nothing else. An Android error can show a
+    correlation id an operator cannot otherwise search for; this makes every
+    request (not just unhandled 500s, which already log their own line in
+    app/api/errors.py) findable by it. Deliberately excludes the question
+    text, conversation history, manual excerpts, request/response bodies,
+    and cookies -- only the path template a route matched, never the raw
+    query string, so an id/free-text search param can't leak in here."""
     request.state.correlation_id = str(uuid.uuid4())
+    started = time.perf_counter()
     response = await call_next(request)
     response.headers[CORRELATION_ID_HEADER] = request.state.correlation_id
+    route = request.scope.get("route")
+    path = route.path if route is not None else request.url.path
+    latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    access_logger.info(
+        "%s %s -> %s %sms correlation_id=%s",
+        request.method, path, response.status_code, latency_ms, request.state.correlation_id,
+    )
     return response
 
 

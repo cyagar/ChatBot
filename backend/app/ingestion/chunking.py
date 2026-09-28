@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from app.ingestion.extracted import ExtractedDocument
+from app.ingestion.extracted import ExtractedDocument, ExtractedTable
 
 TARGET_CHARS = 1200
 MIN_CHARS = 150
@@ -106,7 +106,7 @@ def _chunk_page_text(page_number: int, text: str, headings: list[tuple[str, int]
         buffer_type = line_type
         buffer.append(stripped)
 
-        if buffer_type == "text" and sum(len(l) for l in buffer) > TARGET_CHARS:
+        if buffer_type == "text" and sum(len(ln) for ln in buffer) > TARGET_CHARS:
             flush()
 
     flush()

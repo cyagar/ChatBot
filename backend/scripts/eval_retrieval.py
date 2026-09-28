@@ -322,13 +322,13 @@ def main() -> int:
         lines.append(f"- Cross-model isolation (no leak from a forbidden document): **{cross_model_clean}/{len(cross_model_cases)}**")
     lines.append("")
     lines.append(
-        f"**Calibration disclosure:** `MIN_VECTOR_SIMILARITY_FOR_ANSWER` in "
-        f"`app/providers/extractive.py` was tuned against this same case set (2 "
-        f"absent-answer cases, 2 relevant cases used for the threshold gap) -- this pass rate "
-        f"is not independent validation of that threshold, only confirmation the tuned value "
-        f"still passes the cases it was tuned on. Treat it as a regression check, not "
-        f"generalization evidence, until it is re-measured against held-out, technician-written "
-        f"questions (not yet added to data/eval/ground_truth.json)."
+        "**Calibration disclosure:** `MIN_VECTOR_SIMILARITY_FOR_ANSWER` in "
+        "`app/providers/extractive.py` was tuned against this same case set (2 "
+        "absent-answer cases, 2 relevant cases used for the threshold gap) -- this pass rate "
+        "is not independent validation of that threshold, only confirmation the tuned value "
+        "still passes the cases it was tuned on. Treat it as a regression check, not "
+        "generalization evidence, until it is re-measured against held-out, technician-written "
+        "questions (not yet added to data/eval/ground_truth.json)."
     )
     lines.append("")
     lines.append("## Per-case results")

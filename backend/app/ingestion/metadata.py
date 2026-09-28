@@ -178,7 +178,7 @@ def _strip_trademark_boilerplate(text: str) -> str:
             drop[j] = True
             j -= 1
             window_left -= 1
-    return "\n".join(l for l, d in zip(lines, drop) if not d)
+    return "\n".join(ln for ln, d in zip(lines, drop) if not d)
 
 
 # Auto-link threshold: matches below this confidence are surfaced to an admin

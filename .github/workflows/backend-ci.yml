@@ -90,8 +90,9 @@ jobs:
 
       - name: Install Python dependencies
         # requirements-dev.txt pulls in requirements.txt itself plus
-        # pytest/httpx -- this job needs both, unlike the Dockerfile, which
-        # only ever installs requirements.txt for the deployed image.
+        # pytest/httpx/ruff -- this job needs all of it, unlike the
+        # Dockerfile, which only ever installs requirements.txt for the
+        # deployed image.
         run: |
           pip install --no-cache-dir torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
           pip install --no-cache-dir -r requirements-dev.txt
@@ -106,6 +107,9 @@ jobs:
         run: |
           echo "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/tma_test" >> .env.test
           echo "DATABASE_URL_UNPOOLED=postgresql://postgres:postgres@localhost:5432/tma_test" >> .env.test
+
+      - name: Lint with ruff
+        run: ruff check .
 
       - name: Run backend test suite
         run: pytest -q
