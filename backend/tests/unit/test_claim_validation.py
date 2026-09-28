@@ -549,3 +549,107 @@ def test_a_prerequisite_phrased_as_a_claim_cannot_silently_disappear():
         "warnings": [],
     })
     assert parse_and_validate(raw, passages, "test") is None
+
+
+# A claim can keep every one of the excerpt's own words -- no invented number,
+# no invented identifier, nothing _claim_supported alone would catch -- and
+# still swap which entity plays which role. Coverage-based grounding (every
+# claim word present *somewhere* in the matched excerpt sentence) cannot tell
+# these apart from the genuine claim; only checking that the matched words
+# keep the excerpt's own relative order can.
+def test_a_cause_and_effect_cannot_be_swapped():
+    assert _single_claim("Hot water causes severe burns.", "Severe burns cause hot water.") is None
+
+
+def test_a_before_after_identifier_pair_cannot_be_swapped():
+    assert _single_claim("Remove panel B before panel A.", "Remove panel A before panel B.") is None
+
+
+def test_a_flow_direction_cannot_be_reversed():
+    assert _single_claim(
+        "Water flows from the spray arm to the tank.",
+        "Water flows from the tank to the spray arm.",
+    ) is None
+
+
+def test_a_wire_to_terminal_pairing_cannot_be_swapped():
+    assert _single_claim(
+        "Connect the red wire to terminal B and the black wire to terminal A.",
+        "Connect the red wire to terminal A and the black wire to terminal B.",
+    ) is None
+
+
+def test_a_before_after_action_pair_cannot_be_swapped():
+    assert _single_claim("Open the pump before starting the valve.", "Open the valve before starting the pump.") is None
+
+
+def test_a_value_cannot_be_reassigned_to_the_wrong_step():
+    assert _single_claim(
+        "Use 180F for the rinse cycle and 150F for the sanitize cycle.",
+        "Use 150F for the rinse cycle and 180F for the sanitize cycle.",
+    ) is None
+
+
+def test_two_clauses_in_one_sentence_cannot_be_reordered():
+    """Both clauses individually match the same excerpt sentence -- only
+    comparing where each one matches WITHIN that sentence (not just which
+    sentence) catches the swap."""
+    assert _single_claim(
+        "Remove the cover and disconnect power.",
+        "Disconnect power and remove the cover.",
+    ) is None
+
+
+def test_a_negation_cannot_be_stripped_behind_a_long_qualifying_clause():
+    """A fixed character window around the matched span would miss a
+    negation word this far from it; the check now scans the whole sentence
+    the match sits in."""
+    excerpt = (
+        "WARNING: Under no circumstances, for any reason, regardless of "
+        "training level, should you ever operate this unit with the access "
+        "panel removed. Replace the cover before use."
+    )
+    passages = [_passage(1, 1, excerpt)]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [], "steps": [{"text": "Replace the cover before use.", "cited_excerpt_numbers": [1]}],
+        "warnings": [{
+            "text": "operate this unit with the access panel removed",
+            "cited_excerpt_numbers": [1],
+        }],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
+
+
+def test_a_required_warning_is_added_even_when_the_model_omits_it():
+    """A model can ground a real step in a passage and simply never mention
+    the WARNING sentence sitting next to it in that same passage -- nothing
+    in _claim_grounded catches an omission, since there's no failing item to
+    reject. The passage's own labeled warning is attached to the answer
+    regardless of what the model's "warnings" list contains."""
+    passages = [_passage(1, 1, "WARNING: Disconnect power before servicing. Remove the cover.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [],
+        "steps": [{"text": "Remove the cover.", "cited_excerpt_numbers": [1]}],
+        "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test")
+    assert result is not None
+    assert result.safety_warnings == ["WARNING: Disconnect power before servicing."]
+
+
+def test_two_clauses_in_one_sentence_in_the_correct_order_still_passes():
+    """The order-check tightening above must not reject a claim that
+    genuinely follows the excerpt's own word order."""
+    assert _single_claim(
+        "Disconnect power and remove the cover.",
+        "Disconnect power and remove the cover.",
+    ) is not None
+
+
+def test_a_number_correctly_attached_to_its_own_step_still_passes():
+    assert _single_claim(
+        "Use 150F for the rinse cycle.",
+        "Use 150F for the rinse cycle and 180F for the sanitize cycle.",
+    ) is not None

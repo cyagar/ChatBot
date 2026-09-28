@@ -82,28 +82,44 @@ size and is a capacity risk to measure before growth (`PRODUCTION_READINESS.md`)
 - `anthropic`: requests a JSON answer of separate `claims`, `steps` and
   `warnings`, each citing excerpts. `parse_and_validate` accepts a response only
   if: numbers, identifiers, units and signs in each claim appear verbatim in its
-  cited excerpts; warnings are quoted verbatim without a trimmed negation; each
-  claim and step is the cited excerpt's own wording, lightly trimmed: direction,
-  action and modal words (remove, disconnect, before, must, ...) must appear in
-  the excerpt and keep its order (multi-clause claims/steps are checked
-  clause by clause against their own best-matching excerpt sentence, still
-  in that order), other words may differ only by a small allowance for
-  reworded labels (withheld for a short letter-like identifier), and no
-  negation or restriction is added or dropped. Any claim, step or warning
-  that fails -- including a number or identifier the excerpt lacks --
-  rejects the WHOLE response; nothing is silently dropped, so a prerequisite
-  the model phrased as a "claim" can't vanish while a hazardous step stays.
-  A rejection triggers one repair attempt that names the failing items, then
-  a fixed "could not verify" answer. The technician-visible text is
-  assembled server-side from validated lines with inline `[n]` citation markers;
-  a no-answer response shows fixed server text, never model prose. Revision
-  conflict notes are computed from document metadata, never from the model.
+  cited excerpts; warnings are quoted verbatim without a trimmed negation (the
+  negation check scans the whole sentence the quoted span sits in, not a fixed
+  character window); each claim and step is the cited excerpt's own wording,
+  lightly trimmed, checked clause by clause against its own best-matching
+  excerpt sentence (see `_claim_clauses`/`_clause_grounded` in
+  `app/providers/base.py`): every word of the clause found in that sentence,
+  numbers and identifiers included, must appear there in the clause's own
+  order -- not just present anywhere in it -- so a claim can't keep an
+  excerpt's own words but swap which subject, identifier or value goes with
+  which action; two clauses grounded in the same excerpt sentence are also
+  checked against each other's position within it, not just which sentence
+  they matched; other words may differ only by a small allowance for reworded
+  labels (withheld for a short letter-like identifier), and no negation or
+  restriction is added or dropped. Any claim, step or warning that fails --
+  including a number or identifier the excerpt lacks -- rejects the WHOLE
+  response; nothing is silently dropped, so a prerequisite the model phrased
+  as a "claim" can't vanish while a hazardous step stays. A rejection
+  triggers one repair attempt that names the failing items, then a fixed
+  "could not verify" answer. Separately, every WARNING/CAUTION/DANGER/
+  NOTICE/IMPORTANT-labeled sentence in the excerpts the answer's own claims
+  and steps cite is attached to the response regardless of what the model's
+  own `warnings` list contains (`_extract_required_warnings`) -- a model that
+  grounds a step in a passage but leaves out the labeled hazard next to it
+  cannot make that hazard disappear; this only reaches labeled passages, not
+  an unlabeled prerequisite stated as an ordinary sentence. The
+  technician-visible text is assembled server-side from validated lines with
+  inline `[n]` citation markers; a no-answer response shows fixed server
+  text, never model prose. Revision conflict notes are computed from
+  document metadata, never from the model.
 
-These checks are lexical. They do not prove entailment. The retrieval evaluation
-has been run against the live provider (9 of 11 cases, small-N; see
-PRODUCTION_READINESS.md for the two known corpus-quality exceptions); an
-adversarial safety
-evaluation has not (`PRODUCTION_READINESS.md`).
+These checks are lexical, not semantic entailment: a claim can still pass by
+selecting words from the excerpt in a way that reads misleadingly even in the
+excerpt's own order, so the excerpt stays one tap away as evidence. The
+retrieval evaluation has been run against the live provider (9 of 11 cases,
+small-N; see PRODUCTION_READINESS.md for the two known corpus-quality
+exceptions, one of which is a safety-category retrieval miss, not merely a
+low-value one); a live adversarial safety evaluation (prompt injection,
+inverted procedures, wrong-model content) has not (`PRODUCTION_READINESS.md`).
 
 ## Chat operations and idempotency
 

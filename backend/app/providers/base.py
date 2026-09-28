@@ -301,22 +301,67 @@ def _stem(word: str) -> str:
     return word.rstrip("e")
 
 
+def _merge_unit_suffixes(tokens: list[str]) -> list[str]:
+    """Merges a bare number immediately followed by a short unit-like token
+    ("240", "v" -> "240v") so a value written with no space ("240V") lines up
+    with the same value written with one ("240 V") -- _prose_tokens treats
+    whitespace as a hard separator, unlike _extract_tokens's regex, which
+    already tolerates this gap for the verbatim number/unit check; without
+    this merge the two checks would disagree about what counts as one token.
+    A stopword ("to", as in a range like "5 to 10") is never treated as a
+    unit."""
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        if (nxt and t.replace(".", "", 1).isdigit() and 1 <= len(nxt) <= 4 and nxt.isalpha()
+                and nxt not in _STOPWORDS and nxt not in _POLARITY_WORDS):
+            out.append(t + nxt)
+            i += 2
+        else:
+            out.append(t)
+            i += 1
+    return out
+
+
 def _content_stems(text: str) -> list[str]:
     # No minimum length: a bare letter can be a real fact in this domain
     # ("terminal C", "position B"), and excluding it would let a claim swap
     # one identifier for another as long as the surrounding words matched.
-    return [_stem(w) for w in _prose_tokens(text) if w not in _STOPWORDS and w not in _POLARITY_WORDS
-            and not any(ch.isdigit() for ch in w)]
+    # A number or identifier token ("150F", "E4") is kept, not stemmed (stemming
+    # a number is meaningless) -- it still has to appear, in position, in the
+    # excerpt sentence this clause is grounded against, which is what stops a
+    # claim from reusing the excerpt's own numbers under the wrong step or
+    # threshold; _claim_supported separately requires the number itself to be
+    # exact (same sign, same unit) but does not check what it's attached to.
+    tokens = [w for w in _merge_unit_suffixes(_prose_tokens(text)) if w not in _STOPWORDS and w not in _POLARITY_WORDS]
+    return [w if any(ch.isdigit() for ch in w) else _stem(w) for w in tokens]
 
 
-def _is_ordered_subsequence(needle: list[str], haystack: list[str]) -> bool:
-    it = iter(haystack)
-    return all(word in it for word in needle)
+def _subsequence_end(needle: list[str], haystack: list[str]) -> int | None:
+    """The index in `haystack` of the last element consumed while confirming
+    `needle` is an ordered (not necessarily contiguous) subsequence of it, or
+    None if it isn't one. Returning the position, not just a bool, is what
+    lets the caller compare two clauses grounded to the SAME excerpt line:
+    line index alone can't tell "remove the cover" and "disconnect power"
+    apart when both match line 0 of "Disconnect power and remove the
+    cover." -- only their relative position in that line can."""
+    pos = -1
+    for word in needle:
+        found = None
+        for i in range(pos + 1, len(haystack)):
+            if haystack[i] == word:
+                found = i
+                break
+        if found is None:
+            return None
+        pos = found
+    return pos
 
 
 # Words that carry an instruction's direction, action, modality or
-# sequencing. A claim may not contain one the excerpt lacks, and the order of
-# the ones it does contain must follow the excerpt's.
+# sequencing. A claim may not contain one the excerpt lacks.
 _CRITICAL_STEMS = frozenset(_stem(w) for w in (
     "remove install connect disconnect unplug plug open close enable disable engage disengage "
     "increase decrease raise lower add drain fill turn start stop replace insert tighten loosen "
@@ -442,15 +487,20 @@ def _local_polarity(window: str, claim_set: set[str]) -> set[str]:
     return {w for w in _prose_tokens(scope) if w in _POLARITY_WORDS}
 
 
-def _clause_grounded(clause_text: str, lines: list[str], machine_stems: set[str]) -> int | None:
-    """None if ungrounded; otherwise the index into `lines` of the excerpt
-    sentence this clause is grounded against, so the caller can check that
-    clauses appear in the same order as their matched sentences do."""
+_NO_ORDER = (-1, -1)  # a clause with no content words of its own imposes no order
+
+
+def _clause_grounded(
+    clause_text: str, lines: list[str], machine_stems: set[str]
+) -> tuple[int, int] | None:
+    """None if ungrounded; otherwise (excerpt-line index, position within
+    that line) of where this clause is grounded, so the caller can check
+    that clauses appear in the same order as their matched text does -- both
+    across different excerpt lines and within one shared line."""
     claim_stems = [w for w in _content_stems(clause_text) if w not in machine_stems]
     if not claim_stems:
-        return -1
+        return _NO_ORDER
     claim_set = set(claim_stems)
-    claim_critical = [w for w in claim_stems if w in _CRITICAL_STEMS]
     claim_polarity = {w for w in _prose_tokens(clause_text) if w in _POLARITY_WORDS}
 
     # The excerpt sentence that best covers this one clause -- concentrating
@@ -468,50 +518,61 @@ def _clause_grounded(clause_text: str, lines: list[str], machine_stems: set[str]
         return None
     if len(unmatched) > _unmatched_allowance(claim_stems):
         return None
-    if len(claim_critical) >= 2:
-        window_critical = [w for w in window_stems if w in _CRITICAL_STEMS]
-        if not _is_ordered_subsequence(claim_critical, window_critical):
-            return None
+
+    # Every claim word actually found in the window, not just the
+    # action/direction ones, must appear there in the clause's own order --
+    # a claim built by keeping all the right words but swapping which
+    # subject, identifier or value goes with which is still made of the
+    # excerpt's own words, but says something the excerpt doesn't.
+    matched_stems = [w for w in claim_stems if w in set(window_stems)]
+    end_pos = _subsequence_end(matched_stems, window_stems)
+    if end_pos is None:
+        return None
 
     window_polarity = _local_polarity(window, claim_set)
     if claim_polarity != window_polarity:
         return None
-    return best_i
+    return (best_i, end_pos)
 
 
 def _claim_grounded(item_text: str, cited_content: str, machine_label: str | None = None) -> bool:
     """A lexical check that a claim or step is the cited excerpt's own wording,
     lightly trimmed, not a rewrite. Each clause of the claim (see
     _claim_clauses) is checked independently against its own best-matching
-    excerpt sentence (see _clause_grounded): every direction, action or modal
-    word in the clause must be present there and keep the excerpt's order, the
-    clause's other words must be present there too (a small allowance for a
-    reworded label, withheld for a short letter-like identifier), and the
-    clause adds no negation or restriction that sentence lacks, or drops one it
-    has. A multi-clause claim/step's clauses must be grounded in excerpt
-    sentences that appear in the same relative order -- a claim built by
-    stating the excerpt's own steps in the wrong order is still built from
-    the excerpt's own words, but changes what it instructs.
+    excerpt sentence (see _clause_grounded): every word of the clause that's
+    present in that sentence must appear there in the clause's own order
+    (numbers and identifiers included, not just action words), the clause's
+    other words must be present there too (a small allowance for a reworded
+    label, withheld for a short letter-like identifier), and the clause adds
+    no negation or restriction that sentence lacks, or drops one it has. A
+    multi-clause claim/step's clauses must be grounded in the same relative
+    order as their matched text, whether that's two different excerpt
+    sentences or two spans of the same one -- a claim built by stating the
+    excerpt's own steps in the wrong order, or swapping which value or
+    identifier goes with which step, is still built from the excerpt's own
+    words, but changes what it instructs.
 
     This catches inverted, reordered, permission-flipped, cross-sentence and
-    invented prose that carries no number or part code. It is not semantic
-    entailment: a claim can still pass by selecting words from the excerpt in
-    a misleading way, so the excerpt stays one tap away as evidence."""
+    invented prose that carries no number or part code, including a claim
+    that keeps two entities from the excerpt but swaps their roles. It is not
+    semantic entailment: a claim can still pass by selecting words from the
+    excerpt in a way that reads misleadingly even in the excerpt's own order,
+    so the excerpt stays one tap away as evidence."""
     machine_stems = set(_content_stems(machine_label or ""))
     lines = _excerpt_lines(cited_content)
     if not lines:
         return not [w for w in _content_stems(item_text) if w not in machine_stems]
 
-    last_index = -1
+    last = _NO_ORDER
     for clause in _claim_clauses(item_text):
-        index = _clause_grounded(clause, lines, machine_stems)
-        if index is None:
+        result = _clause_grounded(clause, lines, machine_stems)
+        if result is None:
             return False
-        if index == -1:  # a clause with no content words of its own imposes no order
+        if result == _NO_ORDER:
             continue
-        if index < last_index:
+        if result < last:
             return False
-        last_index = index
+        last = result
     return True
 
 
@@ -526,11 +587,11 @@ def _warning_supported(warning_text: str, cited_content: str) -> bool:
     something off one end -- must not pass unconditionally: "operate with the
     cover removed" would otherwise satisfy an excerpt that actually says "do
     not operate with the cover removed" -- a real, contiguous substring, but
-    the opposite instruction. The text immediately surrounding the matched
-    span (a short window, not the whole excerpt, to avoid flagging an
-    unrelated negation word in a neighboring sentence) is checked for a
-    negation word the model's own warning text doesn't contain; finding one
-    rejects the response."""
+    the opposite instruction. The whole sentence the match sits in (not a
+    fixed character window, which a long qualifying clause -- "under no
+    circumstances, for any reason, regardless of training level, should
+    you..." -- can outrun) is checked for a negation word the model's own
+    warning text doesn't contain; finding one rejects the response."""
     norm_content = _normalize_ws(cited_content)
     norm_warning = _normalize_ws(warning_text)
     if not norm_warning:
@@ -539,13 +600,37 @@ def _warning_supported(warning_text: str, cited_content: str) -> bool:
     idx = norm_content.find(stripped)
     if idx == -1:
         return False
-    window = 40
-    prefix = norm_content[max(0, idx - window):idx]
-    suffix = norm_content[idx + len(stripped):idx + len(stripped) + window]
+    end = idx + len(stripped)
+    before = list(re.finditer(r"[.!?]\s", norm_content[:idx]))
+    sentence_start = before[-1].end() if before else 0
+    after = re.search(r"[.!?](\s|$)", norm_content[end:])
+    sentence_end = end + (after.end() if after else len(norm_content) - end)
+    sentence = norm_content[sentence_start:sentence_end]
     for neg in _NEGATION_WORDS:
-        if neg not in stripped and (neg in prefix or neg in suffix):
+        if neg not in stripped and neg in sentence:
             return False
     return True
+
+
+def _extract_required_warnings(passages: list) -> list[str]:
+    """Every WARNING/CAUTION/DANGER/NOTICE/IMPORTANT-labeled sentence found
+    in the cited excerpts, taken directly from the source text rather than
+    from the model -- like detect_conflict, a provider has no channel through
+    which to add or omit one of these, so it cannot silently leave a labeled
+    hazard out of its own "warnings" list. This only reaches labeled
+    passages; an unlabeled prerequisite the manual states as an ordinary
+    sentence is not covered."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in passages:
+        for line in _excerpt_lines(p.content):
+            norm = _normalize_ws(line)
+            if not _WARNING_LABEL_RE.match(norm):
+                continue
+            if norm not in seen:
+                seen.add(norm)
+                out.append(line.strip())
+    return out
 
 
 def detect_conflict(passages: list) -> str | None:
@@ -650,7 +735,10 @@ def parse_and_validate(
     claims and steps, never taken as free prose from the model, and a
     no-answer response displays NO_ANSWER_TEXT instead of the model's text.
     Each claim/step line carries inline [n] markers keyed to its position in
-    the returned `citations` list.
+    the returned `citations` list. `safety_warnings` includes every labeled
+    warning in the passages the answer actually cites, not only the ones the
+    model chose to list (see _extract_required_warnings) -- the model's own
+    warnings list can be a proper subset of what's returned.
 
     These checks are lexical. They do not establish that a claim is entailed by
     its excerpt, only that it is composed of the excerpt's own words, in order,
@@ -755,12 +843,26 @@ def parse_and_validate(
     cited_passages = [passages[n - 1] for item in (claims + steps + warnings) for n in item.excerpt_numbers]
     conflict_note = detect_conflict(cited_passages) if cited_passages else None
 
+    # Every WARNING/CAUTION/DANGER passage behind the answer's own claims and
+    # steps is surfaced regardless of what the model put in its "warnings"
+    # list -- a model that grounds a step in a passage but leaves out the
+    # hazard label right next to it must not make that label disappear.
+    # Deduplicated against the model's own (already-validated) warnings by
+    # normalized text, since the two can name the same sentence.
+    seen_warning_keys = {_normalize_ws(w.text) for w in warnings}
+    safety_warnings = [w.text for w in warnings]
+    for text in _extract_required_warnings(cited_passages):
+        key = _normalize_ws(text)
+        if key not in seen_warning_keys:
+            seen_warning_keys.add(key)
+            safety_warnings.append(text)
+
     return GeneratedAnswer(
         answer="\n".join(lines),
         citations=citations,
         is_no_answer=False,
         conflict_note=conflict_note,
-        safety_warnings=[w.text for w in warnings],
+        safety_warnings=safety_warnings,
         provider=provider_name,
     )
 
