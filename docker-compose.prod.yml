@@ -11,6 +11,10 @@ services:
       - "8000"
     environment:
       - APP_ENV=production
+      # In this topology only Caddy's container can reach app:8000 (see
+      # `expose` above -- there is no host port publish), so trusting
+      # X-Forwarded-For from any peer is safe: any peer IS Caddy.
+      - TRUSTED_PROXY_IPS=*
   caddy:
     image: caddy:2
     restart: unless-stopped

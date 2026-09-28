@@ -1,9 +1,16 @@
 # Local Docker Compose setup. The database is Postgres/Neon (remote, not
-# containerized here) — DATABASE_URL/DATABASE_URL_UNPOOLED come from the
-# mounted backend/.env below, read directly by app/config.py's
-# pydantic-settings env_file, so they don't need a separate `environment:`
-# entry here. Only object storage and the Drive download cache are local
-# disk under ./data, mounted into the container below.
+# containerized here) — backend/.env is loaded with env_file below, as real
+# process environment variables, not a bind-mounted file: the app container
+# runs as a non-root UID (see backend/Dockerfile), and a host file bind-mount
+# keeps the host's own ownership/mode, which that UID usually cannot read
+# (a real .env owned by the deploying user, mode 600, is not readable by
+# a different UID inside the container). env_file has no such problem --
+# Compose reads the file itself and injects the values, so the file's host
+# permissions never have to be readable by the container's UID at all. Only
+# object storage and the Drive download cache are local disk under ./data,
+# mounted into the container below -- see docs/DEPLOYMENT_SINGLE_HOST.md for
+# the ownership that directory (and the service-account key below) need on a
+# freshly cloned host.
 #
 # Usage:
 #   docker compose up --build
@@ -15,10 +22,15 @@ services:
       context: ./backend
     ports:
       - "8000:8000"
+    env_file:
+      - backend/.env
     volumes:
       - ./data:/data
-      - ./backend/.env:/app/.env:ro
-      # Google service-account key: mounted read-only, same pattern as .env.
+      # Google service-account key: this one has to be a real file (the
+      # Google auth library reads it by path), so it stays a bind mount --
+      # unlike .env above, it must be readable by the container's UID
+      # (10001) specifically, not by anyone else on the host. See
+      # docs/DEPLOYMENT_SINGLE_HOST.md for the required `chown`.
       # Never baked into the image (backend/.dockerignore blocks *.json).
       # The filename comes from GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME in the root
       # .env (read by `docker compose`, not backend/.env); compose refuses to

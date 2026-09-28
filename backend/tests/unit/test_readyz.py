@@ -13,7 +13,7 @@ from app.main import app
 client = TestClient(app)
 
 
-def _seed_retrievable_document(review_status="approved", link_status="approved", current=True):
+def _seed_retrievable_document(review_status="approved", link_status="approved", current=True, with_chunk=True):
     with get_conn() as conn:
         conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
         conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
@@ -27,6 +27,12 @@ def _seed_retrievable_document(review_status="approved", link_status="approved",
             "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, %s)",
             (doc_id, link_status),
         )
+        if with_chunk:
+            conn.execute(
+                "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) VALUES "
+                "(%s, 'text', 'Some manual content.', 21, 0)",
+                (doc_id,),
+            )
 
 
 def test_readyz_reports_ok_when_database_and_storage_are_healthy(test_env):
@@ -84,6 +90,13 @@ def test_readyz_fails_when_the_only_document_is_unapproved(test_env):
 
 def test_readyz_fails_when_the_only_link_is_unapproved(test_env):
     _seed_retrievable_document(link_status="pending")
+    assert client.get("/readyz").json()["corpus"] == "unusable"
+
+
+def test_readyz_fails_when_the_only_document_has_no_chunks(test_env):
+    """An approved, machine-linked document that was never chunked (ingestion
+    never ran, or produced nothing) has no content retrieval can return."""
+    _seed_retrievable_document(with_chunk=False)
     assert client.get("/readyz").json()["corpus"] == "unusable"
 
 

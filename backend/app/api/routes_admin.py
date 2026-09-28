@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import psycopg
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, Field, field_serializer
 
@@ -147,11 +146,16 @@ def list_documents(
 
 
 class MetadataCorrection(BaseModel):
+    # is_current_revision is deliberately not editable here -- it changes only
+    # through promote/rollback/deactivate, which enforce the one-current-
+    # revision-per-source_ref invariant and the sibling bookkeeping
+    # (deactivated_at, superseded_by) that go with it. Flipping the column
+    # directly from this endpoint could leave two documents from the same
+    # source current at once, or one current but not marked deactivated.
     manufacturer_name: str | None = None
     doc_type: str | None = None
     title: str | None = None
     revision: str | None = None
-    is_current_revision: bool | None = None
     machine_ids: list[int] | None = None
     reason: str = Field(min_length=1, max_length=500)
 
@@ -187,20 +191,6 @@ def correct_metadata(document_id: int, payload: MetadataCorrection, admin: Curre
             if new_value is not None:
                 _log(field, doc[field], new_value)
                 conn.execute(f"UPDATE documents SET {field} = %s WHERE id = %s", (new_value, document_id))
-
-        if payload.is_current_revision is not None:
-            _log("is_current_revision", doc["is_current_revision"], payload.is_current_revision)
-            try:
-                conn.execute(
-                    "UPDATE documents SET is_current_revision = %s WHERE id = %s",
-                    (payload.is_current_revision, document_id),
-                )
-            except psycopg.errors.UniqueViolation:
-                raise HTTPException(
-                    status.HTTP_409_CONFLICT,
-                    detail="Another active revision at this source path is already current. "
-                           "Use the rollback endpoint to swap revisions.",
-                )
 
         if payload.machine_ids is not None:
             # machine_ids must be validated before document_machines' INSERT

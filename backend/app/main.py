@@ -17,6 +17,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.errors import (
     CORRELATION_ID_HEADER,
@@ -204,9 +205,18 @@ def _corpus_readiness(settings) -> tuple[str, str]:
     for hours)."""
     try:
         with get_conn() as conn:
+            # Joins chunks, not just documents/document_machines: an approved,
+            # machine-linked document with zero chunks (ingestion never ran,
+            # or produced nothing) has nothing retrieval can actually return,
+            # and the app/retrieval/search.py queries this mirrors would find
+            # nothing either. Checking document state alone would report "ok"
+            # for a corpus that cannot answer a single question.
             retrievable = conn.execute(
-                "SELECT 1 FROM documents d JOIN document_machines dm ON dm.document_id = d.id "
-                "WHERE d.review_status = 'approved' AND d.deactivated_at IS NULL AND d.is_current_revision "
+                "SELECT 1 FROM chunks c "
+                "JOIN documents d ON d.id = c.document_id "
+                "JOIN document_machines dm ON dm.document_id = d.id "
+                "WHERE d.status IN ('indexed', 'partial') AND d.review_status = 'approved' "
+                "AND d.deactivated_at IS NULL AND d.is_current_revision "
                 "AND dm.review_status = 'approved' LIMIT 1"
             ).fetchone()
             stuck = conn.execute(
@@ -275,3 +285,13 @@ def invite_page(request: Request):
     invite.html. After account creation, the technician signs in from the
     Android app; this page does nothing beyond registration itself."""
     return templates.TemplateResponse(request, "invite.html")
+
+
+# What uvicorn actually serves in production (see Dockerfile) -- `app` above
+# stays a plain FastAPI instance so app.openapi() (scripts/export_openapi.py)
+# and TestClient(app) keep working unwrapped. Trusting X-Forwarded-For from
+# an untrusted source would let a client set its own rate-limit bucket; this
+# only trusts it from trusted_proxy_ips (app/rate_limit.py's _key_func and
+# get_remote_address() both read request.client.host, which this middleware
+# rewrites from the header once the immediate peer is trusted).
+asgi_app = ProxyHeadersMiddleware(app, trusted_hosts=get_settings().trusted_proxy_ips)

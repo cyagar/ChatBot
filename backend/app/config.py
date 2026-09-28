@@ -79,6 +79,15 @@ class Settings(BaseSettings):
     ocr_timeout_seconds: int = 30
 
     rate_limit_per_minute: int = 60
+    # Hosts allowed to set X-Forwarded-For (comma-separated, or "*" for any --
+    # only safe when nothing but the trusted proxy can reach this process
+    # directly, as in the single-host deployment where only Caddy's
+    # container can reach the app container's port). Left at uvicorn's own
+    # default (trust only a proxy on localhost) otherwise: without this, every
+    # request behind a real reverse proxy arrives with the proxy's own address
+    # as request.client.host, collapsing every technician's login/register
+    # rate limit into one shared bucket.
+    trusted_proxy_ips: str = "127.0.0.1"
 
     # Comma-separated email domains allowed to self-register (e.g.
     # "hmwagner.com,contractor-partner.com"). Empty = open registration --

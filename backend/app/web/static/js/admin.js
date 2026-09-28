@@ -329,7 +329,6 @@ function renderDocuments() {
                 </label>
                 <label>Title <input name="title" value="${escAttr(d.title || "")}" /></label>
                 <label>Revision <input name="revision" value="${escAttr(d.revision || "")}" /></label>
-                <label><input type="checkbox" name="is_current_revision" ${d.is_current_revision ? "checked" : ""} /> Current revision (preferred in search)</label>
                 <label>Machine association(s) — retrieval only ever returns a document for a machine linked here
                   <!-- The review-status badge below makes a rejected link visible before an admin decides
                        to touch it, and the "machine-picker-touched" flag set by the change listener further
@@ -615,7 +614,6 @@ function wireTabEvents() {
         doc_type: fd.get("doc_type") || null,
         title: fd.get("title") || null,
         revision: fd.get("revision") || null,
-        is_current_revision: fd.get("is_current_revision") === "on",
         // machine_ids is omitted entirely unless the admin actually touched
         // the picker this session -- sending it unconditionally would turn
         // every metadata-only correction (title, revision, doc type) into

@@ -29,6 +29,16 @@ GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME=service-account.json
 TMA_DOMAIN=tma.example.com
 EOF
 
+# The app container runs as a non-root user, UID/GID 10001 (see
+# backend/Dockerfile). backend/.env is loaded via Compose's env_file:, so its
+# host permissions don't matter -- Compose reads it as the host user and
+# injects the values as real environment variables. The service-account key
+# IS a bind-mounted file (the Google auth library needs a path), so it must
+# be owned by 10001, or the container cannot read it and startup fails
+# validate_for_startup()'s key check:
+chown 10001:10001 backend/service-account.json && chmod 400 backend/service-account.json
+mkdir -p data && chown -R 10001:10001 data
+
 docker compose -f docker-compose.yml -f docker-compose.prod.yml config   # verify
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
@@ -100,8 +110,12 @@ The Drive cache (`data/gdrive_cache`) is not a source of record.
 ## Security notes
 
 - Only Caddy publishes ports; the app is reachable only through it.
-- `backend/.env` and the service-account key stay on the host, mode 600, outside
-  git.
+- `backend/.env` and the service-account key stay on the host, outside git.
+  `backend/.env` is read by Compose itself (`env_file:`), so any mode the host
+  user can read is fine. The service-account key is bind-mounted into the
+  container and read by the app's own UID (10001), not the host user's --
+  `chown 10001:10001` it (mode 400 is enough; a host-user-only mode like 600
+  would leave the container unable to read it at all).
 - Apply OS security updates, and rebuild the image regularly to pick up base
   image and dependency patches (Dependabot opens the pull requests).
 - Rotate `SECRET_KEY` if it is ever exposed; every session is then invalidated.

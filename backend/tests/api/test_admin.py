@@ -418,7 +418,13 @@ def test_database_refuses_two_current_approved_revisions_at_one_source_ref(test_
             _seed_document_at_source_ref(conn, "google_drive:dup", sha256="b", review_status="approved")
 
 
-def test_marking_a_second_active_revision_current_via_patch_is_a_conflict_not_a_500(test_env):
+def test_patching_metadata_does_not_change_which_revision_is_current(test_env):
+    """is_current_revision changes only through promote/rollback/deactivate,
+    which keep the one-current-revision-per-source_ref invariant and the
+    sibling bookkeeping (deactivated_at, superseded_by) consistent. A generic
+    metadata PATCH must not be able to flip it directly -- doing so could
+    leave two documents from the same source current, or one current but not
+    marked deactivated."""
     source_ref = "google_drive:patchdup"
     with get_conn() as conn:
         _seed_document_at_source_ref(conn, source_ref, sha256="a", review_status="approved")
@@ -427,7 +433,10 @@ def test_marking_a_second_active_revision_current_via_patch_is_a_conflict_not_a_
         conn.execute("UPDATE documents SET review_status = 'approved' WHERE id = %s", (other,))
     _register_admin()
     resp = client.patch(f"/api/admin/documents/{other}", json={"is_current_revision": True, "reason": "test"})
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    with get_conn() as conn:
+        row = conn.execute("SELECT is_current_revision FROM documents WHERE id = %s", (other,)).fetchone()
+    assert row["is_current_revision"] is False
 
 
 def test_rejecting_replacement_leaves_old_document_active(test_env):

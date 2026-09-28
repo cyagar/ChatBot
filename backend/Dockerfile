@@ -43,8 +43,12 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=3)" || exit 1
 
-# Keep-alive above the fronting proxy's idle timeout (Cloud Run / Google
-# frontend hold backend connections ~10 minutes): with uvicorn's 5s default the
+# Keep-alive above the fronting proxy's idle timeout (a proxy holding
+# backend connections open for minutes): with uvicorn's 5s default the
 # container closes idle connections first, and the next request reusing one
 # fails with a connection reset instead of being retried.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "650"]
+#
+# app.main:asgi_app, not app.main:app -- it trusts X-Forwarded-For from
+# TRUSTED_PROXY_IPS (app/config.py) so per-client rate limiting sees the real
+# client address instead of the fronting proxy's.
+CMD ["uvicorn", "app.main:asgi_app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "650"]

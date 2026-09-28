@@ -274,8 +274,12 @@ def _claim_supported(item_text: str, cited_content: str, machine_label: str | No
 # Words a claim never needs the excerpt to contain verbatim.
 _STOPWORDS = frozenset(
     "a an the and or of to in on at by for from with as is are was were be been being it its this that "
-    "these those then than so also into onto up out over per via your you we they he she them their there "
+    "these those then than so also into onto per via your you we they he she them their there "
     "here has have had do does did can will would could".split()
+    # "up"/"out"/"over" are deliberately NOT here: they double as _CRITICAL_STEMS
+    # (direction words), and a stopword match is checked before that, so
+    # listing them here would silently exempt them from the critical-word
+    # checks below.
 )
 # A negation or restriction the excerpt applies to a statement; dropping one
 # flips or loosens the instruction, so it must survive into the claim.
@@ -298,8 +302,11 @@ def _stem(word: str) -> str:
 
 
 def _content_stems(text: str) -> list[str]:
+    # No minimum length: a bare letter can be a real fact in this domain
+    # ("terminal C", "position B"), and excluding it would let a claim swap
+    # one identifier for another as long as the surrounding words matched.
     return [_stem(w) for w in _prose_tokens(text) if w not in _STOPWORDS and w not in _POLARITY_WORDS
-            and not any(ch.isdigit() for ch in w) and len(w) > 2]
+            and not any(ch.isdigit() for ch in w)]
 
 
 def _is_ordered_subsequence(needle: list[str], haystack: list[str]) -> bool:
@@ -313,67 +320,142 @@ def _is_ordered_subsequence(needle: list[str], haystack: list[str]) -> bool:
 _CRITICAL_STEMS = frozenset(_stem(w) for w in (
     "remove install connect disconnect unplug plug open close enable disable engage disengage "
     "increase decrease raise lower add drain fill turn start stop replace insert tighten loosen "
-    "up down high low hot cold before after first then bypass override defeat ignore skip jumper "
-    "energize lock unlock reset clean delime safe unsafe allow permit prohibit forbid require "
-    "must may should shall always"
+    "up down out over high low hot cold before after first then bypass override defeat ignore skip "
+    "jumper energize lock unlock reset clean delime safe unsafe allow permit prohibit forbid require "
+    "must may should shall always operate run activate deactivate"
 ).split())
 
 
-def _unmatched_allowance(word_count: int) -> int:
-    """Non-critical words of a claim that may be missing from the excerpt: a
-    table label or connective the model reworded ("possible" for "probable")."""
+def _unmatched_allowance(claim_stems: list[str]) -> int:
+    """Non-critical words of a claim that may be missing from its matched
+    excerpt sentence: a table label or connective the model reworded
+    ("possible" for "probable"). Zero whenever the claim names a short,
+    letter-like identifier (a terminal, pin or position label): those are
+    exactly the specific fact a claim can otherwise get away with swapping
+    for a different one while the allowance absorbs the mismatch -- e.g.
+    "terminal C" instead of the source's "terminal A" reads as one
+    reworded word among many correct ones, but names the wrong terminal."""
+    if any(len(w) <= 2 and w.isalpha() for w in claim_stems):
+        return 0
+    word_count = len(claim_stems)
     return 0 if word_count < 5 else 1 if word_count < 12 else 2
+
+
+# A claim is expected to be one atomic fact copied from one place in the
+# manual (the system prompt asks for this explicitly), so its content words
+# should be found together, not assembled by picking words from unrelated
+# lines. This is what actually catches a cross-sentence rewrite: "hot water
+# is safe" and "operate the machine; guards protect personnel" both draw
+# words from two different manual sentences with opposite meanings, and
+# neither single sentence contains enough of either claim to pass on its own.
+_MIN_LINE_COVERAGE = 0.7
+
+
+def _excerpt_lines(text: str) -> list[str]:
+    """Sentence-like units, split on sentence-ending punctuation only -- a
+    bare line wrap from PDF extraction (common mid-sentence in this corpus)
+    is joined back into the sentence it wrapped from, not treated as its own
+    unit. Splitting on every newline too would fragment one wrapped
+    sentence/bullet across several "lines", failing a real claim/clause about
+    it for no reason."""
+    # ":"/";" are deliberately not split on: "PROBABLE CAUSE: Tank Heater
+    # failure." is one atomic fact in this corpus's troubleshooting tables,
+    # and splitting it there would separate the label from what it labels.
+    joined = re.sub(r"\s+", " ", text)
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", joined) if s.strip()]
+
+
+def _claim_clauses(item_text: str) -> list[str]:
+    """A claim/step covering two sequential actions from two different source
+    sentences ("Disconnect power. Remove the cover.") is legitimate and each
+    half should be checked against its own best-matching excerpt sentence,
+    rather than requiring the whole claim to be concentrated in ONE excerpt
+    sentence -- that would also reject every genuine two-step claim. Splits
+    the same way as _excerpt_lines, plus on ";" and standalone "and", the
+    other common ways a model joins two actions into one claim -- unlike
+    excerpt sentences, ";" does separate two clauses of a claim here."""
+    normalized = re.sub(r"\band\b", ".", item_text).replace(";", ".")
+    parts = _excerpt_lines(normalized)
+    return parts or [item_text]
+
+
+def _line_coverage(claim_set: set[str], line: str) -> tuple[float, list[str]]:
+    line_stems = _content_stems(line)
+    matched = claim_set & set(line_stems)
+    coverage = len(matched) / len(claim_set) if claim_set else 1.0
+    return coverage, line_stems
+
+
+def _clause_grounded(clause_text: str, lines: list[str], machine_stems: set[str]) -> int | None:
+    """None if ungrounded; otherwise the index into `lines` of the excerpt
+    sentence this clause is grounded against, so the caller can check that
+    clauses appear in the same order as their matched sentences do."""
+    claim_stems = [w for w in _content_stems(clause_text) if w not in machine_stems]
+    if not claim_stems:
+        return -1
+    claim_set = set(claim_stems)
+    claim_critical = [w for w in claim_stems if w in _CRITICAL_STEMS]
+    claim_polarity = {w for w in _prose_tokens(clause_text) if w in _POLARITY_WORDS}
+
+    # The excerpt sentence that best covers this one clause -- concentrating
+    # the check here, rather than letting it draw from the whole excerpt, is
+    # what stops a claim built by combining words from two unrelated
+    # sentences ("hot water" from one, "is safe" from another).
+    best_i, (coverage, window_stems, window) = max(
+        enumerate(_line_coverage(claim_set, ln) + (ln,) for ln in lines), key=lambda x: x[1][0]
+    )
+    if coverage < _MIN_LINE_COVERAGE:
+        return None
+
+    unmatched = [w for w in claim_stems if w not in set(window_stems)]
+    if any(w in _CRITICAL_STEMS for w in unmatched):
+        return None
+    if len(unmatched) > _unmatched_allowance(claim_stems):
+        return None
+    if len(claim_critical) >= 2:
+        window_critical = [w for w in window_stems if w in _CRITICAL_STEMS]
+        if not _is_ordered_subsequence(claim_critical, window_critical):
+            return None
+
+    window_polarity = {w for w in _prose_tokens(window) if w in _POLARITY_WORDS}
+    if claim_polarity != window_polarity:
+        return None
+    return best_i
 
 
 def _claim_grounded(item_text: str, cited_content: str, machine_label: str | None = None) -> bool:
     """A lexical check that a claim or step is the cited excerpt's own wording,
-    lightly trimmed, not a rewrite:
+    lightly trimmed, not a rewrite. Each clause of the claim (see
+    _claim_clauses) is checked independently against its own best-matching
+    excerpt sentence (see _clause_grounded): every direction, action or modal
+    word in the clause must be present there and keep the excerpt's order, the
+    clause's other words must be present there too (a small allowance for a
+    reworded label, withheld for a short letter-like identifier), and the
+    clause adds no negation or restriction that sentence lacks, or drops one it
+    has. A multi-clause claim/step's clauses must be grounded in excerpt
+    sentences that appear in the same relative order -- a claim built by
+    stating the excerpt's own steps in the wrong order is still built from
+    the excerpt's own words, but changes what it instructs.
 
-    - every direction, action or modal word (_CRITICAL_STEMS) in the claim
-      occurs in the excerpt, and when the claim has two or more of them they
-      appear in the excerpt's order;
-    - every other meaningful word occurs too, except a small allowance for
-      reworded labels;
-    - the claim adds no negation or restriction the excerpt lacks, and keeps
-      those in the excerpt sentences it draws from.
-
-    This catches inverted, reordered, permission-flipped and invented prose
-    that carries no number or part code. It is not semantic entailment: a claim
-    can still pass by selecting words from an excerpt in a misleading way, so
-    the excerpt stays one tap away as evidence."""
+    This catches inverted, reordered, permission-flipped, cross-sentence and
+    invented prose that carries no number or part code. It is not semantic
+    entailment: a claim can still pass by selecting words from the excerpt in
+    a misleading way, so the excerpt stays one tap away as evidence."""
     machine_stems = set(_content_stems(machine_label or ""))
-    claim_stems = [w for w in _content_stems(item_text) if w not in machine_stems]
-    if not claim_stems:
-        return True
-    excerpt_stems = _content_stems(cited_content)
-    excerpt_set = set(excerpt_stems)
+    lines = _excerpt_lines(cited_content)
+    if not lines:
+        return not [w for w in _content_stems(item_text) if w not in machine_stems]
 
-    unmatched = [w for w in claim_stems if w not in excerpt_set]
-    if any(w in _CRITICAL_STEMS for w in unmatched):
-        return False
-    if len(unmatched) > _unmatched_allowance(len(claim_stems)):
-        return False
-
-    claim_critical = [w for w in claim_stems if w in _CRITICAL_STEMS]
-    if len(claim_critical) >= 2:
-        excerpt_critical = [w for w in excerpt_stems if w in _CRITICAL_STEMS]
-        if not _is_ordered_subsequence(claim_critical, excerpt_critical):
+    last_index = -1
+    for clause in _claim_clauses(item_text):
+        index = _clause_grounded(clause, lines, machine_stems)
+        if index is None:
             return False
-
-    claim_polarity = {w for w in _prose_tokens(item_text) if w in _POLARITY_WORDS}
-    excerpt_polarity = {w for w in _prose_tokens(cited_content) if w in _POLARITY_WORDS}
-    if claim_polarity - excerpt_polarity:
-        return False
-    claim_set = set(claim_stems)
-    for sentence in re.split(r"(?<=[.!?;:])\s+|\n+", cited_content):
-        sentence_stems = set(_content_stems(sentence))
-        if not sentence_stems or not (claim_set & sentence_stems):
+        if index == -1:  # a clause with no content words of its own imposes no order
             continue
-        if len(claim_set & sentence_stems) * 2 < len(claim_set):
-            continue
-        sentence_polarity = {w for w in _prose_tokens(sentence) if w in _POLARITY_WORDS}
-        if sentence_polarity - claim_polarity:
+        if index < last_index:
             return False
+        last_index = index
     return True
 
 
@@ -505,8 +587,8 @@ def parse_and_validate(
     response is malformed, cites a nonexistent excerpt, or contains a
     claim/step/warning that fails its checks against the excerpt(s) it cites:
     numbers and identifiers must appear verbatim, warnings must be quoted, and
-    steps must pass the wording check in _claim_grounded (a claim that fails it
-    is dropped). The caller
+    claims and steps must pass the wording check in _claim_grounded, and any
+    failure rejects the whole response -- nothing is silently dropped. The caller
     then retries with a repair prompt or falls back to an explicit "could not
     verify" result. The displayed `answer` is assembled here from the checked
     claims and steps, never taken as free prose from the model, and a
@@ -556,23 +638,19 @@ def parse_and_validate(
     if not claims and not steps:
         return None
 
-    # A number or identifier the excerpt lacks rejects the whole response. A
-    # claim (an independent fact) that is not the excerpt's own wording is
-    # dropped; a step or warning that fails rejects the response, since
-    # omitting a step of a procedure could mislead.
-    kept_claims: list[_ClaimItem] = []
+    # A number/identifier the excerpt lacks, or a claim/step whose wording is
+    # not grounded in one place in the excerpt, rejects the WHOLE response --
+    # never silently drop a failing claim and keep the rest. A prerequisite
+    # the model happened to phrase as a "claim" instead of a "step" must not
+    # be able to vanish while a hazardous action stays: dropping it would
+    # display a partial, misleadingly-confident answer instead of failing
+    # closed to a repair retry / the "could not verify" fallback.
     for item in claims + steps:
-        if not _claim_supported(item.text, _cited_content(item, passages), machine_label):
+        cited = _cited_content(item, passages)
+        if not _claim_supported(item.text, cited, machine_label):
             return None
-    for item in claims:
-        if _claim_grounded(item.text, _cited_content(item, passages), machine_label):
-            kept_claims.append(item)
-    for item in steps:
-        if not _claim_grounded(item.text, _cited_content(item, passages), machine_label):
+        if not _claim_grounded(item.text, cited, machine_label):
             return None
-    claims = kept_claims
-    if not claims and not steps:
-        return None
     for item in warnings:
         if not _warning_supported(item.text, _cited_content(item, passages)):
             return None

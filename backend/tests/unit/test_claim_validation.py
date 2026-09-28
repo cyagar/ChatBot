@@ -459,7 +459,11 @@ def test_a_reworded_permission_is_rejected_even_with_the_same_topic():
     assert _single_claim("Only a qualified technician may open the control panel.", passage) is not None
 
 
-def test_a_claim_that_is_not_the_excerpts_wording_is_dropped_but_valid_claims_are_kept():
+def test_a_claim_that_is_not_the_excerpts_wording_rejects_the_whole_response():
+    """A failing claim must never be silently dropped while the rest of the
+    answer displays -- that could remove a prerequisite (phrased by the model
+    as a "claim") while a hazardous step stays. Any failure rejects the whole
+    response, the same as a failing step."""
     passages = [_passage(1, 1, "Disconnect power. Keep all guards installed during operation.")]
     raw = json.dumps({
         "is_no_answer": False,
@@ -469,10 +473,7 @@ def test_a_claim_that_is_not_the_excerpts_wording_is_dropped_but_valid_claims_ar
         ],
         "steps": [], "warnings": [],
     })
-    result = parse_and_validate(raw, passages, "test")
-    assert result is not None
-    assert "guards installed" in result.answer
-    assert "Bypass" not in result.answer
+    assert parse_and_validate(raw, passages, "test") is None
 
 
 def test_a_step_that_is_not_the_excerpts_wording_rejects_the_whole_response():
@@ -515,3 +516,40 @@ def test_failing_items_names_what_did_not_check_out():
     })
     assert failing_items(raw, passages) == ["Bypass the safety interlock."]
     assert failing_items("not json", passages) == []
+
+
+# --- Regression tests for the second external audit's (Feedback.txt) reported
+# adversarial examples, each reproduced against the pre-fix validator before
+# being fixed here.
+
+def test_audit_b01_a_safety_conclusion_from_the_wrong_clause_is_rejected():
+    passages = [_passage(1, 1, "Hot water may cause severe burns. The machine is safe when disconnected.")]
+    assert _single_claim("Hot water is safe.", passages[0].content) is None
+
+
+def test_audit_b01_a_prohibition_is_not_flipped_by_padding_with_an_unrelated_clause():
+    passages = [_passage(1, 1, "Do not operate the machine. Guards protect personnel during cleaning.")]
+    claim = "Operate the machine; guards protect personnel during cleaning."
+    assert _single_claim(claim, passages[0].content) is None
+
+
+def test_audit_b01_a_relational_fact_cannot_be_reassembled_from_two_clauses():
+    excerpt = "The red wire connects terminal A to terminal B. The blue wire connects terminal C to terminal D."
+    assert _single_claim("The red wire connects terminal C to terminal D.", excerpt) is None
+    assert _single_claim("The red wire connects terminal A to terminal B.", excerpt) is not None
+
+
+def test_audit_b01_a_prerequisite_phrased_as_a_claim_cannot_silently_disappear():
+    """The most serious reported case: the model splits an excerpt into a
+    claim ("Disconnect power first.") and a step ("Remove the cover."). The
+    claim doesn't check out, and the old behavior dropped only the claim,
+    displaying "Remove the cover." with no mention of disconnecting power
+    first. The whole response must be rejected instead."""
+    passages = [_passage(1, 1, "Disconnect power before removing the cover. Remove the cover.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Disconnect power first.", "cited_excerpt_numbers": [1]}],
+        "steps": [{"text": "Remove the cover.", "cited_excerpt_numbers": [1]}],
+        "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
