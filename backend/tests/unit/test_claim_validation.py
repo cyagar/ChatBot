@@ -572,6 +572,31 @@ def test_a_flow_direction_cannot_be_reversed():
     ) is None
 
 
+# Distinct from the reversal above: there the two entities themselves swap
+# position, which the order check alone already catches. Here the entities
+# keep the excerpt's own order -- only "from"/"to" swap which one is the
+# source and which is the destination -- so only tracking "to"/"from"/"by"
+# as words in their own right (_RELATIONAL_STEMS), not discarding them as
+# ordinary stopwords, catches it.
+def test_a_source_and_destination_preposition_pair_cannot_be_swapped():
+    assert _single_claim(
+        "Move water to the wash tank from the spray arm.",
+        "Move water from the wash tank to the spray arm.",
+    ) is None
+
+
+# Also distinct from test_a_cause_and_effect_cannot_be_swapped: there both
+# texts are active voice with the two entities swapped, which the order
+# check catches. Here every word stays in the same left-to-right order --
+# dropping "by" is what turns the passive "caused by" into an active
+# "causes", reversing which entity is the cause and which is the effect.
+def test_a_passive_cause_loses_its_by_and_is_rejected():
+    assert _single_claim(
+        "Severe burns cause hot water.",
+        "Severe burns are caused by hot water.",
+    ) is None
+
+
 def test_a_wire_to_terminal_pairing_cannot_be_swapped():
     assert _single_claim(
         "Connect the red wire to terminal B and the black wire to terminal A.",

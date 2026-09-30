@@ -273,17 +273,30 @@ def _claim_supported(item_text: str, cited_content: str, machine_label: str | No
 
 # Words a claim never needs the excerpt to contain verbatim.
 _STOPWORDS = frozenset(
-    "a an the and or of to in on at by for from with as is are was were be been being it its this that "
+    "a an the and or of in on at for with as is are was were be been being it its this that "
     "these those then than so also into onto per via your you we they he she them their there "
     "here has have had do does did can will would could".split()
     # "up"/"out"/"over" are deliberately NOT here: they double as _CRITICAL_STEMS
     # (direction words), and a stopword match is checked before that, so
     # listing them here would silently exempt them from the critical-word
-    # checks below.
+    # checks below. "to"/"from"/"by" are excluded for the same reason -- see
+    # _RELATIONAL_STEMS.
 )
 # A negation or restriction the excerpt applies to a statement; dropping one
 # flips or loosens the instruction, so it must survive into the claim.
 _POLARITY_WORDS = frozenset({"not", "no", "never", "cannot", "without", "only", "unless", "until"})
+
+# A preposition that names which entity is the source, destination or agent
+# of an action ("from the tank TO the arm", "caused BY hot water"). Ordinary
+# stopwords carry no meaning on their own, so dropping or swapping one is
+# harmless; these do, so a claim that drops one (turning a passive "caused
+# by X" into an active "causes X" that reverses cause and effect) or swaps
+# which entity it attaches to (turning "from A to B" into "to A from B")
+# must be rejected even though every other word matches, in order. Kept out
+# of _STOPWORDS for the same reason "up"/"out"/"over" are: they need to
+# reach the order/critical-word checks below, not be silently dropped
+# before them.
+_RELATIONAL_STEMS = frozenset({"to", "from", "by"})
 
 
 def _prose_tokens(text: str) -> list[str]:
@@ -309,14 +322,14 @@ def _merge_unit_suffixes(tokens: list[str]) -> list[str]:
     already tolerates this gap for the verbatim number/unit check; without
     this merge the two checks would disagree about what counts as one token.
     A stopword ("to", as in a range like "5 to 10") is never treated as a
-    unit."""
+    unit, nor is a relational preposition ("by", as in "10 by 12")."""
     out: list[str] = []
     i = 0
     while i < len(tokens):
         t = tokens[i]
         nxt = tokens[i + 1] if i + 1 < len(tokens) else None
         if (nxt and t.replace(".", "", 1).isdigit() and 1 <= len(nxt) <= 4 and nxt.isalpha()
-                and nxt not in _STOPWORDS and nxt not in _POLARITY_WORDS):
+                and nxt not in _STOPWORDS and nxt not in _POLARITY_WORDS and nxt not in _RELATIONAL_STEMS):
             out.append(t + nxt)
             i += 2
         else:
@@ -339,14 +352,18 @@ def _content_stems(text: str) -> list[str]:
     return [w if any(ch.isdigit() for ch in w) else _stem(w) for w in tokens]
 
 
-def _subsequence_end(needle: list[str], haystack: list[str]) -> int | None:
-    """The index in `haystack` of the last element consumed while confirming
+def _subsequence_span(needle: list[str], haystack: list[str]) -> tuple[int, int] | None:
+    """The (first, last) index in `haystack` consumed while confirming
     `needle` is an ordered (not necessarily contiguous) subsequence of it, or
-    None if it isn't one. Returning the position, not just a bool, is what
-    lets the caller compare two clauses grounded to the SAME excerpt line:
-    line index alone can't tell "remove the cover" and "disconnect power"
-    apart when both match line 0 of "Disconnect power and remove the
-    cover." -- only their relative position in that line can."""
+    None if it isn't one. The last index is what lets the caller compare two
+    clauses grounded to the SAME excerpt line: line index alone can't tell
+    "remove the cover" and "disconnect power" apart when both match line 0 of
+    "Disconnect power and remove the cover." -- only their relative position
+    in that line can. The first index bounds the span of `haystack` the
+    claim actually draws from, which _clause_grounded uses to catch a
+    _RELATIONAL_STEMS word hiding inside that span but silently dropped by
+    the claim."""
+    start = None
     pos = -1
     for word in needle:
         found = None
@@ -356,8 +373,9 @@ def _subsequence_end(needle: list[str], haystack: list[str]) -> int | None:
                 break
         if found is None:
             return None
+        start = found if start is None else start
         pos = found
-    return pos
+    return None if start is None else (start, pos)
 
 
 # Words that carry an instruction's direction, action, modality or
@@ -525,8 +543,18 @@ def _clause_grounded(
     # subject, identifier or value goes with which is still made of the
     # excerpt's own words, but says something the excerpt doesn't.
     matched_stems = [w for w in claim_stems if w in set(window_stems)]
-    end_pos = _subsequence_end(matched_stems, window_stems)
-    if end_pos is None:
+    span = _subsequence_span(matched_stems, window_stems)
+    if span is None:
+        return None
+    start_pos, end_pos = span
+
+    # A _RELATIONAL_STEMS word inside the span the claim draws from, but
+    # absent from the claim itself, isn't a harmlessly trimmed connective --
+    # it's the word that said which entity was the source/destination/agent.
+    # Catches "caused by hot water" rewritten as "cause hot water": every
+    # other word matches, in order, but dropping "by" turns the effect into
+    # the cause.
+    if any(w in _RELATIONAL_STEMS and w not in claim_set for w in window_stems[start_pos : end_pos + 1]):
         return None
 
     window_polarity = _local_polarity(window, claim_set)
