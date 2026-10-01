@@ -1,28 +1,18 @@
 package com.hmwagner.techmanual.util
 
 /**
- * Best-effort dotted-numeric-version comparison for BuildConfig.VERSION_NAME
- * against the backend's minimum_supported_version. Neither string is guaranteed proper semver, so this only
- * compares the leading run of dot-separated integers and ignores any trailing suffix. Fails open
- * (returns false, "not below minimum") on anything it can't confidently
- * parse as at least one integer: an ambiguous or malformed version string is
- * not grounds to lock a technician out of the app.
+ * Whether `current` (BuildConfig.VERSION_CODE) is below `minimum` (a
+ * server-advertised minimum_supported_version_code/latest_version_code).
+ * Comparing the integer versionCode, not the dotted versionName string, is
+ * deliberate: Gradle assigns versionCode a fresh, strictly increasing value
+ * every build, while versionName is free text a developer sets by hand and
+ * can easily forget to bump -- this app's own versionName stayed "1.0.0"
+ * across versionCode 2 through 6, which would have made a versionName
+ * comparison unable to tell any of those five builds apart.
+ *
+ * `minimum <= 0` means "unset" and never blocks -- 0 is the field's default
+ * both in the backend settings and in a test fixture that doesn't mention
+ * it, so an unconfigured deployment (or a test with no opinion on this)
+ * must not accidentally lock a technician out of the app.
  */
-fun isVersionBelowMinimum(current: String, minimum: String): Boolean {
-    val currentParts = leadingNumericParts(current)
-    val minimumParts = leadingNumericParts(minimum)
-    if (currentParts.isEmpty() || minimumParts.isEmpty()) return false
-
-    for (i in 0 until maxOf(currentParts.size, minimumParts.size)) {
-        val c = currentParts.getOrElse(i) { 0 }
-        val m = minimumParts.getOrElse(i) { 0 }
-        if (c != m) return c < m
-    }
-    return false
-}
-
-private fun leadingNumericParts(version: String): List<Int> =
-    version.trim()
-        .takeWhile { it.isDigit() || it == '.' }
-        .split(".")
-        .mapNotNull { it.toIntOrNull() }
+fun isVersionCodeBelowMinimum(current: Int, minimum: Int): Boolean = minimum > 0 && current < minimum

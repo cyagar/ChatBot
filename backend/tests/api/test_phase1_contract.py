@@ -91,26 +91,34 @@ def test_config_is_public_and_has_the_documented_shape(test_env):
     assert body["maintenance_mode"] is False
     assert body["feature_flags"] == {}
     assert isinstance(body["minimum_supported_version"], str) and body["minimum_supported_version"]
+    # 0 by default (test_env sets neither) -- the client only blocks when
+    # this is a real versionCode, never on the unset default.
+    assert body["minimum_supported_version_code"] == 0
     assert isinstance(body["support_contact"], str) and body["support_contact"]
     assert body["status"] == "ok"  # google_drive_folder_id is blank in test_env -- no corpus-freshness concept applies
-    # Blank by default (test_env sets neither) -- the client's update notice
-    # must stay silent, not show an "update available" banner with no target.
+    # Blank/0 by default (test_env sets neither) -- the client's update
+    # notice must stay silent, not show an "update available" banner with
+    # no target.
     assert body["latest_version"] == ""
+    assert body["latest_version_code"] == 0
     assert body["update_url"] == ""
 
 
 def test_config_reflects_configured_update_notice(test_env, monkeypatch):
     from app.config import get_settings
     monkeypatch.setenv("LATEST_VERSION", "1.2.0")
+    monkeypatch.setenv("LATEST_VERSION_CODE", "7")
     monkeypatch.setenv("UPDATE_URL", "https://bibchatbot.com/downloads/latest.apk")
     get_settings.cache_clear()
     try:
         resp = client.get("/api/config")
         body = resp.json()
         assert body["latest_version"] == "1.2.0"
+        assert body["latest_version_code"] == 7
         assert body["update_url"] == "https://bibchatbot.com/downloads/latest.apk"
     finally:
         monkeypatch.delenv("LATEST_VERSION", raising=False)
+        monkeypatch.delenv("LATEST_VERSION_CODE", raising=False)
         monkeypatch.delenv("UPDATE_URL", raising=False)
         get_settings.cache_clear()
 

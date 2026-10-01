@@ -25,6 +25,7 @@ class ConfigOut(BaseModel):
     maintenance_message: str
     feature_flags: dict[str, bool]
     minimum_supported_version: str
+    minimum_supported_version_code: int
     support_contact: str
     status: str  # "ok" | "degraded"
     status_message: str
@@ -32,6 +33,7 @@ class ConfigOut(BaseModel):
     # informational "update available" notice, never a lockout, for these.
     # Either can be blank (see Settings.latest_version's own comment).
     latest_version: str
+    latest_version_code: int
     update_url: str
 
 
@@ -84,9 +86,11 @@ def get_config() -> ConfigOut:
         maintenance_message=settings.maintenance_message,
         feature_flags={},
         minimum_supported_version=settings.minimum_supported_version,
+        minimum_supported_version_code=settings.minimum_supported_version_code,
         support_contact=settings.support_contact,
         status=status_,
         status_message=status_message,
         latest_version=settings.latest_version,
+        latest_version_code=settings.latest_version_code,
         update_url=settings.update_url,
     )

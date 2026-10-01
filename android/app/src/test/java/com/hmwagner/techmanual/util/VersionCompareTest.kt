@@ -7,36 +7,29 @@ import org.junit.Test
 class VersionCompareTest {
 
     @Test
-    fun `a strictly older current version is below the minimum`() {
-        assertTrue(isVersionBelowMinimum("0.1.0", "0.2.0"))
-        assertTrue(isVersionBelowMinimum("1.0.0", "1.0.1"))
-        assertTrue(isVersionBelowMinimum("1.9.9", "2.0.0"))
+    fun `a strictly lower version code is below the minimum`() {
+        assertTrue(isVersionCodeBelowMinimum(5, 6))
+        assertTrue(isVersionCodeBelowMinimum(1, 2))
     }
 
     @Test
-    fun `an equal or newer current version is not below the minimum`() {
-        assertFalse(isVersionBelowMinimum("0.2.0", "0.2.0"))
-        assertFalse(isVersionBelowMinimum("0.3.0", "0.2.0"))
-        assertFalse(isVersionBelowMinimum("2.0.0", "1.9.9"))
+    fun `an equal or higher version code is not below the minimum`() {
+        assertFalse(isVersionCodeBelowMinimum(6, 6))
+        assertFalse(isVersionCodeBelowMinimum(7, 6))
     }
 
     @Test
-    fun `a demo suffix is ignored, comparing only the leading numeric parts`() {
-        assertFalse(isVersionBelowMinimum("0.1.0-rc1", "0.1.0"))
-        assertTrue(isVersionBelowMinimum("0.1.0-rc1", "0.2.0"))
+    fun `an unset minimum (0 or negative) never blocks`() {
+        assertFalse(isVersionCodeBelowMinimum(1, 0))
+        assertFalse(isVersionCodeBelowMinimum(1, -1))
     }
 
     @Test
-    fun `an unparseable version fails open rather than blocking`() {
-        assertFalse(isVersionBelowMinimum("", "0.2.0"))
-        assertFalse(isVersionBelowMinimum("0.1.0", ""))
-        assertFalse(isVersionBelowMinimum("not-a-version", "0.2.0"))
-        assertFalse(isVersionBelowMinimum("0.1.0", "also-not-a-version"))
-    }
-
-    @Test
-    fun `a shorter version string is padded with zeros, not treated as smaller by length`() {
-        assertFalse(isVersionBelowMinimum("1.2", "1.2.0"))
-        assertTrue(isVersionBelowMinimum("1.2", "1.2.1"))
+    fun `builds that share one versionName are still told apart by versionCode`() {
+        // This app's own versionName stayed "1.0.0" across versionCode 2
+        // through 6 -- the exact scenario a versionName-string comparison
+        // could never resolve, which is why this compares versionCode.
+        assertTrue(isVersionCodeBelowMinimum(2, 6))
+        assertFalse(isVersionCodeBelowMinimum(6, 2))
     }
 }

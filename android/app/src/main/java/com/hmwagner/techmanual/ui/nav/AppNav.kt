@@ -52,7 +52,7 @@ import com.hmwagner.techmanual.ui.history.HistoryScreen
 import com.hmwagner.techmanual.ui.login.LoginScreen
 import com.hmwagner.techmanual.ui.machines.MachinesScreen
 import com.hmwagner.techmanual.ui.saved.SavedAnswersScreen
-import com.hmwagner.techmanual.util.isVersionBelowMinimum
+import com.hmwagner.techmanual.util.isVersionCodeBelowMinimum
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -158,7 +158,7 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
                     message = config.maintenance_message.ifBlank { "This app is temporarily in maintenance mode." },
                     supportContact = config.support_contact,
                 )
-                isVersionBelowMinimum(BuildConfig.VERSION_NAME, config.minimum_supported_version) -> BlockingConfigState(
+                isVersionCodeBelowMinimum(BuildConfig.VERSION_CODE, config.minimum_supported_version_code) -> BlockingConfigState(
                     title = "Update required",
                     message = "A newer version of this app is required to continue.",
                     supportContact = config.support_contact,
@@ -171,7 +171,7 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
             // merely behind the LATEST version -- still above minimum --
             // should see both Home and this notice, not one or the other.
             if (blockingConfig == null && config.latest_version.isNotBlank() && config.update_url.isNotBlank() &&
-                isVersionBelowMinimum(BuildConfig.VERSION_NAME, config.latest_version)
+                isVersionCodeBelowMinimum(BuildConfig.VERSION_CODE, config.latest_version_code)
             ) {
                 updateAvailable = UpdateAvailableState(config.latest_version, config.update_url)
             }

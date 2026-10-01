@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hmwagner.techmanual.BuildConfig
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.LoginRequest
 import kotlinx.coroutines.runBlocking
@@ -24,9 +25,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * GET /api/config's latest_version/update_url drive a non-blocking "update
- * available" banner (see AppNav.kt's UpdateAvailableBanner) -- distinct from
- * minimum_supported_version's full-screen lockout, which
+ * GET /api/config's latest_version/latest_version_code/update_url drive a
+ * non-blocking "update available" banner (see AppNav.kt's
+ * UpdateAvailableBanner) -- distinct from
+ * minimum_supported_version_code's full-screen lockout, which
  * AppNavSessionExpiryTest.maintenanceModeBlocksTheAppBeforeHomeOrLoginRenders'
  * sibling test already covers. Runs on-device for the same reason that file
  * does: PersistentCookieJar's encryption needs the real Android Keystore.
@@ -69,18 +71,24 @@ class AppNavUpdateNoticeTest {
         server.shutdown()
     }
 
-    private fun configResponse(latestVersion: String, updateUrl: String) = MockResponse()
+    private fun configResponse(latestVersion: String, latestVersionCode: Int, updateUrl: String) = MockResponse()
         .setResponseCode(200)
         .setHeader("Content-Type", "application/json")
         .setBody(
             """{"maintenance_mode": false, "maintenance_message": "", "minimum_supported_version": "0.0.0",
+                "minimum_supported_version_code": 0,
                 "support_contact": "", "status": "ok", "status_message": "",
-                "latest_version": "$latestVersion", "update_url": "$updateUrl"}""",
+                "latest_version": "$latestVersion", "latest_version_code": $latestVersionCode,
+                "update_url": "$updateUrl"}""",
         )
 
     @Test
     fun aNewerLatestVersionShowsADismissibleNonBlockingBanner() {
-        server.enqueue(configResponse("9.9.9", "https://example.com/latest.apk"))
+        // +1, not a fixed constant: the banner now triggers on versionCode,
+        // not on the "9.9.9" display text, so the server value only needs
+        // to be numerically ahead of whatever this test build's own
+        // versionCode happens to be.
+        server.enqueue(configResponse("9.9.9", BuildConfig.VERSION_CODE + 1, "https://example.com/latest.apk"))
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
@@ -110,7 +118,7 @@ class AppNavUpdateNoticeTest {
 
     @Test
     fun blankLatestVersionShowsNoBanner() {
-        server.enqueue(configResponse("", ""))
+        server.enqueue(configResponse("", 0, ""))
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setHeader("Content-Type", "application/json")

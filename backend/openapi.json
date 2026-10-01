@@ -95,6 +95,10 @@
             "title": "Latest Version",
             "type": "string"
           },
+          "latest_version_code": {
+            "title": "Latest Version Code",
+            "type": "integer"
+          },
           "maintenance_message": {
             "title": "Maintenance Message",
             "type": "string"
@@ -106,6 +110,10 @@
           "minimum_supported_version": {
             "title": "Minimum Supported Version",
             "type": "string"
+          },
+          "minimum_supported_version_code": {
+            "title": "Minimum Supported Version Code",
+            "type": "integer"
           },
           "status": {
             "title": "Status",
@@ -129,10 +137,12 @@
           "maintenance_message",
           "feature_flags",
           "minimum_supported_version",
+          "minimum_supported_version_code",
           "support_contact",
           "status",
           "status_message",
           "latest_version",
+          "latest_version_code",
           "update_url"
         ],
         "title": "ConfigOut",

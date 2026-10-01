@@ -100,21 +100,34 @@ class Settings(BaseSettings):
     # reads this; nothing server-side blocks a request based on these values.
     maintenance_mode: bool = False
     maintenance_message: str = ""
-    # Compared against nothing automatically -- there is no client-submitted
-    # app-version header/field this checks against yet. Kept in sync by hand
-    # with android/app/build.gradle.kts's versionName for now.
+    # minimum_supported_version is a human-readable label only -- nothing
+    # compares it. The Android client blocks on
+    # minimum_supported_version_code against its own
+    # BuildConfig.VERSION_CODE, an integer Gradle assigns per build that's
+    # always distinct even across builds sharing one versionName (this
+    # app's own versionName stayed "1.0.0" across versionCode 2 through 6,
+    # which is exactly why comparing the name string couldn't actually
+    # enforce a minimum build). 0 means "unset": nothing blocks until this
+    # is set to a real versionCode. Kept in sync by hand with
+    # android/app/build.gradle.kts's versionCode/versionName.
     minimum_supported_version: str = "1.0.0"
+    minimum_supported_version_code: int = 0
     # A real support inbox/URL for this deployment. The default below is a
     # placeholder, not a live inbox -- set this explicitly before treating
     # /api/config's support_contact as something a technician can actually
     # use.
     support_contact: str = "support@hmwagner.com"
     # Advertises the newest built APK without requiring it (unlike
-    # minimum_supported_version, nothing blocks on this). Empty by default:
-    # the Android client only shows its update notice when BOTH this and
-    # update_url are set, so an unconfigured deployment stays silent instead
-    # of nagging about an "update" with nowhere to send the technician.
+    # minimum_supported_version, nothing blocks on this). latest_version is
+    # display text only ("Version 9.9.9 is available."); the Android client
+    # compares latest_version_code the same way it compares
+    # minimum_supported_version_code (see that field's own comment). The
+    # notice only appears when latest_version, update_url AND
+    # latest_version_code are all set, so an unconfigured deployment stays
+    # silent instead of nagging about an "update" with nowhere to send the
+    # technician.
     latest_version: str = ""
+    latest_version_code: int = 0
     update_url: str = ""
 
     # backend/.env.example's own SECRET_KEY placeholder is long enough to

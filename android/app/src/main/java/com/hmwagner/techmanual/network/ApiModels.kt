@@ -144,9 +144,17 @@ data class ConfigOut(
     val maintenance_mode: Boolean,
     val maintenance_message: String,
     val minimum_supported_version: String,
+    // What's actually compared against BuildConfig.VERSION_CODE -- 0 (the
+    // default, for a test fixture or an unconfigured deployment) means
+    // unset, never blocking. minimum_supported_version (the string) is
+    // display-only; versionName alone can't be compared reliably, since
+    // this app's own versionName stayed "1.0.0" across versionCode 2
+    // through 6.
+    val minimum_supported_version_code: Int = 0,
     val support_contact: String,
     val status: String,
     val status_message: String,
     val latest_version: String = "",
+    val latest_version_code: Int = 0,
     val update_url: String = "",
 )
