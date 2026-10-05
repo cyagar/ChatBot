@@ -30,7 +30,7 @@ Owner column: `dev` = builders, `owner` = ceyhun@hmwagner.com.
 | Backend CI green on the release commit | dev | Open | Record the run URL for the tag. |
 | Android workflow valid and jobs run | dev | Open | `android-ci.yml` no longer references `secrets` in step conditions and `workflow-lint.yml` runs actionlint; confirm the first GitHub run creates jobs. |
 | Signed release built by the release workflow and verified | owner | Owner | Needs the five signing secrets in GitHub, the keystore backed up outside the build machine, then a run of **Android release**. |
-| Non-demo version, real icon | dev | Closed | `versionName 1.0.0`, `versionCode 6` (current as of 2026-10-05), adaptive launcher icon. Increment `versionCode` for every distributed build. |
+| Non-demo version, real icon | dev | Closed | `versionName 1.0.0`, `versionCode 7` (current as of 2026-10-05 -- bumped from 6 to ship the citation-superscript rendering and the two validator fixes found via live smoke test), adaptive launcher icon. Increment `versionCode` for every distributed build. |
 | Release record filled for the exact APK; clean and upgrade install tested on tablet and phone | owner | Owner | `RELEASE_RECORD_TEMPLATE.md`. No phone run recorded. |
 | Download link access control, expiry, hash | owner | Owner | Audit the external APK link separately. |
 | Dependency, secret, SAST, license and workflow scans | dev | Open | Added: actionlint, bandit, pip-audit (clean locally), ruff (`backend-ci.yml`, `backend/ruff.toml`), Dependabot. Not added: Android dependency locking/verification, CodeQL, secret scanning (enable in GitHub settings), SBOM/license inventory. |
