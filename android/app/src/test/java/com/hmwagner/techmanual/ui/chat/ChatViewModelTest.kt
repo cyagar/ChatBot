@@ -135,11 +135,12 @@ class ChatViewModelTest {
 
     @Test
     fun `confirming a clarifying machine keeps the composer locked until the reload actually finishes`() {
-        // Regression test for a race: selectClarifyingMachine() used to call
-        // refresh(), which launches a DETACHED child coroutine and returns
-        // immediately -- so its own `finally` cleared `sending` before that
-        // child coroutine had actually reloaded anything, briefly re-enabling
-        // the composer while the conversation was still mid-reload.
+        // Guards a race: `sending` must stay true until the reload
+        // selectClarifyingMachine() triggers has actually finished, not just
+        // been launched -- refresh() starts a DETACHED child coroutine and
+        // returns immediately, so clearing `sending` in the caller's own
+        // `finally` would briefly re-enable the composer while the
+        // conversation is still mid-reload.
         val reachedReload = CountDownLatch(1)
         val releaseReload = CountDownLatch(1)
 
@@ -746,11 +747,11 @@ class ChatViewModelTest {
 
     @Test
     fun `dismissing an evidence error actually closes the sheet`() {
-        // dismissEvidence used to only clear evidence/evidenceDocumentId --
-        // if it left evidenceError set, the sheet's visibility condition
+        // dismissEvidence must clear evidenceError too, not just
+        // evidence/evidenceDocumentId -- the sheet's visibility condition
         // (evidenceLoading || evidence != null || evidenceError != null)
-        // would keep it open, or a stale error would flash on the next,
-        // unrelated citation tap.
+        // would otherwise keep it open, or a stale error would flash on the
+        // next, unrelated citation tap.
         server.enqueue(MockResponse().setResponseCode(500))
         vm.openCitation(testCitation)
         awaitState { !it.evidenceLoading }

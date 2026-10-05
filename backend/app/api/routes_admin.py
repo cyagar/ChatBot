@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, Field, field_serializer
@@ -628,8 +628,8 @@ def create_invitation(payload: InvitationCreate, admin: CurrentUser = Depends(re
     email = normalize_email(payload.email)
     raw_token, token_hash = generate_invitation_token()
     # A real datetime, not .isoformat() -- psycopg adapts TIMESTAMPTZ params
-    # natively, and iso_utc() (app/api/common.py) now accepts either.
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=payload.expires_in_hours)
+    # natively, and iso_utc() (app/api/common.py) accepts either.
+    expires_at = datetime.now(UTC) + timedelta(hours=payload.expires_in_hours)
 
     with get_conn() as conn:
         existing_user = conn.execute("SELECT id FROM users WHERE email = %s", (email,)).fetchone()
@@ -820,7 +820,7 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
     is_stale = True
     if last_success is not None:
         finished = last_success["finished_at"]
-        hours_since_last_success = (datetime.now(timezone.utc) - finished).total_seconds() / 3600
+        hours_since_last_success = (datetime.now(UTC) - finished).total_seconds() / 3600
         is_stale = hours_since_last_success > settings.ingestion_staleness_threshold_hours
 
     return {

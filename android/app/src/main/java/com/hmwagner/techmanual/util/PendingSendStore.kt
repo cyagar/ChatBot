@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.core.content.edit
 import com.hmwagner.techmanual.ui.chat.LocalEcho
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -75,9 +76,7 @@ class SharedPrefsPendingSendStore(context: Context) : PendingSendStore {
     private fun deleteLegacyPlaintextEntries() {
         val legacyKeys = prefs.all.keys.filter { it.startsWith("id_") || it.startsWith("content_") }
         if (legacyKeys.isEmpty()) return
-        val editor = prefs.edit()
-        legacyKeys.forEach { editor.remove(it) }
-        editor.apply()
+        prefs.edit { legacyKeys.forEach { remove(it) } }
     }
 
     @Synchronized
@@ -108,19 +107,18 @@ class SharedPrefsPendingSendStore(context: Context) : PendingSendStore {
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
             val ciphertext = cipher.doFinal(plaintext)
-            // commit(), not apply(): this call exists specifically so a
-            // process death between send() and a reply doesn't lose the
-            // Idempotency-Key needed to resume (see this class's own doc
-            // comment). apply()'s write is asynchronous -- a hard process
-            // kill immediately after this call returns could happen before
-            // it ever reaches disk, exactly defeating that guarantee.
-            // commit() blocks until the write is durable; the caller
-            // (ChatViewModel.send()) is responsible for keeping that off the
-            // UI thread.
-            prefs.edit()
-                .putString("iv_$conversationId", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-                .putString("data_$conversationId", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
-                .commit()
+            // commit = true, not the default (async) apply: this call exists
+            // specifically so a process death between send() and a reply
+            // doesn't lose the Idempotency-Key needed to resume (see this
+            // class's own doc comment). An async write's commit to disk could
+            // happen after a hard process kill, exactly defeating that
+            // guarantee. commit = true blocks until the write is durable; the
+            // caller (ChatViewModel.send()) is responsible for keeping that
+            // off the UI thread.
+            prefs.edit(commit = true) {
+                putString("iv_$conversationId", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+                putString("data_$conversationId", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+            }
         } catch (_: Exception) {
             // Encryption failing must not crash the send path -- the
             // in-memory ChatViewModel state still has the echo for this
@@ -133,12 +131,15 @@ class SharedPrefsPendingSendStore(context: Context) : PendingSendStore {
 
     @Synchronized
     override fun clear(conversationId: Int) {
-        prefs.edit().remove("iv_$conversationId").remove("data_$conversationId").apply()
+        prefs.edit {
+            remove("iv_$conversationId")
+            remove("data_$conversationId")
+        }
     }
 
     @Synchronized
     override fun clearAll() {
-        prefs.edit().clear().apply()
+        prefs.edit { clear() }
     }
 
     private fun getOrCreateKey(): SecretKey {

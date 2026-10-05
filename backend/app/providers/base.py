@@ -643,7 +643,7 @@ def _warning_supported(warning_text: str, cited_content: str) -> bool:
     after = re.search(r"[.!?](\s|$)", norm_content[end:])
     sentence_end = end + (after.end() if after else len(norm_content) - end)
     sentence = norm_content[sentence_start:sentence_end]
-    for neg, pattern in _NEGATION_WORD_PATTERNS.items():
+    for pattern in _NEGATION_WORD_PATTERNS.values():
         if not pattern.search(stripped) and pattern.search(sentence):
             return False
     return True

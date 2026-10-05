@@ -50,11 +50,10 @@ class DocMetadata:
 
 MANUFACTURER_MARKERS: list[tuple[str, list[str]]] = [
     ("CMA Dishmachines", [r"cmadishmachines\.com", r"\bC\s?M\s?A\s+D\s?I\s?S\s?H\s?M\s?A\s?C\s?H\s?I\s?N\s?E\s?S\b", r"\bCMA[- ]\d{3}"]),
-    # Found live 2026-09-16: the AJ/AJX, Delta 115/1200, and Conserver XL2
-    # catalog entries below were mislabeled "CMA Dishmachines" -- their actual
-    # manuals carry a Jackson WWS letterhead/warranty section throughout
-    # ("Jackson WWS, Inc. ... www.jacksonwws.com"), a different real
-    # dishmachine manufacturer CMA is easily confused with.
+    # The AJ/AJX, Delta 115/1200, and Conserver XL2 catalog entries below
+    # carry a Jackson WWS letterhead/warranty section throughout ("Jackson
+    # WWS, Inc. ... www.jacksonwws.com"), a different real dishmachine
+    # manufacturer CMA is easily confused with.
     ("Jackson WWS", [r"jacksonwws\.com", r"Jackson\s+WWS\b", r"\bJackson\s+Dishmachine"]),
     ("American Dish Service", [r"American Dish Service", r"\bADS\b.{0,20}(DISHWASHER|GLASSWASHER)"]),
     ("Bunn-O-Matic Corporation", [r"Bunn-?O-?Matic", r"\bBUNN\b", r"bunn\.com"]),
@@ -100,8 +99,8 @@ MACHINE_CATALOG: list[MachineSpec] = [
     MachineSpec("CMA Dishmachines", "EST-66", "EST Series", "dishmachine", [r"\bEST-?66\b"]),
     MachineSpec("CMA Dishmachines", "EAH/EC/3-Door", "EAH/EC Series", "dishmachine", [r"EAH/EC/3-Door", r"\bEAH\b.{0,10}\bEC\b"]),
     MachineSpec("CMA Dishmachines", "AH/B/C/Scullery/Pizza/Bowl", "AH Series", "dishmachine", [r"AH/B/C/Scullery/Pizza/Bowl"]),
-    # --- Jackson WWS (found live 2026-09-16: these three were misfiled under
-    # CMA Dishmachines above -- their manuals are Jackson WWS branded, see the
+    # --- Jackson WWS (their manuals are Jackson WWS branded despite being
+    # easily confused with CMA Dishmachines above -- see the
     # MANUFACTURER_MARKERS comment) ---
     MachineSpec("Jackson WWS", "AJ/AJX Series", "AJ Series", "conveyor dishmachine", [r"\bAJ[- ]?AJX\b", r"AJ SERIES CONVEYOR"]),
     MachineSpec("Jackson WWS", "Conserver XL2", "Conserver Series", "conveyor dishmachine", [r"CONSERVER(\s*®)?\s*XL2", r"Cons-?XL2"]),
@@ -178,7 +177,7 @@ def _strip_trademark_boilerplate(text: str) -> str:
             drop[j] = True
             j -= 1
             window_left -= 1
-    return "\n".join(ln for ln, d in zip(lines, drop) if not d)
+    return "\n".join(ln for ln, d in zip(lines, drop, strict=True) if not d)
 
 
 # Auto-link threshold: matches below this confidence are surfaced to an admin
@@ -249,8 +248,7 @@ def _guess_title(filename: str, extracted: ExtractedDocument) -> str:
         first_line = next((ln.strip() for ln in first_page.text.splitlines() if ln.strip()), None)
         if first_line:
             return first_line[:200]
-    stem = filename.rsplit(".", 1)[0]
-    return stem
+    return filename.rsplit(".", 1)[0]
 
 
 def extract_metadata(filename: str, extracted: ExtractedDocument) -> DocMetadata:

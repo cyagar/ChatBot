@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.core.content.edit
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -35,7 +36,7 @@ class PersistentCookieJar(context: Context) : CookieJar {
     init {
         // A plaintext cookie stored under this key by an older install is
         // discarded, forcing one re-login, rather than migrated.
-        prefs.edit().remove(LEGACY_PLAINTEXT_KEY).apply()
+        prefs.edit { remove(LEGACY_PLAINTEXT_KEY) }
 
         loadStoredCookie()?.let { cookie ->
             cache.getOrPut(cookie.domain) { mutableListOf() }.add(cookie)
@@ -72,7 +73,10 @@ class PersistentCookieJar(context: Context) : CookieJar {
     @Synchronized
     fun clear() {
         cache.clear()
-        prefs.edit().remove(KEY_IV).remove(KEY_CIPHERTEXT).apply()
+        prefs.edit {
+            remove(KEY_IV)
+            remove(KEY_CIPHERTEXT)
+        }
     }
 
     @Synchronized
@@ -94,10 +98,10 @@ class PersistentCookieJar(context: Context) : CookieJar {
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
             val ciphertext = cipher.doFinal(plaintext)
-            prefs.edit()
-                .putString(KEY_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-                .putString(KEY_CIPHERTEXT, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
-                .apply()
+            prefs.edit {
+                putString(KEY_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+                putString(KEY_CIPHERTEXT, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+            }
         } catch (_: Exception) {
             // Encryption failing must not crash the login/send path -- the
             // in-memory cache still has the cookie for this process's
@@ -113,7 +117,10 @@ class PersistentCookieJar(context: Context) : CookieJar {
             // silently resurrecting a session this process no longer
             // believes is current. A broken Keystore loses persistence
             // entirely instead of persisting stale data.
-            prefs.edit().remove(KEY_IV).remove(KEY_CIPHERTEXT).apply()
+            prefs.edit {
+                remove(KEY_IV)
+                remove(KEY_CIPHERTEXT)
+            }
         }
     }
 
@@ -132,7 +139,10 @@ class PersistentCookieJar(context: Context) : CookieJar {
             // decrypt failure -- treat exactly like "no session" rather than
             // crashing on every request. Clear the unreadable entry so this
             // doesn't retry forever; the user just logs in again.
-            prefs.edit().remove(KEY_IV).remove(KEY_CIPHERTEXT).apply()
+            prefs.edit {
+                remove(KEY_IV)
+                remove(KEY_CIPHERTEXT)
+            }
             null
         }
     }

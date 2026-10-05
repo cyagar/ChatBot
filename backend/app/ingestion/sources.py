@@ -77,7 +77,7 @@ class DocumentSource(abc.ABC):
 
 def _sha256_of(path: Path) -> str:
     h = hashlib.sha256()
-    with open(path, "rb") as f:
+    with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
@@ -194,7 +194,7 @@ class GoogleDriveSource(DocumentSource):
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(manifest, f, indent=2)
-            os.replace(tmp_name, self._manifest_path)
+            Path(tmp_name).replace(self._manifest_path)
         except Exception:
             Path(tmp_name).unlink(missing_ok=True)
             raise
@@ -277,7 +277,7 @@ class GoogleDriveSource(DocumentSource):
                         f"{file_id} (expected {expected_md5}, got {writer.md5.hexdigest()}) -- "
                         "the download was corrupted or truncated in transit."
                     )
-                os.replace(tmp_name, cache_path)
+                Path(tmp_name).replace(cache_path)
                 return
             except _DownloadTooLarge:
                 if tmp_name is not None:

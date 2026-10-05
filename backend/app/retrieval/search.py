@@ -251,9 +251,8 @@ def _rerank_boost(chunk: RetrievedChunk, query: str) -> float:
         boost += 0.015
 
     # Prefer service/repair docs for troubleshooting language.
-    if re.search(r"not (heating|working|brewing)|won'?t|fail|troubleshoot|diagnos", q):
-        if chunk.doc_type == "service_repair":
-            boost += 0.010
+    if re.search(r"not (heating|working|brewing)|won'?t|fail|troubleshoot|diagnos", q) and chunk.doc_type == "service_repair":
+        boost += 0.010
 
     return boost
 

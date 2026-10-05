@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -125,7 +125,7 @@ def register(payload: RegisterRequest, request: Request, response: Response):
     # with any casing later.
     email = normalize_email(payload.email)
     # invitations.expires_at is TIMESTAMPTZ (a tz-aware datetime), so `now` must be too.
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     with get_conn() as conn:
         invite = conn.execute(
@@ -181,7 +181,9 @@ def register(payload: RegisterRequest, request: Request, response: Response):
             # case. Restore the claim so this invite isn't burned for an
             # account that was never created.
             conn.execute("UPDATE invitations SET used_at = NULL WHERE id = %s", (invite["id"],))
-            raise HTTPException(status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, detail="An account with this email already exists."
+            ) from None
         conn.execute("UPDATE invitations SET used_by = %s WHERE id = %s", (user_id, invite["id"]))
         log_audit_event(conn, "invite_used", actor_user_id=user_id, target_type="invitation",
                          target_id=invite["id"], detail=f"Registered as {invite['role']} via invitation.")

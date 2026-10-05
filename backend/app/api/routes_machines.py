@@ -46,8 +46,8 @@ def _row_to_machine(row) -> MachineOut:
         family=row["family"],
         machine_type=row["machine_type"],
         document_count=row["document_count"],
-        is_favorite=bool(row["is_favorite"]) if "is_favorite" in row.keys() else False,
-        last_used_at=row["last_used_at"] if "last_used_at" in row.keys() else None,
+        is_favorite=bool(row["is_favorite"]) if "is_favorite" in row else False,
+        last_used_at=row["last_used_at"] if "last_used_at" in row else None,
     )
 
 

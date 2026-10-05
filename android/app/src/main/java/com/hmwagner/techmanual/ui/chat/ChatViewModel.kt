@@ -139,7 +139,7 @@ class ChatViewModel(
                 // stored row is hidden so it is not drawn twice next to the
                 // pending bubble.
                 val acceptedAndProcessing = stillUnanswered && questionRow != null
-                val displayMessages = if (acceptedAndProcessing) loaded.filter { it.id != questionRow!!.id } else loaded
+                val displayMessages = if (acceptedAndProcessing) loaded.filter { it.id != questionRow.id } else loaded
                 if (pending != null && !sendInFlight && answered) pendingStore.clear(conversationId)
                 _state.value = current.copy(
                     messages = if (askQuestionInFlight) current.messages else displayMessages,
@@ -470,12 +470,11 @@ class ChatViewModel(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // A newer citation tap (or dismiss) cancelled THIS job via
                 // evidenceJob?.cancel() above -- that's expected, cooperative
-                // cancellation, not a failure. Rethrowing (rather than
-                // falling into the generic catch below, which used to treat
-                // this identically to a real network error and apply a
-                // stale error state on top of whatever the newer
-                // request/dismiss had already set) is required for
-                // structured concurrency regardless.
+                // cancellation, not a failure. Rethrowing keeps it out of the
+                // generic catch below, which would otherwise treat it like a
+                // real network error and apply a stale error state on top of
+                // whatever the newer request/dismiss already set; required
+                // for structured concurrency regardless.
                 throw e
             } catch (_: Exception) {
                 if (token != evidenceRequestToken) return@launch
@@ -495,10 +494,10 @@ class ChatViewModel(
             evidenceDocumentId = null,
             evidenceError = null,
             evidenceCitation = null,
-            // Also reset here (pre-existing gap, not previously reachable
-            // without the token/cancellation fix above): dismissing while a
-            // load was still in flight used to leave evidenceLoading=true
-            // forever, since only openCitation/loadEvidence ever set it.
+            // Reset here too, not just by openCitation/loadEvidence's own
+            // catch block: dismissing while a load is still in flight must
+            // not leave evidenceLoading stuck true, since the cancelled
+            // job's own cleanup races this state update.
             evidenceLoading = false,
         )
     }

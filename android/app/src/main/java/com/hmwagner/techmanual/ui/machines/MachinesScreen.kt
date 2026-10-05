@@ -81,7 +81,7 @@ fun MachinesScreen(
                 // the results list below is easy to miss on a quick glance, and
                 // a search against the real API takes long enough (debounce +
                 // network round trip) that some visible "this is working" cue
-                // matters (found live on-device 2026-09-16).
+                // matters.
                 trailingIcon = {
                     if (state.loading) {
                         CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)

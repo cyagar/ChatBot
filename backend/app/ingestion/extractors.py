@@ -447,7 +447,7 @@ def sniff_file_type(path: Path) -> str | None:
     real content (e.g. a PDF saved with a .doc extension) — see the ingestion
     report's 'extension_mismatch' notes."""
     try:
-        with open(path, "rb") as f:
+        with path.open("rb") as f:
             head = f.read(8)
     except Exception:
         return None

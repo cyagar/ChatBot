@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
@@ -60,19 +61,16 @@ import kotlinx.coroutines.withTimeoutOrNull
  * scoped to MainActivity's ViewModelStore, which the framework keeps alive
  * across a configuration change (rotation, entering/leaving split-screen)
  * regardless of which composable branch -- TwoPaneHome or SinglePaneHome --
- * happens to be mounted when the change lands. Confirmed via on-device
- * logging (2026-08-25, Tab A9+) that this selection state itself survives
- * rotation correctly either way (this ViewModel, or an earlier
- * rememberSaveable attempt) -- the bug that actually made rotation drop the
- * conversation lived in `SinglePaneHome` reusing a stale `NavController`
- * across branch switches, not in how this selection was held. See the
- * `key(...)` wrapping `SinglePaneHome` in `HomeContent` below for the real
- * fix and its explanation.
+ * happens to be mounted when the change lands. If a conversation still drops
+ * on rotation despite this, look at `SinglePaneHome` reusing a stale
+ * `NavController` across branch switches, not at how this selection is
+ * held -- see the `key(...)` wrapping `SinglePaneHome` in `HomeContent`
+ * below for that.
  *
  * Must be at least package-visible: the default `ViewModelProvider` factory
  * instantiates via reflection and throws `IllegalAccessException` on a
- * `private` class. `internal` (public at the JVM level) is sufficient and
- * was confirmed live on-device -- no need for `public`.
+ * `private` class. `internal` (public at the JVM level) is sufficient --
+ * no need for `public`.
  */
 internal class HomeSelectionViewModel : ViewModel() {
     var selectedId by mutableStateOf<Int?>(null)
@@ -389,8 +387,7 @@ private fun HomeContent(
             if (isExpanded) {
                 TwoPaneHome(selectedId = selection.selectedId, selectedLabel = selection.selectedLabel, onSelect = onSelect)
             } else {
-                // Keyed on the selection: confirmed via on-device logging
-                // (2026-08-25, Tab A9+) that the selection state itself survives
+                // Keyed on the selection: the selection state itself survives
                 // switching branches fine, but SinglePaneHome's *own* NavController
                 // doesn't -- Compose reuses the same NavController instance (and
                 // its own remembered/restored back stack) across a branch
@@ -449,7 +446,7 @@ private fun UpdateAvailableBanner(info: UpdateAvailableState, onDismiss: () -> U
                 // not happen on a real device -- caught anyway rather than
                 // crashing the whole app over a tap on a config-supplied link.
                 try {
-                    context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(info.updateUrl)))
+                    context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, info.updateUrl.toUri()))
                 } catch (_: Exception) {
                 }
             }) { Text("Update") }
@@ -588,12 +585,11 @@ private fun TwoPaneHome(selectedId: Int?, selectedLabel: String?, onSelect: (Int
             if (selectedId == null) {
                 EmptyDetailPane()
             } else {
-                // key(selectedId) alone is NOT what prevents ChatScreen from
-                // reusing the previous conversation's ChatViewModel -- found
-                // via live testing (2026-08-25) that it wasn't preventing
-                // that at all: viewModel() without an explicit key looks
-                // itself up by class name in the Activity's ViewModelStore,
-                // untouched by this recomposition-scoping key(). The actual
+                // key(selectedId) alone does NOT prevent ChatScreen from
+                // reusing the previous conversation's ChatViewModel:
+                // viewModel() without an explicit key looks itself up by
+                // class name in the Activity's ViewModelStore, untouched by
+                // this recomposition-scoping key(). The actual
                 // fix is the explicit `key = "chat-$conversationId"` passed
                 // to viewModel() inside ChatScreen itself -- see the comment
                 // there. This key() is kept anyway since it still forces a

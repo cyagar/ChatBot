@@ -9,7 +9,7 @@ the caller's own identity -- see app/auth/routes.py.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -64,8 +64,8 @@ def _corpus_status(settings) -> tuple[str, str]:
         # ever, would always report healthy.
         finished = last_success["finished_at"]
         if finished.tzinfo is None:
-            finished = finished.replace(tzinfo=timezone.utc)
-        hours_since = (datetime.now(timezone.utc) - finished).total_seconds() / 3600
+            finished = finished.replace(tzinfo=UTC)
+        hours_since = (datetime.now(UTC) - finished).total_seconds() / 3600
         if hours_since > settings.ingestion_staleness_threshold_hours:
             return "degraded", "The manual corpus has not synced recently and may be out of date."
         return "ok", ""

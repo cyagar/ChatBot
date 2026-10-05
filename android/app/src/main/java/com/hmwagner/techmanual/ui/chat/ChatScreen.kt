@@ -87,13 +87,10 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
     // `key(selectedId) { ... }` (see TwoPaneHome in AppNav.kt) changes the
     // Compose slot but does NOT reset that ViewModelStore lookup, so without
     // this explicit key, switching from one conversation straight to another
-    // in the two-pane detail pane silently returned the *same* cached
-    // ChatViewModel instance -- its `init` never re-ran, so it kept showing
-    // the previous conversation's stale state (found via live tablet
-    // testing 2026-08-25, the same session the History screen was added --
-    // instrumented with temporary Log.d calls in ChatScreen/TwoPaneHome to
-    // confirm recomposition WAS happening with the new id while no new
-    // network call ever fired).
+    // in the two-pane detail pane silently returns the *same* cached
+    // ChatViewModel instance -- its `init` never re-runs, so it keeps
+    // showing the previous conversation's stale state even though
+    // recomposition happens with the new id and no new network call fires.
     val vm: ChatViewModel = viewModel(key = "chat-$conversationId", factory = ChatViewModel.Factory(conversationId))
     val state by vm.state.collectAsState()
     val listState = rememberLazyListState()
@@ -272,8 +269,8 @@ private fun PendingUserBubble(
                 } else if (uncertain) {
                     // Connection dropped mid-send and we genuinely don't
                     // know the outcome -- say so instead of just silently
-                    // dropping the spinner, which used to look identical to
-                    // a normal already-sent message. Retry reuses this same
+                    // dropping the spinner, which would look identical to a
+                    // normal already-sent message. Retry reuses this same
                     // question's idempotency key, so it's always safe to
                     // tap: it can never create a duplicate turn even if the
                     // original attempt actually landed.
@@ -317,11 +314,10 @@ private val CITATION_MARKER_NUMBER = Regex("""\[(\d+)]""")
  * which is what looked bad. This renders that exact fixed shape instead of
  * pulling in a full Markdown library for three line patterns.
  *
- * A whole-line "_..._" (owner decision 2026-09-16: low-confidence answers
- * get a caveat line prepended, see parse_and_validate's confidence handling
- * in base.py) is a fourth pattern in that same fixed shape -- rendered
- * italic, confirmed live on-device that a plain Text() would otherwise show
- * the literal underscores.
+ * A whole-line "_..._" (low-confidence answers get a caveat line prepended,
+ * see parse_and_validate's confidence handling in base.py) is a fourth
+ * pattern in that same fixed shape -- rendered italic, since a plain
+ * Text() would otherwise show the literal underscores.
  */
 @Composable
 private fun FormattedAnswer(content: String) {
@@ -592,8 +588,7 @@ private fun Composer(state: ChatUiState, vm: ChatViewModel) {
         // critically the send button -- render underneath the gesture
         // navigation bar on edge-to-edge devices: touches there get eaten by
         // the system's edge-swipe gesture handling instead of reaching the
-        // button. Confirmed live on a physical Tab A9+ (SM-X210, Android 15,
-        // gesture nav) before this fix -- the button was unreachable.
+        // button.
         modifier = Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(12.dp),
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -618,12 +613,11 @@ private fun Composer(state: ChatUiState, vm: ChatViewModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: () -> Unit) {
-    // skipPartiallyExpanded: found live on-device (2026-09-16) that the
-    // default half-expanded initial state made a full manual page render at
-    // a fraction of the screen -- a technician trying to actually read the
-    // referenced page had to first drag the sheet open further. Opening
-    // straight to (near) full height is what "should take most of the
-    // screen" below actually delivers.
+    // skipPartiallyExpanded: the default half-expanded initial state renders
+    // a full manual page at a fraction of the screen -- a technician trying
+    // to actually read the referenced page would have to first drag the
+    // sheet open further. Opening straight to (near) full height is what
+    // "should take most of the screen" below actually delivers.
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(

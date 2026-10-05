@@ -50,6 +50,7 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 # actually makes that command show anything.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
+logger = logging.getLogger(__name__)
 access_logger = logging.getLogger("app.access")
 
 
@@ -58,13 +59,13 @@ async def lifespan(_app: FastAPI):
     get_settings().validate_for_startup()
     applied = run_migrations()
     if applied:
-        print(f"Applied migrations: {applied}")
+        logger.info("Applied migrations: %s", applied)
 
     from app.ingestion.pipeline import recover_interrupted_runs
 
     recovered = recover_interrupted_runs()
     if recovered:
-        print(f"Marked {recovered} interrupted ingestion run(s) as failed")
+        logger.info("Marked %d interrupted ingestion run(s) as failed", recovered)
 
     # The automated corpus-freshness loop only starts when Drive is actually
     # configured -- get_document_source() itself would raise RuntimeError

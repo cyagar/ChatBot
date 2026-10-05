@@ -43,10 +43,10 @@ class MachinesViewModel : ViewModel() {
                     // LaunchedEffect-driven re-fetch the way History/
                     // SavedAnswers do), so a stale banner could otherwise sit
                     // on screen indefinitely after whatever caused it had
-                    // long since succeeded on retry. Found live on-device
-                    // (2026-09-16): favoriting a machine after an earlier,
-                    // unrelated failed request still showed "Can't reach the
-                    // server" even though the favorite call itself succeeded.
+                    // long since succeeded on retry: without this, favoriting
+                    // a machine after an earlier, unrelated failed request
+                    // would still show "Can't reach the server" even though
+                    // the favorite call itself succeeded.
                     _state.value = _state.value.copy(recent = resp.body().orEmpty(), error = null)
                 }
             } catch (_: Exception) {
@@ -118,10 +118,9 @@ class MachinesViewModel : ViewModel() {
         // Long enough to skip the request entirely for someone still
         // actively typing, short enough not to feel unresponsive. Kept short
         // deliberately: the round trip itself already costs ~500ms against
-        // the real (Neon-backed) API, confirmed live on-device 2026-09-16 --
-        // stacking a long debounce on top of that made "search as you type"
-        // read as "nothing happens" for someone glancing down after typing
-        // just a couple characters.
+        // the real (Neon-backed) API, so stacking a long debounce on top of
+        // that would make "search as you type" read as "nothing happens"
+        // for someone glancing down after typing just a couple characters.
         const val SEARCH_DEBOUNCE_MS = 150L
         const val TAG = "MachinesViewModel"
     }
@@ -157,10 +156,10 @@ class MachinesViewModel : ViewModel() {
 
     /**
      * Re-runs the search for the current query after a failure -- surfaced
-     * as a "Retry" button next to the error banner. A search failure (e.g.
-     * the dead-pooled-connection SocketException confirmed live on-device
-     * 2026-09-16) otherwise leaves the technician stuck with no way back to
-     * results short of editing the query again.
+     * as a "Retry" button next to the error banner. A search failure (e.g. a
+     * dead-pooled-connection SocketException) otherwise leaves the
+     * technician stuck with no way back to results short of editing the
+     * query again.
      */
     fun retrySearch() {
         val q = _state.value.query

@@ -828,7 +828,7 @@ def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
     # retrieved passage is still kept in message_sources for retrieval-quality
     # auditing, but reload must reproduce exactly what the technician saw, not
     # every candidate that was merely retrieved.
-    message_machine_id = {r["id"]: r["machine_id"] for r in rows} if "machine_id" in rows[0].keys() else {}
+    message_machine_id = {r["id"]: r["machine_id"] for r in rows} if "machine_id" in rows[0] else {}
 
     citations_by_message: dict[int, list[CitationOut]] = {mid: [] for mid in message_ids}
     src_rows = conn.execute(
@@ -917,7 +917,7 @@ def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
             safety_warnings = []
 
         clarifying_options = []
-        if "clarifying_options" in row.keys() and row["clarifying_options"]:
+        if "clarifying_options" in row and row["clarifying_options"]:
             try:
                 clarifying_options = json.loads(row["clarifying_options"])
             except (TypeError, ValueError):
@@ -927,15 +927,15 @@ def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
             id=row["id"], role=row["role"], content=row["content"],
             is_clarifying_question=bool(row["is_clarifying_question"]),
             is_no_answer=bool(row["is_no_answer"]),
-            answer_status=row["answer_status"] if "answer_status" in row.keys() else "completed",
+            answer_status=row["answer_status"] if "answer_status" in row else "completed",
             citations=citations,
             safety_warnings=safety_warnings,
-            conflict_note=row["conflict_note"] if "conflict_note" in row.keys() else None,
+            conflict_note=row["conflict_note"] if "conflict_note" in row else None,
             clarifying_options=clarifying_options,
-            retry_count=row["retry_count"] if "retry_count" in row.keys() else 0,
+            retry_count=row["retry_count"] if "retry_count" in row else 0,
             created_at=row["created_at"],
-            reply_to_message_id=row["reply_to_message_id"] if "reply_to_message_id" in row.keys() else None,
-            idempotency_key=row["idempotency_key"] if "idempotency_key" in row.keys() else None,
+            reply_to_message_id=row["reply_to_message_id"] if "reply_to_message_id" in row else None,
+            idempotency_key=row["idempotency_key"] if "idempotency_key" in row else None,
             feedback_rating=feedback_by_message.get(row["id"]),
             is_saved=row["id"] in saved_message_ids,
             has_withdrawn_source=any(c.source_withdrawn for c in citations),
@@ -1487,5 +1487,5 @@ def list_saved_answers(
                 question=question_by_message.get(r["id"]),
                 answer=answer,
             )
-            for r, answer in zip(rows, hydrated)
+            for r, answer in zip(rows, hydrated, strict=True)
         ]

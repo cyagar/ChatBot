@@ -92,7 +92,7 @@ def decode_cursor(cursor: str, schema: list[str]) -> list:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid pagination cursor.") from None
     if not isinstance(parts, list) or len(parts) != len(schema):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid pagination cursor.")
-    if not all(_matches_cursor_type(part, kind) for part, kind in zip(parts, schema)):
+    if not all(_matches_cursor_type(part, kind) for part, kind in zip(parts, schema, strict=True)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Invalid pagination cursor.")
     return parts
 

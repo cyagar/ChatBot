@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def iso_utc(ts: datetime | str | None) -> str | None:
@@ -19,5 +19,5 @@ def iso_utc(ts: datetime | str | None) -> str | None:
         return None
     dt = ts if isinstance(ts, datetime) else datetime.fromisoformat(ts)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.isoformat()

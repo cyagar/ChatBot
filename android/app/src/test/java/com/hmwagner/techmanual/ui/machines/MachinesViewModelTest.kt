@@ -340,11 +340,11 @@ class MachinesViewModelTest {
         awaitRequestCount(1)
 
         // "Connection: close" forces the touchMachine request onto a
-        // genuinely fresh connection -- confirmed via a throwaway diagnostic
-        // that Response<Unit>'s converter never actually parses the body at
-        // all (Retrofit/kotlinx-serialization special-cases Unit), so a
-        // malformed body can't be used to trigger a failure here; only a
-        // real connection-level exception can. Without this header, OkHttp
+        // genuinely fresh connection. Response<Unit>'s converter never
+        // actually parses the body at all (Retrofit/kotlinx-serialization
+        // special-cases Unit), so a malformed body can't be used to trigger
+        // a failure here; only a real connection-level exception can.
+        // Without this header, OkHttp
         // silently retries a disconnect on a REUSED pooled connection (a
         // routine keep-alive race, unrelated to retryOnConnectionFailure --
         // same behavior ApiClient.kt's getRetryInterceptor comment and

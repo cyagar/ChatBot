@@ -676,7 +676,7 @@ def _embed_pending_chunks(batch_size: int = 64) -> int:
         batch = rows[start : start + batch_size]
         vectors = embed_texts([r["content"] for r in batch])
         with get_conn() as conn:
-            for row, vec in zip(batch, vectors):
+            for row, vec in zip(batch, vectors, strict=True):
                 conn.execute(
                     # Upsert on the chunk_id primary key: updates in place
                     # rather than delete-then-insert.
