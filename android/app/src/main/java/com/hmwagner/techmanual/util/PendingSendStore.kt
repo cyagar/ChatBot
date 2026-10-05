@@ -50,6 +50,36 @@ class InMemoryPendingSendStore : PendingSendStore {
 class SharedPrefsPendingSendStore(context: Context) : PendingSendStore {
     private val prefs = context.applicationContext.getSharedPreferences("pending_sends", Context.MODE_PRIVATE)
 
+    init {
+        deleteLegacyPlaintextEntries()
+    }
+
+    /**
+     * A prior version of this store (before the AES-GCM encryption above
+     * was added) kept the question's own id/content in this same
+     * SharedPreferences file under "id_$conversationId"/"content_$conversationId",
+     * as plain text. This class only ever reads/writes "iv_"/"data_" keys,
+     * so on a device that upgraded from that version with a pending send
+     * still saved, the old plaintext entry was never read, never deleted,
+     * and sat on disk indefinitely -- exactly the "readable at rest"
+     * exposure the encryption was meant to close, left open for any
+     * pre-existing install. Run once per process (init block, not per
+     * save/load) since this is a one-time cleanup, not an ongoing
+     * concern -- a fresh install, or one that already upgraded, finds
+     * nothing to remove here. Deleted outright rather than migrated into
+     * the new encrypted format: a pending send left over from before this
+     * fix shipped is from a conversation the technician has long since
+     * moved on from by the time they update, so removing the plaintext
+     * exposure matters here, not preserving that stale draft.
+     */
+    private fun deleteLegacyPlaintextEntries() {
+        val legacyKeys = prefs.all.keys.filter { it.startsWith("id_") || it.startsWith("content_") }
+        if (legacyKeys.isEmpty()) return
+        val editor = prefs.edit()
+        legacyKeys.forEach { editor.remove(it) }
+        editor.apply()
+    }
+
     @Synchronized
     override fun load(conversationId: Int): LocalEcho? {
         val ivB64 = prefs.getString("iv_$conversationId", null) ?: return null
@@ -78,10 +108,19 @@ class SharedPrefsPendingSendStore(context: Context) : PendingSendStore {
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
             val ciphertext = cipher.doFinal(plaintext)
+            // commit(), not apply(): this call exists specifically so a
+            // process death between send() and a reply doesn't lose the
+            // Idempotency-Key needed to resume (see this class's own doc
+            // comment). apply()'s write is asynchronous -- a hard process
+            // kill immediately after this call returns could happen before
+            // it ever reaches disk, exactly defeating that guarantee.
+            // commit() blocks until the write is durable; the caller
+            // (ChatViewModel.send()) is responsible for keeping that off the
+            // UI thread.
             prefs.edit()
                 .putString("iv_$conversationId", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
                 .putString("data_$conversationId", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
-                .apply()
+                .commit()
         } catch (_: Exception) {
             // Encryption failing must not crash the send path -- the
             // in-memory ChatViewModel state still has the echo for this

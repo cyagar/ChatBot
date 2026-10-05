@@ -16,9 +16,11 @@ import com.hmwagner.techmanual.network.describeErrorWithCode
 import com.hmwagner.techmanual.util.PendingSendStore
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The technician's own question while it has no answer yet. `id` is the
@@ -213,7 +215,6 @@ class ChatViewModel(
         if (text.isEmpty() || _state.value.sending || _state.value.pendingEcho != null) return
 
         val echo = LocalEcho(UUID.randomUUID().toString(), text)
-        pendingStore.save(conversationId, echo)
         _state.value = _state.value.copy(
             sending = true,
             error = null,
@@ -222,7 +223,20 @@ class ChatViewModel(
             pendingEchoUncertain = false,
             pendingEchoStillProcessing = false,
         )
-        viewModelScope.launch { performSend(echo) }
+        viewModelScope.launch {
+            // Durably persisted (SharedPrefsPendingSendStore.save() uses
+            // commit(), not apply()) BEFORE the network call starts, and off
+            // the caller's thread via Dispatchers.IO so that synchronous
+            // disk write + AES-GCM encryption never blocks the UI. Process
+            // death between send() and a reply is exactly the scenario
+            // PendingSendStore exists for (see its own doc comment) --
+            // apply()'s async write offers no actual guarantee it has
+            // reached disk by the time a hard kill (not a clean
+            // backgrounding transition, which is all apply()'s own
+            // QueuedWork flush is tied to) happens right after this call.
+            withContext(Dispatchers.IO) { pendingStore.save(conversationId, echo) }
+            performSend(echo)
+        }
     }
 
     /**
