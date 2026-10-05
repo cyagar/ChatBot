@@ -474,12 +474,10 @@ private fun MessageBubble(
                 }
 
                 msg.conflict_note?.let { note ->
-                    // Same "icon + explicit label, not just color" treatment
-                    // as safety_warnings above -- this used to be color-only
-                    // (amber text, no icon, no label), the exact "color
-                    // -independent status" gap plan section 6 calls out, for
-                    // a revision-conflict notice that section 2 lists as a
-                    // must-not-regress invariant.
+                    // Icon + explicit label, not just color, mirrors
+                    // safety_warnings above: color alone is not a reliable
+                    // signal on its own (e.g. for colorblind readers), and a
+                    // revision-conflict notice must never go unnoticed.
                     Row(verticalAlignment = Alignment.Top) {
                         Icon(Icons.Filled.Warning, contentDescription = null, tint = warningColor, modifier = Modifier.size(18.dp))
                         Text(

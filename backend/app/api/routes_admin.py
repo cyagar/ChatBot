@@ -739,10 +739,9 @@ def enable_user(user_id: int, admin: CurrentUser = Depends(require_admin)):
 # ---------------------------------------------------------------------------
 # Re-index
 # ---------------------------------------------------------------------------
-# Direct file upload was removed: ingestion is Drive-only now (add a manual to
-# the shared Drive folder, then trigger a re-index below) so there is exactly
-# one place manuals live, not a local upload folder that could drift out of
-# sync with Drive.
+# Ingestion is Drive-only: add a manual to the shared Drive folder, then
+# trigger a re-index below. Exactly one place manuals live, not a local
+# upload folder that could drift out of sync with Drive.
 
 @router.post("/ingestion/reindex", status_code=status.HTTP_202_ACCEPTED)
 def trigger_reindex(background_tasks: BackgroundTasks, admin: CurrentUser = Depends(require_admin)):
