@@ -240,13 +240,27 @@ def _corpus_readiness(settings) -> tuple[str, str]:
             # and the app/retrieval/search.py queries this mirrors would find
             # nothing either. Checking document state alone would report "ok"
             # for a corpus that cannot answer a single question.
+            #
+            # c.content ~ '\S' (at least one non-whitespace character), not
+            # just a row existing: chunks.char_count (set at ingest time to
+            # len(ch.content), see pipeline.py) is NOT trimmed, so a
+            # whitespace-only chunk -- a genuinely blank extraction some
+            # OCR/extraction failure modes can produce -- has char_count > 0
+            # and would otherwise still count as "retrievable" here despite
+            # having nothing in it retrieval could ever ground an answer
+            # against. Plain trim()/length(trim(...)) is NOT equivalent --
+            # Postgres's trim() with no explicit character set strips only
+            # space characters, not tab/newline, so it would still have
+            # missed a chunk that's whitespace-only but for a stray tab or
+            # newline (confirmed: a test using exactly that content kept
+            # failing against a trim()-based version of this check).
             retrievable = conn.execute(
                 "SELECT 1 FROM chunks c "
                 "JOIN documents d ON d.id = c.document_id "
                 "JOIN document_machines dm ON dm.document_id = d.id "
                 "WHERE d.status IN ('indexed', 'partial') AND d.review_status = 'approved' "
                 "AND d.deactivated_at IS NULL AND d.is_current_revision "
-                "AND dm.review_status = 'approved' LIMIT 1"
+                "AND dm.review_status = 'approved' AND c.content ~ '\\S' LIMIT 1"
             ).fetchone()
             stuck = conn.execute(
                 "SELECT 1 FROM ingestion_runs WHERE status = 'running' "

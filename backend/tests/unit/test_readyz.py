@@ -13,7 +13,9 @@ from app.main import app
 client = TestClient(app)
 
 
-def _seed_retrievable_document(review_status="approved", link_status="approved", current=True, with_chunk=True):
+def _seed_retrievable_document(
+    review_status="approved", link_status="approved", current=True, with_chunk=True, chunk_content="Some manual content.",
+):
     with get_conn() as conn:
         conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
         conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
@@ -28,10 +30,15 @@ def _seed_retrievable_document(review_status="approved", link_status="approved",
             (doc_id, link_status),
         )
         if with_chunk:
+            # char_count is len(content), unstripped, matching how
+            # pipeline.py actually computes it at ingest time -- a
+            # whitespace-only chunk still gets a positive char_count, which
+            # is exactly what makes that case worth testing separately from
+            # with_chunk=False above.
             conn.execute(
                 "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) VALUES "
-                "(%s, 'text', 'Some manual content.', 21, 0)",
-                (doc_id,),
+                "(%s, 'text', %s, %s, 0)",
+                (doc_id, chunk_content, len(chunk_content)),
             )
 
 
@@ -97,6 +104,15 @@ def test_readyz_fails_when_the_only_document_has_no_chunks(test_env):
     """An approved, machine-linked document that was never chunked (ingestion
     never ran, or produced nothing) has no content retrieval can return."""
     _seed_retrievable_document(with_chunk=False)
+    assert client.get("/readyz").json()["corpus"] == "unusable"
+
+
+def test_readyz_fails_when_the_only_chunk_is_blank(test_env):
+    """A whitespace-only chunk (a genuinely blank extraction some OCR/
+    extraction failure modes can produce) has char_count > 0 -- distinct
+    from with_chunk=False above, which has no chunk row at all -- but still
+    nothing retrieval could ever ground a real answer against."""
+    _seed_retrievable_document(chunk_content="   \n\t  ")
     assert client.get("/readyz").json()["corpus"] == "unusable"
 
 
