@@ -148,8 +148,12 @@ _WARNING_LABEL_RE = re.compile(r"^(WARNING|CAUTION|DANGER|NOTICE|IMPORTANT)[:\s]
 # ABSENT from the warning text itself, mean the model trimmed a negation off
 # the real warning rather than quoting it whole: "operate with the
 # cover removed" is a genuine, contiguous substring of "do not operate with
-# the cover removed", but means the opposite thing.
-_NEGATION_WORDS = ("NOT", "NEVER", "WITHOUT", "CANNOT", "CAN'T", "DON'T", "NO ")
+# the cover removed", but means the opposite thing. Matched on word
+# boundaries, not plain substring containment -- this corpus's "NOTICE"
+# labels contain "NOT" as a run of letters, and "whenever" contains "never",
+# neither of which is the negation word they appear to spell.
+_NEGATION_WORDS = ("NOT", "NEVER", "WITHOUT", "CANNOT", "CAN'T", "DON'T", "NO")
+_NEGATION_WORD_PATTERNS = {w: re.compile(r"\b" + re.escape(w) + r"\b") for w in _NEGATION_WORDS}
 
 
 @dataclass(frozen=True)
@@ -516,7 +520,12 @@ def _clause_grounded(
     that clauses appear in the same order as their matched text does -- both
     across different excerpt lines and within one shared line."""
     claim_stems = [w for w in _content_stems(clause_text) if w not in machine_stems]
-    if not claim_stems:
+    # A clause left with only bare digits after this filtering is a list
+    # marker ("1.", "2.") that _claim_clauses split off a copied enumerated
+    # excerpt line, not a standalone fact -- it can match any stray digit
+    # anywhere in the excerpt and would otherwise impose a bogus order
+    # constraint on the real clauses around it.
+    if not claim_stems or all(w.isdigit() for w in claim_stems):
         return _NO_ORDER
     claim_set = set(claim_stems)
     claim_polarity = {w for w in _prose_tokens(clause_text) if w in _POLARITY_WORDS}
@@ -634,8 +643,8 @@ def _warning_supported(warning_text: str, cited_content: str) -> bool:
     after = re.search(r"[.!?](\s|$)", norm_content[end:])
     sentence_end = end + (after.end() if after else len(norm_content) - end)
     sentence = norm_content[sentence_start:sentence_end]
-    for neg in _NEGATION_WORDS:
-        if neg not in stripped and neg in sentence:
+    for neg, pattern in _NEGATION_WORD_PATTERNS.items():
+        if not pattern.search(stripped) and pattern.search(sentence):
             return False
     return True
 

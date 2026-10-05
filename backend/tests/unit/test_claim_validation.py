@@ -719,3 +719,45 @@ def test_a_number_correctly_attached_to_its_own_step_still_passes():
         "Use 150F for the rinse cycle.",
         "Use 150F for the rinse cycle and 180F for the sanitize cycle.",
     ) is not None
+
+
+def test_a_warning_quoted_from_a_notice_labeled_passage_is_not_rejected_as_a_negation_drop():
+    """The negation-drop check used to scan for the literal substring "NOT"
+    anywhere in the excerpt sentence, which also matches inside the word
+    "NOTICE" -- a label this corpus's troubleshooting tables actually use.
+    That falsely treated every NOTICE-labeled passage as if it contained a
+    dropped negation, rejecting an otherwise fully-grounded, correctly
+    quoted warning."""
+    passages = [_passage(1, 1, (
+        "NOTICE: Brew water temperature is factory set at 200F. "
+        "Areas of high altitude will require lowering this temperature to prevent boiling."
+    ))]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Brew water temperature is factory set at 200F.", "cited_excerpt_numbers": [1]}],
+        "steps": [],
+        "warnings": [{
+            "text": "Areas of high altitude will require lowering this temperature to prevent boiling.",
+            "cited_excerpt_numbers": [1],
+        }],
+    })
+    assert parse_and_validate(raw, passages, "test") is not None
+
+
+def test_a_bare_list_marker_number_in_a_claim_does_not_impose_a_bogus_order():
+    """A claim that copies an excerpt's own "1./2." enumeration verbatim
+    (exactly what the system prompt asks for when quoting a numbered
+    troubleshooting entry) used to have those bare numerals treated as
+    ordinary content clauses, which could match an unrelated digit
+    elsewhere in the excerpt and falsely trip the clause-order check. A
+    clause left with nothing but digits after stopword filtering carries no
+    fact of its own and must impose no order, the same as an empty clause."""
+    excerpt = (
+        "Wire For Shorts\n1. Water temperature in the tank does not meet the ready "
+        "temperature.\n1. Tank Heater failure.\n2. Control Board/Thermistor failure"
+    )
+    assert _single_claim(
+        "Water temperature in the tank does not meet the ready temperature. "
+        "1. Tank Heater failure. 2. Control Board/Thermistor failure",
+        excerpt,
+    ) is not None
