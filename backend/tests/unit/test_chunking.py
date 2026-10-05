@@ -198,3 +198,41 @@ def test_small_adjacent_chunks_of_same_type_are_merged():
     # Should not fragment into many <150-char chunks of the same type/heading.
     text_records = [r for r in records if r.chunk_type == "text" and r.section_heading == "Intro"]
     assert len(text_records) <= 1
+
+
+def _multi_page_doc(pages_text: list[str]) -> ExtractedDocument:
+    pages = [ExtractedPage(page_number=i + 1, text=t) for i, t in enumerate(pages_text)]
+    return ExtractedDocument(status="ok", reason=None, pages=pages)
+
+
+def test_a_running_header_repeated_on_many_pages_is_kept_only_once():
+    """A catalog's running header ('MODEL X PARTS MANUAL Rev. Y') is chunked
+    independently on every page it appears on, since chunking has no
+    whole-document view -- left alone this inflates the corpus with one
+    near-useless chunk per occurrence, crowding out genuinely distinct
+    chunks in reciprocal rank fusion."""
+    header = "MODEL CMA-180UC PARTS MANUAL Rev. 1.20C"
+    # Matches the real corpus's layout: the page's own text is just the
+    # running header, with the actual parts list extracted separately as a
+    # table -- so the header stands alone as its own chunk, once per page.
+    pages = []
+    for i in range(5):
+        table = ExtractedTable(page_number=i + 1, rows=[["Part", "Qty"], [f"P{i}", "1"]])
+        pages.append(ExtractedPage(page_number=i + 1, text=header, tables=[table]))
+    doc = ExtractedDocument(status="ok", reason=None, pages=pages)
+    records = chunk_document(doc)
+    header_records = [r for r in records if r.content.strip() == header]
+    assert len(header_records) == 1, f"expected the header kept once, got {len(header_records)}"
+    # The unique per-page table content must still survive the dedup pass.
+    assert len({r.content for r in records if r.chunk_type == "table"}) == 5
+
+
+def test_content_repeated_on_only_two_pages_is_not_treated_as_boilerplate():
+    """Two pages coincidentally sharing a short verbatim phrase is
+    plausible content, not a running header -- the threshold must not fire
+    on it."""
+    line = "Check the water inlet valve."
+    pages = [line, f"Different intro.\n{line}"]
+    records = chunk_document(_multi_page_doc(pages))
+    matches = [r for r in records if line in r.content]
+    assert len(matches) == 2

@@ -21,7 +21,7 @@ MIN_CHARS = 150
 # size caps, table handling). documents.chunking_version records which
 # version actually produced a document's current chunks -- see extractors.py's
 # CURRENT_EXTRACTION_VERSION for the matching mechanism on the extraction side.
-CURRENT_CHUNKING_VERSION = 1
+CURRENT_CHUNKING_VERSION = 2
 
 # An embedding model typically truncates its input, so a chunk that grows too
 # large has rows past the truncation point invisible to semantic search even
@@ -282,6 +282,49 @@ def _merge_small_chunks(records: list[ChunkRecord]) -> list[ChunkRecord]:
     return merged
 
 
+# A running header/footer or a repeated table column-header row recurring
+# on this many or more DISTINCT pages is boilerplate, not content -- two
+# pages coincidentally sharing a short verbatim phrase is plausible, three
+# or more is not.
+_BOILERPLATE_MIN_PAGES = 3
+
+
+def _drop_repeated_boilerplate(records: list[ChunkRecord]) -> list[ChunkRecord]:
+    """Chunking works page by page with no whole-document view, so a running
+    header ('MODEL X PARTS MANUAL Rev. Y') or a table's own repeated
+    column-header row ('ITEM NO. REQ'D') is chunked independently on every
+    page it appears on. Left alone, a catalog with that on most of its pages
+    produces one near-useless chunk per occurrence, which does more than
+    bloat the corpus: in reciprocal rank fusion every one of those near-
+    identical chunks is its own candidate, so a short, generic, highly
+    repeated line can occupy several of a query's result slots and crowd
+    out a genuinely distinct chunk that would otherwise have made the
+    top_k. Content that recurs verbatim (after whitespace/case
+    normalization) across _BOILERPLATE_MIN_PAGES+ distinct pages is kept
+    once, at its first occurrence, and dropped everywhere else."""
+    pages_seen: dict[str, set[int]] = {}
+    for rec in records:
+        if rec.page_number is None:
+            continue
+        norm = _norm_heading(rec.content)
+        pages_seen.setdefault(norm, set()).add(rec.page_number)
+
+    boilerplate = {norm for norm, pages in pages_seen.items() if len(pages) >= _BOILERPLATE_MIN_PAGES}
+    if not boilerplate:
+        return records
+
+    kept: list[ChunkRecord] = []
+    already_kept: set[str] = set()
+    for rec in records:
+        norm = _norm_heading(rec.content)
+        if norm in boilerplate:
+            if norm in already_kept:
+                continue
+            already_kept.add(norm)
+        kept.append(rec)
+    return kept
+
+
 def chunk_document(extracted: ExtractedDocument) -> list[ChunkRecord]:
     all_records: list[ChunkRecord] = []
     for page in extracted.pages:
@@ -304,4 +347,4 @@ def chunk_document(extracted: ExtractedDocument) -> list[ChunkRecord]:
                         ChunkRecord(page.page_number, last_heading, chunk_type, window_md)
                     )
 
-    return all_records
+    return _drop_repeated_boilerplate(all_records)
