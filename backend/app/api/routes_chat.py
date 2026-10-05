@@ -1418,9 +1418,23 @@ def list_saved_answers(
     )
     with get_conn() as conn:
         rows = conn.execute(
+            # COALESCE(m.machine_id, c.machine_id), not c.machine_id alone:
+            # the conversation's machine_id can change after this answer was
+            # generated (a technician may legally switch machines once an
+            # answer is no longer in flight -- see retry's own machine_id
+            # handling, routes_chat.py's "Retry must use the machine this
+            # failed answer was actually generated against" comment). This
+            # same `rows` collection is also what _hydrate_messages below
+            # reads `machine_id` from for its own stale/withdrawn-citation
+            # check (see that function's own comment) -- selecting the
+            # conversation's current machine here fed it the wrong machine
+            # for BOTH that check and the label below, for any saved answer
+            # whose conversation later switched machines. Falls back to
+            # c.machine_id only for pre-existing rows from before
+            # messages.machine_id was populated.
             "SELECT m.id, m.role, m.content, m.is_clarifying_question, m.is_no_answer, "
             "m.safety_warnings, m.conflict_note, m.answer_status, m.retry_count, m.created_at, "
-            "m.conversation_id, c.machine_id, sa.saved_at "
+            "m.conversation_id, COALESCE(m.machine_id, c.machine_id) AS machine_id, sa.saved_at "
             "FROM saved_answers sa "
             "JOIN messages m ON m.id = sa.message_id "
             "JOIN conversations c ON c.id = m.conversation_id "

@@ -455,6 +455,87 @@ def test_p0_13_withdrawing_a_source_document_retroactively_flags_history_and_sav
     )
 
 
+def test_p0_13_b_saved_answer_uses_the_machine_it_was_generated_against_not_the_conversations_current_one(test_env):
+    """A conversation's machine_id can change after an answer was generated
+    (a technician may legally switch machines once nothing is in flight --
+    see retry's own machine_id handling in routes_chat.py). A saved answer
+    must keep reflecting the machine it was actually generated against, in
+    both its displayed machine_label and its has_withdrawn_source staleness
+    check (_hydrate_messages reads the SAME row field for both) -- using the
+    conversation's CURRENT machine for either would show the wrong label,
+    and, since this fixture's document has no approved link to the second
+    machine at all, would incorrectly flag a perfectly good saved answer as
+    withdrawn the moment the conversation moves to a machine with no link to
+    its cited document."""
+    from app.db import get_conn
+    from app.main import app as fastapi_app
+    from fastapi.testclient import TestClient
+    from tests.conftest import register_test_user
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "tech-p013b@example.com")
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Ultra-1')")
+        doc_cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, manufacturer_id, doc_type, title, is_current_revision, "
+            "review_status) VALUES ('axiom2.pdf', 'axiom2.pdf', 'local_directory', 'axiom2.pdf', 'pdf', "
+            "'hash-p013b', 100, 'indexed', 1, 'service_repair', 'Axiom Manual', true, 'approved') RETURNING id"
+        )
+        doc_id = doc_cur.fetchone()["id"]
+        # Only linked (approved) to machine 1 -- machine 2 has no link to
+        # this document at all.
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'approved')",
+            (doc_id,),
+        )
+        chunk_cur = conn.execute(
+            "INSERT INTO chunks (document_id, chunk_type, content, char_count, ordinal) "
+            "VALUES (%s, 'text', 'brew temperature is 200F', 25, 0) RETURNING id",
+            (doc_id,),
+        )
+        chunk_id = chunk_cur.fetchone()["id"]
+
+        user_id = conn.execute("SELECT id FROM users WHERE email = 'tech-p013b@example.com'").fetchone()["id"]
+        conv_cur = conn.execute(
+            "INSERT INTO conversations (user_id, machine_id) VALUES (%s, 1) RETURNING id", (user_id,)
+        )
+        conv_id = conv_cur.fetchone()["id"]
+        msg_cur = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, machine_id) "
+            "VALUES (%s, 'assistant', 'Brew at 200F.', 1) RETURNING id",
+            (conv_id,),
+        )
+        msg_id = msg_cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO message_sources (message_id, chunk_id, rank, is_citation, citation_ordinal, excerpt) "
+            "VALUES (%s, %s, 1, true, 1, 'brew temperature is 200F')",
+            (msg_id, chunk_id),
+        )
+        conn.execute("INSERT INTO saved_answers (user_id, message_id) VALUES (%s, %s)", (user_id, msg_id))
+
+        # The technician later switches this conversation to a different
+        # machine -- legal once nothing is in flight. The saved answer above
+        # must still be judged against machine 1 (the Axiom), not this one.
+        conn.execute("UPDATE conversations SET machine_id = 2 WHERE id = %s", (conv_id,))
+
+    saved = local_client.get("/api/saved-answers")
+    assert saved.status_code == 200
+    body = saved.json()[0]
+    assert body["machine_label"] == "Bunn-O-Matic Corporation Axiom", (
+        "a saved answer must show the machine it was generated against, not the conversation's "
+        f"current machine -- got {body['machine_label']!r}"
+    )
+    assert body["answer"]["has_withdrawn_source"] is False, (
+        "the conversation's current machine (2) has no approved link to this document at all -- "
+        "using it instead of the message's own machine_id (1, which IS approved) would incorrectly "
+        "flag this perfectly good saved answer as withdrawn"
+    )
+
+
 def _seed_p104_answer(conn, *, email: str):
     """Same shape as test_p0_13's fixture: one approved, current, machine-
     linked document with one cited chunk, one assistant message citing it.
