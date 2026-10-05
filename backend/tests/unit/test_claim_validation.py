@@ -664,6 +664,47 @@ def test_a_required_warning_is_added_even_when_the_model_omits_it():
     assert result.safety_warnings == ["WARNING: Disconnect power before servicing."]
 
 
+def test_a_required_warning_is_added_even_from_a_passage_the_model_never_cited():
+    """Distinct from the test above: there the warning lives in the SAME
+    passage the model cited for its step. Here it lives in a DIFFERENT
+    retrieved passage the model simply never cited at all -- citation is
+    about which passage backs a specific claim, not about which retrieved
+    passages are safety-relevant to the question, so the warning must still
+    surface."""
+    passages = [
+        _passage(1, 1, "Remove the cover."),
+        _passage(2, 1, "WARNING: Disconnect power before servicing."),
+    ]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [],
+        "steps": [{"text": "Remove the cover.", "cited_excerpt_numbers": [1]}],
+        "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test")
+    assert result is not None
+    assert result.safety_warnings == ["WARNING: Disconnect power before servicing."]
+
+
+def test_a_required_warning_is_found_after_a_heading_not_just_at_the_start_of_the_excerpt():
+    """_excerpt_lines splits on sentence-ending punctuation, not on every
+    newline, so a heading with no period of its own ("Safety Precautions")
+    stays in the SAME unit as the WARNING sentence that follows it on the
+    next physical line -- a check anchored only at that unit's own start
+    would see "SAFETY PRECAUTIONS WARNING: ..." and never match. The
+    backfilled text must also start at the label, not include the heading."""
+    passages = [_passage(1, 1, "Safety Precautions\nWARNING: Disconnect power before servicing. Remove the cover.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [],
+        "steps": [{"text": "Remove the cover.", "cited_excerpt_numbers": [1]}],
+        "warnings": [],
+    })
+    result = parse_and_validate(raw, passages, "test")
+    assert result is not None
+    assert result.safety_warnings == ["WARNING: Disconnect power before servicing."]
+
+
 def test_two_clauses_in_one_sentence_in_the_correct_order_still_passes():
     """The order-check tightening above must not reject a claim that
     genuinely follows the excerpt's own word order."""

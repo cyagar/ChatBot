@@ -642,7 +642,7 @@ def _warning_supported(warning_text: str, cited_content: str) -> bool:
 
 def _extract_required_warnings(passages: list) -> list[str]:
     """Every WARNING/CAUTION/DANGER/NOTICE/IMPORTANT-labeled sentence found
-    in the cited excerpts, taken directly from the source text rather than
+    in the given excerpts, taken directly from the source text rather than
     from the model -- like detect_conflict, a provider has no channel through
     which to add or omit one of these, so it cannot silently leave a labeled
     hazard out of its own "warnings" list. This only reaches labeled
@@ -652,12 +652,34 @@ def _extract_required_warnings(passages: list) -> list[str]:
     out: list[str] = []
     for p in passages:
         for line in _excerpt_lines(p.content):
-            norm = _normalize_ws(line)
-            if not _WARNING_LABEL_RE.match(norm):
-                continue
-            if norm not in seen:
-                seen.add(norm)
-                out.append(line.strip())
+            # A label can start the whole _excerpt_lines unit, or -- since
+            # that function splits only on sentence-ending punctuation, not
+            # on every newline (see its own docstring) -- start a LATER
+            # physical line within it, right after a heading with no
+            # sentence-ending punctuation of its own ("Safety Precautions\n
+            # WARNING: Disconnect power before servicing."). A check
+            # anchored only at the unit's own start misses that entirely.
+            # Restricted to right after a real newline (not "anywhere in the
+            # unit"): a plain `.search()` over the whole unit would also
+            # match the word "caution"/"warning" used incidentally mid
+            # -sentence in ordinary prose, which is not a hazard label.
+            physical_lines = line.split("\n")
+            offset = 0
+            for physical in physical_lines:
+                if _WARNING_LABEL_RE.match(_normalize_ws(physical)):
+                    # From the label to the end of the UNIT, not just this
+                    # one physical line -- a long warning sentence can wrap
+                    # across several physical lines before its own
+                    # terminating period, the same reason _excerpt_lines
+                    # itself keeps a unit's internal newlines instead of
+                    # splitting on them.
+                    candidate = line[offset:].strip()
+                    key = _normalize_ws(candidate)
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(candidate)
+                    break
+                offset += len(physical) + 1  # +1 for the newline split() consumed
     return out
 
 
@@ -871,15 +893,21 @@ def parse_and_validate(
     cited_passages = [passages[n - 1] for item in (claims + steps + warnings) for n in item.excerpt_numbers]
     conflict_note = detect_conflict(cited_passages) if cited_passages else None
 
-    # Every WARNING/CAUTION/DANGER passage behind the answer's own claims and
-    # steps is surfaced regardless of what the model put in its "warnings"
-    # list -- a model that grounds a step in a passage but leaves out the
-    # hazard label right next to it must not make that label disappear.
-    # Deduplicated against the model's own (already-validated) warnings by
-    # normalized text, since the two can name the same sentence.
+    # Every WARNING/CAUTION/DANGER passage retrieval put in front of the
+    # model for this question is surfaced, regardless of what the model
+    # chose to cite or put in its own "warnings" list -- scanning `passages`
+    # (everything retrieval judged relevant enough to this question to
+    # return, bounded at top_k, not the whole corpus), not just
+    # `cited_passages`. A model that grounds a step in one retrieved passage
+    # but leaves out a hazard label that lives in a DIFFERENT retrieved
+    # passage it simply never cited must not make that label disappear --
+    # citation is about which passage backs a specific claim, not about
+    # which passages are safety-relevant to the question. Deduplicated
+    # against the model's own (already-validated) warnings by normalized
+    # text, since the two can name the same sentence.
     seen_warning_keys = {_normalize_ws(w.text) for w in warnings}
     safety_warnings = [w.text for w in warnings]
-    for text in _extract_required_warnings(cited_passages):
+    for text in _extract_required_warnings(passages):
         key = _normalize_ws(text)
         if key not in seen_warning_keys:
             seen_warning_keys.add(key)
