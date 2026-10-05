@@ -58,9 +58,14 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.BaselineShift
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePainter
@@ -295,6 +300,14 @@ private fun PendingUserBubble(
 
 private val NUMBERED_LINE = Regex("""^(\d+)\.\s(.*)""")
 
+// Matches the one-or-more trailing "[N]" markers base.py's markers() appends
+// to every claim/step line (e.g. "...the tank. [1][2]") -- captured apart
+// from the sentence so ClaimText below can draw them as small superscript
+// numbers instead of full-size inline brackets, which otherwise read at the
+// exact same visual weight as the claim text itself on every single line.
+private val TRAILING_CITATION_MARKERS = Regex("""\s*((?:\[\d+])+)\s*$""")
+private val CITATION_MARKER_NUMBER = Regex("""\[(\d+)]""")
+
 /**
  * The backend emits a small, fixed markdown subset for assistant answers --
  * claims as "- " bullets, then (if any steps) a literal "**Steps:**" header
@@ -330,16 +343,54 @@ private fun FormattedAnswer(content: String) {
                 )
                 line.startsWith("- ") -> Row {
                     Text("•", modifier = Modifier.padding(end = 8.dp))
-                    Text(line.removePrefix("- "), modifier = Modifier.weight(1f))
+                    ClaimText(line.removePrefix("- "), modifier = Modifier.weight(1f))
                 }
                 numbered != null -> Row {
                     Text("${numbered.groupValues[1]}.", modifier = Modifier.padding(end = 8.dp))
-                    Text(numbered.groupValues[2], modifier = Modifier.weight(1f))
+                    ClaimText(numbered.groupValues[2], modifier = Modifier.weight(1f))
                 }
                 else -> Text(line)
             }
         }
     }
+}
+
+/**
+ * Renders one claim/step line with its trailing "[N]" citation marker(s), if
+ * any, drawn as small raised numbers (same idea as a footnote) instead of
+ * full-size inline brackets -- the numbering still means exactly what it
+ * always did (which Sources chip below is this specific line's own
+ * evidence, independently validated per line; different lines can and do
+ * cite different passages), only how it's drawn changes. A screen reader
+ * gets an explicit "Source N" description instead of reading a bare,
+ * out-of-context digit right after the sentence.
+ */
+@Composable
+private fun ClaimText(text: String, modifier: Modifier = Modifier) {
+    val match = TRAILING_CITATION_MARKERS.find(text)
+    if (match == null) {
+        Text(text, modifier = modifier)
+        return
+    }
+    val body = text.substring(0, match.range.first)
+    val numbers = CITATION_MARKER_NUMBER.findAll(match.groupValues[1]).map { it.groupValues[1] }.toList()
+    val markerColor = MaterialTheme.colorScheme.onSurfaceVariant
+    Text(
+        buildAnnotatedString {
+            append(body)
+            append(" ")
+            numbers.forEachIndexed { i, n ->
+                if (i > 0) append(" ")
+                withStyle(SpanStyle(fontSize = 11.sp, baselineShift = BaselineShift.Superscript, color = markerColor)) {
+                    append(n)
+                }
+            }
+        },
+        modifier = modifier.semantics {
+            contentDescription = body + ". " +
+                (if (numbers.size > 1) "Sources " else "Source ") + numbers.joinToString(", ")
+        },
+    )
 }
 
 @Composable
