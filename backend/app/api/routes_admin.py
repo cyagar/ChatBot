@@ -943,7 +943,15 @@ def list_feedback(admin: CurrentUser = Depends(require_admin), limit: int = Quer
     see what the technician was actually asking about. Reports message_id
     (feedback is per-answer, not per-conversation), the machine the answer
     was generated for, and every citation the answer actually used, batched
-    in one extra query rather than N+1 per row."""
+    in one extra query rather than N+1 per row.
+
+    The answer's OWN machine_id is used first, not the conversation's: a
+    conversation's machine_id can change after this message was answered
+    (a technician switching machines mid-conversation), which would
+    otherwise show the wrong equipment for an older message in that same
+    conversation. messages.machine_id is nullable (a message from before
+    this column existed), so it falls back to the conversation's machine_id
+    rather than showing no machine at all for those rows."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT f.id, f.message_id, f.rating, f.comment, f.created_at, u.email AS user_email, "
@@ -953,7 +961,7 @@ def list_feedback(admin: CurrentUser = Depends(require_admin), limit: int = Quer
             "JOIN users u ON u.id = f.user_id "
             "JOIN messages m ON m.id = f.message_id "
             "JOIN conversations c ON c.id = m.conversation_id "
-            "LEFT JOIN machines mach ON mach.id = c.machine_id "
+            "LEFT JOIN machines mach ON mach.id = COALESCE(m.machine_id, c.machine_id) "
             "LEFT JOIN manufacturers mf ON mf.id = mach.manufacturer_id "
             "ORDER BY f.created_at DESC LIMIT %s",
             (limit,),

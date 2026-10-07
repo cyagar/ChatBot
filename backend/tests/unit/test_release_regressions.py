@@ -937,6 +937,75 @@ def test_admin_feedback_listing_includes_machine_label_message_id_and_citations(
     )
 
 
+def test_admin_feedback_listing_uses_the_answers_own_machine_not_the_conversations_current_one(test_env):
+    """Mirrors test_retry_uses_the_failed_answers_own_machine_not_the_
+    conversations_current_one: the answer's OWN machine_id must be used, not
+    the conversation's current one, which can change after this message was
+    answered (a technician switching machines mid-conversation). Showing the
+    conversation's current machine here would misdirect an admin triaging an
+    "incorrect" report toward the wrong equipment."""
+    from app.db import get_conn
+
+    register_test_user(client, "tech-p113@example.com", admin_email="admin-p113@example.com")
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Imix')")
+        user_id = conn.execute("SELECT id FROM users WHERE email = 'tech-p113@example.com'").fetchone()["id"]
+        conv_id = conn.execute(
+            "INSERT INTO conversations (user_id, machine_id) VALUES (%s, 1) RETURNING id", (user_id,),
+        ).fetchone()["id"]
+        msg_id = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, machine_id) "
+            "VALUES (%s, 'assistant', 'answer', 1) RETURNING id",
+            (conv_id,),
+        ).fetchone()["id"]
+        # Technician switches machines afterward -- exactly the state that
+        # used to fool this listing.
+        conn.execute("UPDATE conversations SET machine_id = 2 WHERE id = %s", (conv_id,))
+
+    feedback_resp = client.post(f"/api/messages/{msg_id}/feedback", json={"rating": "incorrect"})
+    assert feedback_resp.status_code == 201, feedback_resp.text
+
+    register_test_user(client, "admin-p113@example.com", role="administrator", admin_email="admin-p113@example.com")
+    resp = client.get("/api/admin/feedback")
+    row = next(r for r in resp.json() if r["message_id"] == msg_id)
+    assert row["machine_label"] == "Bunn-O-Matic Corporation Axiom", (
+        f"must report the answer's own machine (Axiom), not the conversation's current one (Imix), got {row}"
+    )
+
+
+def test_admin_feedback_listing_falls_back_to_the_conversations_machine_when_the_message_has_none(test_env):
+    """messages.machine_id is nullable (a message from before this column
+    existed); for those rows the listing must fall back to the
+    conversation's machine_id rather than showing no machine at all."""
+    from app.db import get_conn
+
+    register_test_user(client, "tech-p113b@example.com", admin_email="admin-p113b@example.com")
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        user_id = conn.execute("SELECT id FROM users WHERE email = 'tech-p113b@example.com'").fetchone()["id"]
+        conv_id = conn.execute(
+            "INSERT INTO conversations (user_id, machine_id) VALUES (%s, 1) RETURNING id", (user_id,),
+        ).fetchone()["id"]
+        msg_id = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, machine_id) "
+            "VALUES (%s, 'assistant', 'answer', NULL) RETURNING id",
+            (conv_id,),
+        ).fetchone()["id"]
+
+    feedback_resp = client.post(f"/api/messages/{msg_id}/feedback", json={"rating": "incorrect"})
+    assert feedback_resp.status_code == 201, feedback_resp.text
+
+    register_test_user(client, "admin-p113b@example.com", role="administrator", admin_email="admin-p113b@example.com")
+    resp = client.get("/api/admin/feedback")
+    row = next(r for r in resp.json() if r["message_id"] == msg_id)
+    assert row["machine_label"] == "Bunn-O-Matic Corporation Axiom", (
+        f"must fall back to the conversation's machine when the message's own is NULL, got {row}"
+    )
+
+
 def _admin_js_source() -> str:
     return (Path(__file__).resolve().parent.parent.parent / "app" / "web" / "static" / "js" / "admin.js").read_text(
         encoding="utf-8"
