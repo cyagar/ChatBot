@@ -69,9 +69,11 @@ direct write. `superseded_by` and the audit trail (`document_reviewed`,
 rank fusion, then applies small explainable boosts by question type and a
 penalty for non-current revisions. Machine scoping and approval gating happen
 in SQL before ranking, so a chunk from another machine or an unapproved
-document cannot reach the answer generator. Vector search loads the eligible
-embeddings and scores them in process; this is adequate at the current corpus
-size and is a capacity risk to measure before growth (`PRODUCTION_READINESS.md`).
+document cannot reach the answer generator. Vector search loads every eligible
+embedding for the machine and scores them in process (`CANDIDATE_POOL` only
+truncates the *output*, not how many are scanned); load-tested against
+production at the current corpus size (`PRODUCTION_READINESS.md`, load-test
+gate) -- CPU-bound and will need re-measuring as the corpus grows.
 
 ## Answers
 
@@ -173,7 +175,7 @@ first.
 |---|---|---|
 | AI provider object | 1 | process restart |
 | Embedding model | 1 (baked into the image) | process restart |
-| Rendered page PNGs (`routes_manuals._render_page_png`) | 256 entries (not byte-bounded) | process restart |
+| Rendered page PNGs (`routes_manuals._render_page_png`) | `PAGE_IMAGE_CACHE_MB` (byte-bounded) | process restart |
 | Drive download cache (`GDRIVE_CACHE_DIR`) | disk | checksum mismatch re-downloads |
 | Rate limiter | in memory | process restart |
 

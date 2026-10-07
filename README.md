@@ -8,6 +8,7 @@ corpus, reviews, invitations and audit trail.
 - `docs/ARCHITECTURE.md` — current design and data flow.
 - `docs/PRODUCTION_READINESS.md` — release gates with owner, status and evidence.
 - `docs/OWNER_DECISION_GATE.md` — recorded business/platform decisions.
+- `docs/DEPLOYMENT_SINGLE_HOST.md` — the production deployment runbook.
 - `docs/DRIVE_RECONCILIATION_RUNBOOK.md`, `docs/RELEASE_RECORD_TEMPLATE.md` — operations.
 - `docs/TESTER_ONBOARDING.md` — accounts, privacy notice, support and offboarding.
 - `android/README.md` — Android build, test and release.
@@ -130,26 +131,10 @@ docker compose config                       # verify interpolation before starti
 docker compose up --build
 ```
 
-Production checklist:
-
-1. `APP_ENV=production`, a real `SECRET_KEY`, both database URLs, Drive
-   settings and `ANTHROPIC_API_KEY` (when `AI_PROVIDER=anthropic`) set.
-2. Object storage (`LOCAL_STORAGE_DIR`) on durable, backed-up storage; the
-   Drive cache (`GDRIVE_CACHE_DIR`) may be ephemeral.
-3. Interactive API docs (`/docs`, `/redoc`, `/openapi.json`) are disabled
-   whenever `APP_ENV` is not `development`; the checked-in
-   `backend/openapi.json` is the client contract.
-4. One application replica unless durable storage, external scheduling and
-   shared rate limiting are in place. See `docs/PRODUCTION_READINESS.md`
-   (deployment topology gate) before scaling out.
-
-## Backup and restore
-
-- Database: Neon point-in-time recovery, and `pg_dump "$DATABASE_URL_UNPOOLED"`
-  for manual snapshots. A timed restore drill into an isolated environment is a
-  release gate; no drill is recorded yet.
-- `data/object_storage/`: the stored original manuals and rendered pages.
-- `data/gdrive_cache/` is a download cache, not a source of record.
+That's for local or single-container use. For an actual production deployment
+(host requirements, first-deployment steps, updating, backups, monitoring),
+see `docs/DEPLOYMENT_SINGLE_HOST.md`; status of each production gate is
+tracked in `docs/PRODUCTION_READINESS.md`.
 
 ## Administrator guide
 

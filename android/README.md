@@ -2,9 +2,7 @@
 
 The native client: sign in, pick an approved machine, ask a question, read a
 cited answer, open a citation's evidence and page image. It talks directly to the
-FastAPI backend in `../backend` over its JSON API. The chronological review
-diary that used to live here is archived in
-`../docs/history/ANDROID_REVIEW_DIARY.md`; it is history, not current status.
+FastAPI backend in `../backend` over its JSON API.
 
 ## Prerequisites
 

@@ -18,9 +18,22 @@ rate limits are per process. Do not run a second replica.
 
 ## First deployment
 
+Only `backend/` (plus the compose files and `deploy/`) needs to exist on the
+host -- there is no `.git` checkout there, and the rest of the repo (docs,
+android, top-level README) is never deployed or kept in sync. Transfer it as
+a tarball, not a clone:
+
 ```bash
-git clone https://github.com/cyagar/ChatBot.git && cd ChatBot
-git checkout <release tag>
+# From a local checkout, at the commit/tag to deploy:
+git archive --format=tar.gz -o /tmp/backend.tar.gz HEAD:backend
+gcloud compute scp /tmp/backend.tar.gz <host>:/tmp/ --zone=<zone>
+gcloud compute scp docker-compose.yml docker-compose.prod.yml <host>:/opt/ChatBot/ --zone=<zone>
+gcloud compute scp -r deploy <host>:/opt/ChatBot/ --zone=<zone>
+
+# On the host:
+sudo mkdir -p /opt/ChatBot/backend
+sudo tar -xzf /tmp/backend.tar.gz -C /opt/ChatBot/backend
+cd /opt/ChatBot
 
 cp backend/.env.example backend/.env       # then edit; see below
 cp /path/to/service-account.json backend/  # Drive key, never committed
@@ -65,17 +78,28 @@ Migrations are applied automatically at startup under a database lock.
 ## Updating and rolling back
 
 ```bash
-git fetch && git checkout <new tag>
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# From a local checkout, at the commit/tag to deploy:
+git archive --format=tar.gz -o /tmp/backend.tar.gz HEAD:backend
+gcloud compute scp /tmp/backend.tar.gz <host>:/tmp/ --zone=<zone>
+
+# On the host:
+sudo rm -rf /opt/ChatBot/backend/*
+sudo tar -xzf /tmp/backend.tar.gz -C /opt/ChatBot/backend
+cd /opt/ChatBot
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build app
 curl -fsS https://$TMA_DOMAIN/readyz
 ```
 
+`docker compose restart` does not reread `backend/.env` -- an env-only change
+needs `up -d` (which recreates the container), not `restart`.
+
 Take a backup first (below) whenever the release contains a migration.
 Migrations only add columns, indexes and constraints; to roll back the code,
-check out the previous tag and rebuild. The database keeps the newer columns,
-which older code ignores, except that the one-current-revision index (migration
-0005) makes an older build's approval flow fail with an error until you upgrade
-again. For a data rollback use Neon point-in-time recovery or a branch restore.
+extract the previous tag's `backend/` the same way and rebuild. The database
+keeps the newer columns, which older code ignores, except that the
+one-current-revision index (migration 0005) makes an older build's approval
+flow fail with an error until you upgrade again. For a data rollback use Neon
+point-in-time recovery or a branch restore.
 
 ## Monitoring
 
