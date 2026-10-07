@@ -69,7 +69,7 @@ def test_extract_scanned_pdf_without_ocr_is_unsupported(tmp_path):
     assert "OCR" in extracted.reason or "text layer" in extracted.reason
 
 
-def test_p2_03_a_pdf_over_the_page_count_cap_is_refused_without_processing(make_pdf, monkeypatch):
+def test_a_pdf_over_the_page_count_cap_is_refused_without_processing(make_pdf, monkeypatch):
     from app.config import get_settings
 
     monkeypatch.setenv("MAX_PDF_PAGES", "2")
@@ -83,7 +83,7 @@ def test_p2_03_a_pdf_over_the_page_count_cap_is_refused_without_processing(make_
         get_settings.cache_clear()
 
 
-def test_p2_03_an_oversized_page_is_skipped_for_ocr_instead_of_rendered(tmp_path, monkeypatch):
+def test_an_oversized_page_is_skipped_for_ocr_instead_of_rendered(tmp_path, monkeypatch):
     import fitz
 
     import app.ingestion.extractors as extractors_module
@@ -106,7 +106,7 @@ def test_p2_03_an_oversized_page_is_skipped_for_ocr_instead_of_rendered(tmp_path
         get_settings.cache_clear()
 
 
-def test_p1_09_a_real_legacy_doc_is_classified_and_parsed_as_doc(tmp_path):
+def test_a_real_legacy_doc_is_classified_and_parsed_as_doc(tmp_path):
     """OLE files (.doc/.xls/.ppt all share the same compound-file magic
     bytes) must not sniff as the generic "ole" kind unconditionally --
     resolve_file_type trusts the sniff over the .doc extension, and
@@ -134,7 +134,7 @@ def test_p1_09_a_real_legacy_doc_is_classified_and_parsed_as_doc(tmp_path):
     assert "thermostat calibration" in extracted.pages[0].text
 
 
-def test_p1_09_a_non_word_ole_container_named_doc_stays_unsupported(tmp_path):
+def test_a_non_word_ole_container_named_doc_stays_unsupported(tmp_path):
     """Companion to the test above: an OLE compound file that is NOT a Word
     document (no WordDocument stream -- e.g. a legacy .xls saved/renamed
     with a .doc extension) must not be misparsed as one just because it
@@ -162,7 +162,7 @@ def _make_ooxml(path, member_name):
         zf.writestr("[Content_Types].xml", "<Types/>")
 
 
-def test_p1_09_xlsx_and_pptx_are_not_misclassified_as_docx(tmp_path):
+def test_xlsx_and_pptx_are_not_misclassified_as_docx(tmp_path):
     """.docx/.xlsx/.pptx are all ZIP containers sharing the same magic
     bytes -- a ZIP OOXML file must not be labeled 'docx' unconditionally, or
     an .xlsx/.pptx could be sent to the docx parser. Distinguished by the

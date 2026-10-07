@@ -1,6 +1,6 @@
-"""Phase 1 (narrowed scope, decided 2026-08-26 -- see docs/OWNER_DECISION_GATE.md
-section 9): stay on the existing FastAPI app, no new Node.js/TS service, no
-OAuth/PKCE, no Android refactor. This file covers the three items that
+"""Scope (see docs/OWNER_DECISION_GATE.md section 9): stay on the existing
+FastAPI app, no new Node.js/TS service, no OAuth/PKCE, no Android refactor.
+This file covers the three items that
 aren't the UTC-timestamp change (see tests/unit/test_iso_utc.py and
 test_conversation_and_message_timestamps_carry_an_explicit_utc_offset in
 test_auth_and_chat.py for that one): the safe-error envelope, GET

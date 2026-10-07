@@ -22,7 +22,7 @@ def manuals_dir(tmp_path):
     return d
 
 
-def test_p1_15_a_chunk_embedded_under_a_stale_fingerprint_is_reembedded(test_env, monkeypatch):
+def test_a_chunk_embedded_under_a_stale_fingerprint_is_reembedded(test_env, monkeypatch):
     """embeddings.model_name records the model name AND revision together
     (see embedding_fingerprint()) -- a chunk whose only embedding predates a
     model/revision change must be treated as needing re-embedding, not as
@@ -222,11 +222,10 @@ def test_content_change_at_same_path_creates_new_pending_row_without_deactivatin
 
 
 def test_relocated_corpus_root_does_not_create_a_duplicate_row(test_env, make_pdf, manuals_dir, tmp_path):
-    """Independent review evidence: 'A relocation test proved that moving an
-    unchanged manual to another local folder creates a new duplicate document
-    row' (71 -> 72 document rows for the same bytes). source_ref must be
-    relative to the corpus root, not an absolute path, so the same file under
-    a differently-located root is still recognized as the same document."""
+    """source_ref must be relative to the corpus root, not an absolute path,
+    so the same file under a differently-located root is still recognized as
+    the same document rather than creating a duplicate row for the same
+    bytes."""
     pdf = make_pdf(["Content about the ice machine condenser cleaning schedule."], name="relocatable.pdf")
     shutil.copy(pdf, manuals_dir / pdf.name)
     ingest_all(source=FakeDirectorySource(manuals_dir), embed=False)
@@ -436,7 +435,7 @@ def test_an_all_failed_run_is_marked_failed_not_completed(test_env, manuals_dir)
     )
 
 
-def test_p1_05_an_unsupported_only_run_is_still_completed_not_completed_with_errors(test_env, manuals_dir):
+def test_an_unsupported_only_run_is_still_completed_not_completed_with_errors(test_env, manuals_dir):
     """Companion to the test above: 'unsupported' (a file type this pipeline
     deliberately does not parse, e.g. a scanned PDF with no OCR configured)
     is an intentional, expected classification, not a failure -- it must NOT
@@ -457,7 +456,7 @@ def test_p1_05_an_unsupported_only_run_is_still_completed_not_completed_with_err
     assert run["status"] == "completed", f"an unsupported-only run is not a failure -- got {run['status']!r}"
 
 
-def test_p1_05_a_source_level_download_failure_is_a_real_error_not_an_intentional_skip(test_env, manuals_dir):
+def test_a_source_level_download_failure_is_a_real_error_not_an_intentional_skip(test_env, manuals_dir):
     """Companion to the two tests above: a source-level skip reported via
     pop_skipped() with a download failure (SkippedFile.is_error=True) must
     be distinguishable from an intentional, by-design skip (a subfolder, a

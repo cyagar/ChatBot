@@ -26,10 +26,9 @@ def _sha256_of(path: Path) -> str:
 
 class FakeDirectorySource(DocumentSource):
     """Scans a flat local directory. source_ref is relative to the given
-    directory (not absolute), mirroring the real source's contract so tests
-    can exercise corpus-root-relocation behavior (independent review concern
-    #13: an absolute-path source_ref made relocating the corpus root create
-    duplicate document rows for unchanged bytes)."""
+    directory (not absolute), mirroring the real source's contract: an
+    absolute-path source_ref would make relocating the corpus root create
+    duplicate document rows for unchanged bytes."""
 
     source_system = "test_directory"
 

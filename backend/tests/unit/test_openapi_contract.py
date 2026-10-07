@@ -1,9 +1,8 @@
-"""Phase 1 (narrowed scope, 2026-08-26): "Define ... an OpenAPI contract and
-publish it in CI." No CI exists yet in this repo -- this test is the
-proportionate stand-in until it does: it fails if backend/openapi.json (the
-committed, "published" contract -- see scripts/export_openapi.py) has
-drifted from what the live app actually generates, e.g. a route's
-parameters or response model changed without re-running that script.
+"""Fails if backend/openapi.json (the committed, published contract -- see
+scripts/export_openapi.py) has drifted from what the live app actually
+generates, e.g. a route's parameters or response model changed without
+re-running that script. Runs in `backend-ci.yml` along with the rest of the
+suite.
 """
 from __future__ import annotations
 

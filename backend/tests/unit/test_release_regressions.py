@@ -16,7 +16,7 @@ from tests.conftest import register_test_user
 client = TestClient(app)
 
 
-def test_p1_24_login_rate_limit_cannot_be_bypassed_by_rotating_cookies(test_env, monkeypatch):
+def test_login_rate_limit_cannot_be_bypassed_by_rotating_cookies(test_env, monkeypatch):
     """The default rate-limit key function keys on whatever tma_session
     cookie value a client happens to send, without verifying it's a real
     signed session -- login/register are exactly the routes an unauthenticated
@@ -46,7 +46,7 @@ def test_p1_24_login_rate_limit_cannot_be_bypassed_by_rotating_cookies(test_env,
     )
 
 
-def test_p0_03_a_metadata_only_correction_does_not_touch_machine_links(test_env):
+def test_a_metadata_only_correction_does_not_touch_machine_links(test_env):
     """PATCH /documents/{id} treats a present machine_ids as the admin's
     deliberate human review: it deletes every existing document_machines row
     and inserts every sent id as review_status='approved', confidence=1.0.
@@ -117,7 +117,7 @@ def test_p0_03_a_metadata_only_correction_does_not_touch_machine_links(test_env)
     assert row2["review_status"] == "approved", "sanity check: a present machine_ids really does re-approve"
 
 
-def test_p1_04_stale_corpus_status_accepts_a_real_psycopg_datetime(test_env, monkeypatch):
+def test_stale_corpus_status_accepts_a_real_psycopg_datetime(test_env, monkeypatch):
     """ingestion_runs.finished_at is a TIMESTAMPTZ column psycopg already
     returns as a real, aware datetime, not a string -- _corpus_status must
     use that value directly rather than re-parsing it with
@@ -153,7 +153,7 @@ def test_p1_04_stale_corpus_status_accepts_a_real_psycopg_datetime(test_env, mon
     get_settings.cache_clear()
 
 
-def test_p0_02_approving_an_unready_replacement_does_not_retire_the_working_manual(test_env):
+def test_approving_an_unready_replacement_does_not_retire_the_working_manual(test_env):
     """"Approve document" and "Approve link" are two independent buttons on
     the same review-queue card (admin.js renderReviewQueue) -- nothing stops
     an admin clicking the former first. review_document() must not let
@@ -253,7 +253,7 @@ def test_p0_02_approving_an_unready_replacement_does_not_retire_the_working_manu
     assert old_row2["deactivated_at"] is not None, "once the replacement is actually ready, the old revision should be retired"
 
 
-def test_p0_05_a_switching_machine_while_an_answer_is_in_flight_is_rejected(test_env):
+def test_switching_machine_while_an_answer_is_in_flight_is_rejected(test_env):
     """set_conversation_machine must not update conversations.machine_id
     while an answer is still generating and there is no pending
     clarification to resume -- otherwise an answer still generating for the
@@ -266,8 +266,9 @@ def test_p0_05_a_switching_machine_while_an_answer_is_in_flight_is_rejected(test
     processing_claimed_at is set to now() (a fresh, unexpired lease) --
     under the lease model, is_processing=true with NO claimed_at is treated
     as an abandoned pre-lease-migration row and is immediately reclaimable
-    (see test_p0_04_a), so a genuinely in-flight claim must look like a real
-    one to exercise this specific 409 path."""
+    (see test_an_expired_processing_lease_can_be_reclaimed_instead_of_blocking_forever),
+    so a genuinely in-flight claim must look like a real one to exercise this
+    specific 409 path."""
     from app.db import get_conn
     from app.main import app as fastapi_app
     from fastapi.testclient import TestClient
@@ -299,7 +300,7 @@ def test_p0_05_a_switching_machine_while_an_answer_is_in_flight_is_rejected(test
     assert row["machine_id"] == 1, "a rejected switch must not have changed the conversation's machine"
 
 
-def test_p0_05_b_retry_uses_the_failed_answers_own_machine_not_the_conversations_current_one(monkeypatch, test_env):
+def test_retry_uses_the_failed_answers_own_machine_not_the_conversations_current_one(monkeypatch, test_env):
     """retry_failed_answer must read machine_id off the failed message row
     itself, not conv["machine_id"] (the conversation's CURRENT machine).
     If the technician legally switches machines afterward (allowed once
@@ -366,7 +367,7 @@ def test_p0_05_b_retry_uses_the_failed_answers_own_machine_not_the_conversations
     )
 
 
-def test_p0_13_withdrawing_a_source_document_retroactively_flags_history_and_saved_answers(test_env):
+def test_withdrawing_a_source_document_retroactively_flags_history_and_saved_answers(test_env):
     """Message hydration must not return historical answer text and
     citations with no indication that the cited document has since been
     withdrawn (emergency deactivation) or lost approval (re-rejected) --
@@ -455,7 +456,7 @@ def test_p0_13_withdrawing_a_source_document_retroactively_flags_history_and_sav
     )
 
 
-def test_p0_13_b_saved_answer_uses_the_machine_it_was_generated_against_not_the_conversations_current_one(test_env):
+def test_saved_answer_uses_the_machine_it_was_generated_against_not_the_conversations_current_one(test_env):
     """A conversation's machine_id can change after an answer was generated
     (a technician may legally switch machines once nothing is in flight --
     see retry's own machine_id handling in routes_chat.py). A saved answer
@@ -537,8 +538,8 @@ def test_p0_13_b_saved_answer_uses_the_machine_it_was_generated_against_not_the_
 
 
 def _seed_p104_answer(conn, *, email: str):
-    """Same shape as test_p0_13's fixture: one approved, current, machine-
-    linked document with one cited chunk, one assistant message citing it.
+    """One approved, current, machine-linked document with one cited chunk,
+    one assistant message citing it.
     Caller must register `email` (see register_test_user) BEFORE opening the
     connection passed here -- registration makes its own HTTP calls, each
     opening its own DB connection, and nesting that inside an already-open
@@ -636,7 +637,7 @@ def test_a_rejected_machine_link_flags_its_historical_citation(test_env):
     assert after_msg["citations"][0]["source_withdrawn"] is True
 
 
-def test_p0_04_a_an_expired_processing_lease_can_be_reclaimed_instead_of_blocking_forever(monkeypatch, test_env):
+def test_an_expired_processing_lease_can_be_reclaimed_instead_of_blocking_forever(monkeypatch, test_env):
     """A plain is_processing boolean cleared only in a Python `finally` would
     leave a conversation stuck forever if a worker is killed, a DB connection
     is lost during release, or the process shuts down between claim and
@@ -687,7 +688,7 @@ def test_p0_04_a_an_expired_processing_lease_can_be_reclaimed_instead_of_blockin
     )
 
 
-def test_p0_04_b_a_zombie_attempts_late_write_never_overwrites_the_reclaiming_attempts_answer(monkeypatch, test_env):
+def test_a_zombie_attempts_late_write_never_overwrites_the_reclaiming_attempts_answer(monkeypatch, test_env):
     """The exact scenario lease fencing exists for. Attempt A claims the
     lease; its lease then expires (its provider call is still running --
     slow, not dead) and attempt B reclaims the SAME conversation and
@@ -772,7 +773,7 @@ def test_p0_04_b_a_zombie_attempts_late_write_never_overwrites_the_reclaiming_at
     )
 
 
-def test_p0_10_test_fixture_refuses_a_database_url_identical_to_production(tmp_path, monkeypatch):
+def test_test_fixture_refuses_a_database_url_identical_to_production(tmp_path, monkeypatch):
     """The test_env fixture runs migrations and an unconditional
     TRUNCATE ... CASCADE against whatever DATABASE_URL/DATABASE_URL_UNPOOLED
     it finds in backend/.env.test -- pointing that file at the real
@@ -808,7 +809,7 @@ def test_p0_10_test_fixture_refuses_a_database_url_identical_to_production(tmp_p
     )
 
 
-def test_p0_11_eval_script_refuses_without_a_disposable_clone(tmp_path):
+def test_eval_script_refuses_without_a_disposable_clone(tmp_path):
     """The eval script must require EVAL_DATABASE_URL/EVAL_DATABASE_URL_UNPOOLED
     pointing at a disposable clone, refusing hard (before any migration or
     query) if either is missing or identical to the real production value --
@@ -857,7 +858,7 @@ def test_p0_11_eval_script_refuses_without_a_disposable_clone(tmp_path):
     assert "IDENTICAL to backend/.env's production" not in result.stderr
 
 
-def test_p1_01_invitation_link_resolves_to_a_real_redemption_page(test_env):
+def test_invitation_link_resolves_to_a_real_redemption_page(test_env):
     """An invitation token is only useful if the link an admin sends actually
     resolves to something a recipient can use -- a real /invite route serves
     a minimal HTML redemption page that calls POST /api/auth/register
@@ -904,7 +905,7 @@ def _seed_p1_02_answerable_machine():
         )
 
 
-def test_p1_02_admin_feedback_listing_includes_machine_label_message_id_and_citations(test_env):
+def test_admin_feedback_listing_includes_machine_label_message_id_and_citations(test_env):
     """An admin triaging an "incorrect" report needs machine, model, and
     citation context, and a way to jump to the specific answer, not just
     rating/comment/user/conversation_id. GET /api/admin/feedback reports
@@ -942,7 +943,7 @@ def _admin_js_source() -> str:
     )
 
 
-def test_p1_06_admin_js_has_no_inline_style_or_event_handler_attributes(test_env):
+def test_admin_js_has_no_inline_style_or_event_handler_attributes(test_env):
     """app/main.py's CSP is style-src 'self'/script-src 'self' with no
     unsafe-inline, so admin.js must never build markup with inline
     style="..." attributes or onclick="..." handlers -- a CSP-enforcing
@@ -972,7 +973,7 @@ def test_p1_06_admin_js_has_no_inline_style_or_event_handler_attributes(test_env
     assert ".hidden" in admin_css and "display: none" in admin_css
 
 
-def test_p1_07_admin_js_attribute_interpolation_uses_a_quote_safe_encoder(test_env):
+def test_admin_js_attribute_interpolation_uses_a_quote_safe_encoder(test_env):
     """esc() escapes text-node content (&, <, >) but not quote characters --
     a text node never needs them escaped, but an HTML ATTRIBUTE value does.
     esc()'s result must never be interpolated directly inside value="..." or
@@ -996,7 +997,7 @@ def test_p1_07_admin_js_attribute_interpolation_uses_a_quote_safe_encoder(test_e
     )
 
 
-def test_p1_08_admin_actions_centrally_disable_show_errors_and_recover_from_401(test_env):
+def test_admin_actions_centrally_disable_show_errors_and_recover_from_401(test_env):
     """Loading tabs and approving documents/links, deactivating, reindexing,
     saving metadata, and running the query test must never await api() with
     no try/catch and no disabled/loading state -- an expired admin cookie,

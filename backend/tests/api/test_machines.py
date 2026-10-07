@@ -204,7 +204,7 @@ def test_recent_machines_drops_a_favorite_whose_only_manual_went_away(test_env):
     )
 
 
-def test_p1_12_search_reports_is_favorite_for_a_favorited_machine(test_env):
+def test_search_reports_is_favorite_for_a_favorited_machine(test_env):
     """search_machines()'s SQL must join to recent_machines so
     _row_to_machine's "is_favorite" key reports the real value -- otherwise
     a favorited machine would draw an empty star in search results (only
@@ -229,7 +229,7 @@ def test_p1_12_search_reports_is_favorite_for_a_favorited_machine(test_env):
     )
 
 
-def test_p1_12_search_does_not_leak_another_users_favorite(test_env):
+def test_search_does_not_leak_another_users_favorite(test_env):
     """Companion to the test above: is_favorite in search results must be
     scoped to the requesting user, not any technician who favorited it."""
     with get_conn() as conn:

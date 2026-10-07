@@ -103,7 +103,7 @@ def test_invite_is_bound_to_its_email_and_single_use(test_env):
     assert reuse.status_code == 403
 
 
-def test_p1_20_registering_with_mixed_case_email_can_log_in_with_any_casing(test_env):
+def test_registering_with_mixed_case_email_can_log_in_with_any_casing(test_env):
     """A technician who registers as "Tech.User@Example.com" must be able to
     log in with "tech.user@example.com" or any other casing -- every
     write/read normalizes through normalize_email() rather than comparing
@@ -131,7 +131,7 @@ def test_p1_20_registering_with_mixed_case_email_can_log_in_with_any_casing(test
     )
 
 
-def test_p1_20_invitation_for_an_email_differing_only_in_case_from_an_existing_account_is_rejected(test_env):
+def test_invitation_for_an_email_differing_only_in_case_from_an_existing_account_is_rejected(test_env):
     """Companion to the test above: without normalizing the existing-account
     check too, "Tech@Example.com" and "tech@example.com" could become two
     separate accounts sharing what a human considers the same address."""
@@ -155,7 +155,7 @@ def test_p1_20_invitation_for_an_email_differing_only_in_case_from_an_existing_a
     )
 
 
-def test_p1_20_bootstrap_admin_stores_a_lowercase_email(test_env):
+def test_bootstrap_admin_stores_a_lowercase_email(test_env):
     from app.auth.bootstrap import bootstrap_admin
 
     bootstrap_admin("Admin.User@Example.com", "password123")
@@ -167,7 +167,7 @@ def test_p1_20_bootstrap_admin_stores_a_lowercase_email(test_env):
     assert login.status_code == 200
 
 
-def test_p1_20_database_level_backstop_rejects_a_case_variant_duplicate_email(test_env):
+def test_database_level_backstop_rejects_a_case_variant_duplicate_email(test_env):
     """Defense-in-depth (matches test_duplicate_email_registration_rejected's
     reasoning): normalize_email() is the primary enforcement, applied at
     every write in Python -- migrations/0004_lowercase_emails.sql's
@@ -331,7 +331,7 @@ def test_cannot_access_another_users_conversation(test_env):
     assert resp.status_code == 404
 
 
-def test_p1_13_get_conversation_reports_the_current_machine_label(test_env):
+def test_get_conversation_reports_the_current_machine_label(test_env):
     """The Android client must be able to re-fetch a single conversation's
     authoritative state -- ChatScreen's toolbar needs the server-resolved
     machine label, not just whatever was passed through navigation. Pins
@@ -354,7 +354,7 @@ def test_p1_13_get_conversation_reports_the_current_machine_label(test_env):
     assert updated.json()["machine_label"] == "Bunn-O-Matic Corporation Axiom"
 
 
-def test_p1_13_get_conversation_rejects_another_users_conversation(test_env):
+def test_get_conversation_rejects_another_users_conversation(test_env):
     _register("owner2@example.com", "password123")
     conv = client.post("/api/conversations", json={"machine_id": None}).json()
     client.post("/api/auth/logout")
@@ -481,7 +481,7 @@ def test_save_answer_twice_is_idempotent(test_env):
     assert len(rows) == 1
 
 
-def test_p1_21_unsave_removes_a_saved_answer(test_env):
+def test_unsave_removes_a_saved_answer(test_env):
     """save_answer's own idempotent ON CONFLICT DO NOTHING is the model here
     -- unsave_answer is symmetric: a plain DELETE, no existence check, so
     the end state ("not saved") is the same whether or not it was saved to
@@ -505,7 +505,7 @@ def test_p1_21_unsave_removes_a_saved_answer(test_env):
     assert not any(s["answer"]["id"] == msg["id"] for s in still_listed)
 
 
-def test_p1_21_unsaving_a_never_saved_message_is_a_no_op_not_a_404(test_env):
+def test_unsaving_a_never_saved_message_is_a_no_op_not_a_404(test_env):
     _seed_answerable_machine()
     _register("tech21b@example.com")
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()
@@ -515,7 +515,7 @@ def test_p1_21_unsaving_a_never_saved_message_is_a_no_op_not_a_404(test_env):
     assert resp.status_code == 200
 
 
-def test_p1_21_unsave_does_not_touch_another_users_saved_answer(test_env):
+def test_unsave_does_not_touch_another_users_saved_answer(test_env):
     _seed_answerable_machine()
     _register("tech21c@example.com")
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()
@@ -676,7 +676,7 @@ def test_save_and_list_saved_answer_roundtrip(test_env):
     assert entry["question"] == _ANSWERABLE_QUESTION
 
 
-def test_p2_02_get_messages_hydration_uses_a_bounded_number_of_queries(test_env, monkeypatch):
+def test_get_messages_hydration_uses_a_bounded_number_of_queries(test_env, monkeypatch):
     """Message hydration must be O(1) round trips for a page, not O(N)
     (citations, feedback, and saved-status per message would otherwise be
     ~3N+1 round trips to the Neon network for a page of N messages). Seeds
@@ -717,7 +717,7 @@ def test_p2_02_get_messages_hydration_uses_a_bounded_number_of_queries(test_env,
     assert call_count["n"] <= 8, f"expected a small constant number of queries, got {call_count['n']}"
 
 
-def test_p2_02_saved_answers_batch_question_lookup_pairs_each_answer_with_its_own_question(test_env):
+def test_saved_answers_batch_question_lookup_pairs_each_answer_with_its_own_question(test_env):
     """The batched LATERAL-join question lookup must not cross-contaminate:
     two DIFFERENT questions saved from the SAME conversation must each keep
     their OWN nearest-prior-question (e.g. not both ending up with the same

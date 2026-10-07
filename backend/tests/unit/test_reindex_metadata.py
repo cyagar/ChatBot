@@ -361,7 +361,7 @@ def test_extraction_failure_is_recorded_and_does_not_abort_the_run(test_env, mon
     assert report.changed[0].filename == "fine.pdf", "one document's extraction failure must not block another's update"
 
 
-def test_p1_10_extraction_returning_failed_status_does_not_overwrite_good_metadata(test_env, monkeypatch):
+def test_extraction_returning_failed_status_does_not_overwrite_good_metadata(test_env, monkeypatch):
     """extract() returning NORMALLY with status='failed'/'unsupported' (no
     exception -- a corrupt or now-unreadable stored file, an extractor
     regression) must be treated as "not safely reindexable" the same as a
@@ -397,7 +397,7 @@ def test_p1_10_extraction_returning_failed_status_does_not_overwrite_good_metada
     assert doc["manufacturer_name"] == "Bunn-O-Matic Corporation"
 
 
-def test_p1_10_machine_links_distinguish_manufacturer_not_just_model_name(test_env, monkeypatch):
+def test_machine_links_distinguish_manufacturer_not_just_model_name(test_env, monkeypatch):
     """Links must be identified by (manufacturer, model_name) together, not
     model_name ALONE -- two different manufacturers sharing a model name (a
     real, expected catalog collision, e.g. two brands both selling an
@@ -433,7 +433,7 @@ def test_p1_10_machine_links_distinguish_manufacturer_not_just_model_name(test_e
     )
 
 
-def test_p1_10_an_approved_link_below_confidence_1_survives_a_reindex_without_an_override(test_env, monkeypatch):
+def test_an_approved_link_below_confidence_1_survives_a_reindex_without_an_override(test_env, monkeypatch):
     """A machine_links change must not delete every confidence<1.0 row,
     including an admin-approved or -rejected link --
     review_document_machine_link (routes_admin.py) only ever updates

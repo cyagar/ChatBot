@@ -67,7 +67,7 @@ def test_technician_can_fetch_an_approved_documents_raw_file(test_env):
     assert resp.status_code == 200
 
 
-def test_p2_03_a_page_over_the_render_pixel_budget_is_rejected_not_rendered(test_env, monkeypatch):
+def test_a_page_over_the_render_pixel_budget_is_rejected_not_rendered(test_env, monkeypatch):
     import fitz
 
     monkeypatch.setenv("MAX_PAGE_RENDER_PIXELS", "100")

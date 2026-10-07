@@ -1,7 +1,7 @@
-"""Phase 1 (narrowed scope, 2026-08-26): "Add stable cursor pagination for
-machines, history, messages, and saved answers." Response bodies stay
-plain arrays (no Android/web-UI change -- see docs/OWNER_DECISION_GATE.md
-section 9); pagination rides on X-Next-Cursor/X-Has-More response headers
+"""Stable cursor pagination for machines, history, messages, and saved
+answers. Response bodies stay plain arrays (no Android/web-UI change -- see
+docs/OWNER_DECISION_GATE.md section 9); pagination rides on
+X-Next-Cursor/X-Has-More response headers
 instead. Each test here seeds more rows than one page holds and proves the
 two pages together cover every row exactly once -- not just that a header
 exists, but that paging through actually works.
@@ -198,7 +198,7 @@ def test_invalid_cursor_returns_a_400_with_the_standard_error_envelope(test_env)
     assert resp.json()["code"] == "BAD_REQUEST"
 
 
-def test_p2_01_a_well_formed_but_wrongly_typed_cursor_400s_instead_of_500ing(test_env):
+def test_a_well_formed_but_wrongly_typed_cursor_400s_instead_of_500ing(test_env):
     """decode_cursor must reject a scalar of the wrong type in any position,
     not just check the tuple LENGTH -- a well-formed base64/JSON cursor with
     a garbage timestamp or a string where an integer id was expected must
@@ -216,7 +216,7 @@ def test_p2_01_a_well_formed_but_wrongly_typed_cursor_400s_instead_of_500ing(tes
     assert resp.json()["code"] == "BAD_REQUEST"
 
 
-def test_p2_01_a_bool_in_an_integer_cursor_position_is_rejected(test_env):
+def test_a_bool_in_an_integer_cursor_position_is_rejected(test_env):
     """bool is a subtype of int in Python -- the old isinstance(int) check
     silently accepted True/False as if they were 1/0 wherever an integer
     position was expected. GET /api/conversations/{id}/messages's cursor is
@@ -232,7 +232,7 @@ def test_p2_01_a_bool_in_an_integer_cursor_position_is_rejected(test_env):
     assert resp.json()["code"] == "BAD_REQUEST"
 
 
-def test_p2_01_an_oversized_cursor_is_rejected_before_being_parsed(test_env):
+def test_an_oversized_cursor_is_rejected_before_being_parsed(test_env):
     register_test_user(client, "page-hugecursor@example.com", role="technician")
     resp = client.get("/api/conversations", params={"cursor": "A" * 10_000})
     assert resp.status_code == 400

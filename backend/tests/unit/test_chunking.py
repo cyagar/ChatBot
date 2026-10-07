@@ -42,7 +42,7 @@ def test_warning_line_becomes_warning_chunk():
     assert any(r.chunk_type == "warning" for r in records)
 
 
-def test_p1_16_a_warnings_continuation_lines_stay_in_the_same_chunk():
+def test_a_warnings_continuation_lines_stay_in_the_same_chunk():
     """_classify_line only recognizes a warning's OWN marker line
     ("WARNING: ..."), never its continuation -- a continuation line
     classifying as plain 'text' and immediately flushing would detach the
@@ -63,7 +63,7 @@ def test_p1_16_a_warnings_continuation_lines_stay_in_the_same_chunk():
     assert "Wait 5 minutes" in warning_records[0].content
 
 
-def test_p1_16_a_procedure_steps_continuation_lines_stay_with_that_step():
+def test_a_procedure_steps_continuation_lines_stay_with_that_step():
     text = (
         "1. Disconnect power.\n"
         "Make sure the breaker is fully off before proceeding.\n"
@@ -105,9 +105,9 @@ def test_plain_table_without_code_signals_stays_table_type():
 
 
 def test_large_table_is_split_into_bounded_windows_with_header_repeated():
-    """Independent review concern #16: the corpus's largest table chunk was
-    over 11,000 characters, and an embedding model typically truncates its
-    input -- later rows were 'indexed' but invisible to semantic search."""
+    """A table chunk large enough to exceed the embedding model's input
+    limit would have later rows 'indexed' but invisible to semantic
+    search -- this corpus has tables over 11,000 characters."""
     header = ["Code", "Meaning", "Corrective Action"]
     rows = [header] + [[f"E{i}", f"Fault description number {i} " * 3, f"Corrective action steps for fault {i}"] for i in range(200)]
     table = ExtractedTable(page_number=1, rows=rows)
@@ -152,7 +152,7 @@ def test_single_oversized_row_is_split_across_cells_without_losing_values():
     assert "E99" in combined
 
 
-def test_p1_16_split_row_repeats_the_row_identifier_in_every_piece():
+def test_split_row_repeats_the_row_identifier_in_every_piece():
     """A long remedy/description in a LATER column must not push the split
     so the row's own identifier (column 0 -- the error code, in this test)
     only survives in the first piece -- a retrieved later piece would have

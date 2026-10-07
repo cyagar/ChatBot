@@ -17,15 +17,12 @@ from app.config import Settings
 
 
 def _settings(**overrides) -> Settings:
-    # External review, 2026-09-21: these tests previously left database_url/
-    # database_url_unpooled unset, which only ever "worked" locally because
-    # this developer's ambient backend/.env supplies real Neon credentials --
-    # on a fresh checkout with no .env, validate_for_startup() raises its
-    # "DATABASE_URL / DATABASE_URL_UNPOOLED are not set" error before ever
-    # reaching the credential-file checks these tests exist to exercise.
-    # Harmless, non-connecting placeholders (never actually dialed --
-    # validate_for_startup only checks truthiness) so these tests are
-    # self-contained regardless of ambient environment.
+    # database_url/database_url_unpooled must be set here: validate_for_startup()
+    # raises its own "not set" error before ever reaching the credential-file
+    # checks these tests exist to exercise, and relying on an ambient
+    # backend/.env would make these tests depend on environment they don't
+    # control. Harmless, non-connecting placeholders (never actually dialed --
+    # validate_for_startup only checks truthiness).
     base = dict(
         app_env="production",
         secret_key="x" * 48,

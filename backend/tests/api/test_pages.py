@@ -22,9 +22,9 @@ def test_admin_page_renders(test_env):
 
 
 def test_technician_pwa_routes_are_gone(test_env):
-    """Owner decision (2026-09-16): Android is the only technician client in
-    production -- the technician PWA (index.html, app.js, service worker,
-    manifest) was removed entirely. The admin web UI stays."""
+    """Android is the only technician client; the backend serves no technician
+    PWA (index.html, app.js, service worker, manifest). The admin web UI
+    stays."""
     assert client.get("/").status_code == 404
     assert client.get("/manifest.webmanifest").status_code == 404
     assert client.get("/service-worker.js").status_code == 404

@@ -131,7 +131,7 @@ def test_genuinely_supported_answer_passes():
     assert "81-118-31" in result.answer
 
 
-def test_p2_08_each_claim_and_step_carries_an_inline_marker_for_its_own_citation():
+def test_each_claim_and_step_carries_an_inline_marker_for_its_own_citation():
     """Two claims cite two different excerpts -- each line's marker must
     point at that citation's own position in result.citations, not just
     list every citation on every line."""
@@ -166,8 +166,7 @@ def test_p2_08_each_claim_and_step_carries_an_inline_marker_for_its_own_citation
 
 
 def test_low_confidence_answer_surfaces_a_caveat_in_the_response():
-    """Owner decision (2026-09-16): threshold shouldn't be super high, but a
-    low-confidence answer must say so in the response text itself. Every
+    """A low-confidence answer must say so in the response text itself. Every
     claim/step/warning still passes the exact same verbatim-evidence check
     as a high-confidence answer -- confidence only changes the displayed
     text, never what's allowed to be asserted."""
@@ -329,7 +328,7 @@ def test_claim_naming_the_machine_is_not_rejected():
         ),
     ],
 )
-def test_p0_01_numeric_claim_adversarial_table(excerpt, claim, expect_supported):
+def test_numeric_claim_adversarial_table(excerpt, claim, expect_supported):
     """The number/identifier check must not normalize a unit-suffixed token
     down to its bare numeral (discarding the unit) and check substring
     presence anywhere in the cited passage -- that would miss a single-digit
@@ -365,7 +364,7 @@ def test_p0_01_numeric_claim_adversarial_table(excerpt, claim, expect_supported)
         ("WARNING: Never bypass the interlock switch.", "Never bypass the interlock switch.", True),
     ],
 )
-def test_p0_01_warning_negation_adversarial_table(excerpt, warning, expect_supported):
+def test_warning_negation_adversarial_table(excerpt, warning, expect_supported):
     """A warning that's merely a proper substring of its cited excerpt must
     not pass unconditionally -- trimming a leading negation word off a real
     warning produces exactly that: a genuine substring with the opposite

@@ -136,7 +136,7 @@ def test_vector_search_calls_embed_query_when_eligible_chunks_exist(test_env, mo
     # model's 384. vector_search reads dim per-row, so this is not a bug.
 
 
-def test_p1_15_vector_search_excludes_a_chunk_embedded_under_a_different_model_fingerprint(test_env, monkeypatch):
+def test_vector_search_excludes_a_chunk_embedded_under_a_different_model_fingerprint(test_env, monkeypatch):
     """A chunk whose only embedding predates the currently configured
     model/revision must be excluded from vector_search -- comparing it
     against a fresh query vector from a DIFFERENT vector space would produce

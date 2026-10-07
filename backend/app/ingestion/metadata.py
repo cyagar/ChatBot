@@ -191,9 +191,8 @@ _CONTEXT_WINDOW = 60  # chars scanned each side of a pattern hit for accessory p
 # without being *about* that product — e.g. a TF DBC brewer's Smart Funnel
 # instructions saying "If a G9-2T DBC or MHG grinder is used with a compatible
 # Smart Funnel...". Treating that mention as proof the document is a Grinders
-# manual is exactly the failure mode the independent review flagged (Grinders
-# incorrectly linked to brewing manuals). A hit inside one of these phrases is
-# demoted rather than trusted at face value.
+# manual would incorrectly link it to brewing manuals. A hit inside one of
+# these phrases is demoted rather than trusted at face value.
 _ACCESSORY_CONTEXT_RE = re.compile(
     r"(used with|compatible with|optional(?:ly)?|paired with|works with|"
     r"or an?\b.{0,15}\b(grinder|funnel|brewer)\b)",
@@ -300,10 +299,10 @@ def extract_metadata(filename: str, extracted: ExtractedDocument) -> DocMetadata
             # A different machine is already confidently named by the
             # filename. A body-only mention of *this* one — even without
             # accessory phrasing — could be a related-family cross-reference,
-            # a superseded/bound-in cover page, or a genuine second subject.
-            # The independent review flagged exactly this pattern (Ultra NX
-            # vs Ultra-1/Ultra-2 service material) as a product-family
-            # judgment call a human must make, not something to guess.
+            # a superseded/bound-in cover page, or a genuine second subject
+            # (e.g. Ultra NX vs Ultra-1/Ultra-2 service material): a
+            # product-family judgment call a human must make, not something
+            # to guess.
             confidence = 0.4
         elif accessory_only:
             # Every body mention of this model looked like a compatible-

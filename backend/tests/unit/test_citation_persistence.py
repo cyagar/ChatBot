@@ -1,5 +1,5 @@
-"""Concern #7 (citation persistence) covers two things that the local_extractive
-smoke test can't: (1) a provider citing a SUBSET of retrieved passages must
+"""Covers two things that the local_extractive smoke test can't: (1) a
+provider citing a SUBSET of retrieved passages must
 persist and reload as exactly that subset, not every passage that was merely
 retrieved; (2) an answer with no valid citations and no is_no_answer flag must
 never fall back to "cite everything" -- it must be rejected outright.

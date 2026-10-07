@@ -1,6 +1,5 @@
-"""Minimal audit trail for the security-relevant actions named in the
-independent follow-up review's P0-5/P0-6 required fixes -- not a
-general-purpose event log."""
+"""Minimal audit trail for security-relevant actions -- not a general-purpose
+event log."""
 
 from __future__ import annotations
 

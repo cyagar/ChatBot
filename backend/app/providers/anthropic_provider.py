@@ -174,6 +174,11 @@ class AnthropicProvider(AIProvider):
         except anthropic.RateLimitError as e:
             raise ProviderError("The AI provider is rate-limited; try again shortly.") from e
         except anthropic.APIStatusError as e:
+            # The technician-facing message stays status-code-only; e.body carries
+            # the actual reason (e.g. rate limit vs. invalid request vs. an
+            # account-credit exhaustion, which otherwise looks identical to any
+            # other 400 in the logs) and is safe to log server-side only.
+            logger.warning("Anthropic API error status=%s body=%s", e.status_code, e.body)
             raise ProviderError(f"The AI provider returned an error (status {e.status_code}).") from e
         except anthropic.APIError as e:
             raise ProviderError("The AI provider request failed.") from e

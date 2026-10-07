@@ -99,7 +99,7 @@ def test_completed_with_errors_still_counts_as_a_successful_sync(test_env):
     assert body["last_success_trigger"] == "scheduled"
 
 
-def test_p1_15_status_reports_chunks_needing_reembedding(test_env):
+def test_status_reports_chunks_needing_reembedding(test_env):
     """A chunk whose only embedding is from a different model/revision than
     the currently configured one (see embedding_fingerprint's docstring)
     must be counted here -- otherwise an admin who bumps

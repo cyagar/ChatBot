@@ -1,6 +1,6 @@
-"""Owner decision (2026-09-16): concurrent questions in one conversation are
-not supported -- a technician must wait for (or stop) an in-flight question
-before asking another, enforced server-side via
+"""Concurrent questions in one conversation are not supported -- a technician
+must wait for (or stop) an in-flight question before asking another, enforced
+server-side via
 conversations.is_processing (app/api/routes_chat.py's
 _claim_conversation_processing/_release_conversation_processing), not just a
 disabled client button.

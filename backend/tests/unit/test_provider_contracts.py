@@ -161,13 +161,10 @@ def test_anthropic_recovers_on_the_repair_retry(anthropic_provider, monkeypatch)
 def test_anthropic_no_answer_explanation_mentioning_the_machine_name_is_not_rejected(
     anthropic_provider, monkeypatch
 ):
-    """Found live 2026-08-25: a technician on the "Ultra-1/Ultra-2" got the
-    generic UNVERIFIED_ANSWER fallback for several honestly-unanswerable
-    questions in a row. The model's real no_answer_explanation was fine each
-    time -- it just naturally referenced the machine by name, and that name
-    has two digits ("1", "2") scattered in it, which _material_tokens
-    flagged as an unverifiable claim even though it's prompt-given context,
-    not something the model could be fabricating."""
+    """A machine name like "Ultra-1/Ultra-2" has digits scattered in it;
+    _material_tokens must not flag a no_answer_explanation that naturally
+    references the machine by name as an unverifiable claim, since that name
+    is prompt-given context, not something the model could be fabricating."""
     explanation = (
         "The provided excerpts do not contain an Electrical Setup procedure "
         "for the Ultra-1/Ultra-2. Please consult the Installation section."
@@ -276,7 +273,7 @@ def test_anthropic_request_sets_a_bounded_max_tokens(anthropic_provider, monkeyp
     assert 0 < captured["max_tokens"] <= 4096
 
 
-def test_p1_19_worst_case_provider_latency_fits_under_the_android_read_timeout(anthropic_provider):
+def test_worst_case_provider_latency_fits_under_the_android_read_timeout(anthropic_provider):
     """Worst-case provider latency (2 _call()s -- the original attempt plus
     generate()'s own JSON-repair retry -- times attempts-per-call times the
     request timeout) must fit under Android's read timeout (ApiClient.kt),
