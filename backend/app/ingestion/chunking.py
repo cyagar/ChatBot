@@ -21,7 +21,7 @@ MIN_CHARS = 150
 # size caps, table handling). documents.chunking_version records which
 # version actually produced a document's current chunks -- see extractors.py's
 # CURRENT_EXTRACTION_VERSION for the matching mechanism on the extraction side.
-CURRENT_CHUNKING_VERSION = 2
+CURRENT_CHUNKING_VERSION = 3
 
 # An embedding model typically truncates its input, so a chunk that grows too
 # large has rows past the truncation point invisible to semantic search even
@@ -289,6 +289,22 @@ def _merge_small_chunks(records: list[ChunkRecord]) -> list[ChunkRecord]:
 _BOILERPLATE_MIN_PAGES = 3
 
 
+def _is_boilerplate_eligible(rec: ChunkRecord) -> bool:
+    """Only a plain "text" chunk can ever be dropped as boilerplate -- a
+    warning/procedure/table/error_code chunk recurring across pages (a
+    repeated safety notice, a repeated troubleshooting table) must never be
+    treated as a running header no matter how many pages it appears on.
+    _classify_line already tags a line starting with a warning label as
+    chunk_type "warning", but a warning label buried mid-chunk (wrapped onto
+    a continuation line, or a one-off classifier miss) would still slip
+    through as "text" -- WARNING_RE is checked again here, per line, as an
+    independent guard that doesn't rely on that first classification having
+    been correct."""
+    if rec.chunk_type != "text":
+        return False
+    return not any(WARNING_RE.match(line.strip()) for line in rec.content.splitlines())
+
+
 def _drop_repeated_boilerplate(records: list[ChunkRecord]) -> list[ChunkRecord]:
     """Chunking works page by page with no whole-document view, so a running
     header ('MODEL X PARTS MANUAL Rev. Y') or a table's own repeated
@@ -301,10 +317,12 @@ def _drop_repeated_boilerplate(records: list[ChunkRecord]) -> list[ChunkRecord]:
     out a genuinely distinct chunk that would otherwise have made the
     top_k. Content that recurs verbatim (after whitespace/case
     normalization) across _BOILERPLATE_MIN_PAGES+ distinct pages is kept
-    once, at its first occurrence, and dropped everywhere else."""
+    once, at its first occurrence, and dropped everywhere else -- restricted
+    to chunks _is_boilerplate_eligible accepts, so a real repeated warning or
+    table is never collapsed down to a single occurrence."""
     pages_seen: dict[str, set[int]] = {}
     for rec in records:
-        if rec.page_number is None:
+        if rec.page_number is None or not _is_boilerplate_eligible(rec):
             continue
         norm = _norm_heading(rec.content)
         pages_seen.setdefault(norm, set()).add(rec.page_number)
@@ -317,7 +335,7 @@ def _drop_repeated_boilerplate(records: list[ChunkRecord]) -> list[ChunkRecord]:
     already_kept: set[str] = set()
     for rec in records:
         norm = _norm_heading(rec.content)
-        if norm in boilerplate:
+        if _is_boilerplate_eligible(rec) and norm in boilerplate:
             if norm in already_kept:
                 continue
             already_kept.add(norm)

@@ -815,6 +815,16 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
             "WHERE e.chunk_id IS NULL",
             (embedding_fingerprint(),),
         ).fetchone()["c"]
+        # Mirrors DocumentOut.needs_reprocessing's per-document check, as a
+        # corpus-wide count -- otherwise a pipeline-version bump (e.g.
+        # CURRENT_CHUNKING_VERSION) only becomes visible one document at a
+        # time, by an admin happening to open each one.
+        documents_needing_reprocessing = conn.execute(
+            "SELECT COUNT(*) c FROM documents "
+            "WHERE deactivated_at IS NULL "
+            "AND (extraction_version != %s OR chunking_version != %s)",
+            (CURRENT_EXTRACTION_VERSION, CURRENT_CHUNKING_VERSION),
+        ).fetchone()["c"]
 
     hours_since_last_success = None
     is_stale = True
@@ -843,6 +853,7 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
         "staleness_threshold_hours": settings.ingestion_staleness_threshold_hours,
         "is_stale": is_stale,
         "chunks_needing_reembedding": chunks_needing_reembedding,
+        "documents_needing_reprocessing": documents_needing_reprocessing,
     }
 
 

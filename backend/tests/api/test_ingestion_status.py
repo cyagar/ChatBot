@@ -131,6 +131,38 @@ def test_status_reports_chunks_needing_reembedding(test_env):
     assert body["chunks_needing_reembedding"] == 1
 
 
+def test_status_reports_documents_needing_reprocessing(test_env):
+    """An active document whose extraction_version or chunking_version is
+    behind the current pipeline must be counted here -- bumping
+    CURRENT_CHUNKING_VERSION (see chunking.py) otherwise only becomes
+    visible one document at a time, via DocumentOut.needs_reprocessing on
+    each one, with no corpus-wide total."""
+    from app.ingestion.chunking import CURRENT_CHUNKING_VERSION
+    from app.ingestion.extractors import CURRENT_EXTRACTION_VERSION
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status, extraction_version, chunking_version) "
+            "VALUES ('stale.pdf', 'stale.pdf', 'local_directory', 'stale.pdf', 'pdf', 'hash2', 100, "
+            "'indexed', 'approved', %s, %s)",
+            (CURRENT_EXTRACTION_VERSION, CURRENT_CHUNKING_VERSION - 1),
+        )
+        conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status, extraction_version, chunking_version) "
+            "VALUES ('current.pdf', 'current.pdf', 'local_directory', 'current.pdf', 'pdf', 'hash3', 100, "
+            "'indexed', 'approved', %s, %s)",
+            (CURRENT_EXTRACTION_VERSION, CURRENT_CHUNKING_VERSION),
+        )
+    _register_admin()
+
+    body = client.get("/api/admin/ingestion/status").json()
+    assert body["documents_needing_reprocessing"] == 1
+
+
 def test_last_success_status_distinguishes_clean_from_error_runs(test_env):
     """Staleness correctly treats completed_with_errors as a success (the
     test above), but the response must still let a caller tell a clean
