@@ -14,7 +14,12 @@ rate limits are per process. Do not run a second replica.
 - A DNS name pointing at the host, and ports 80 and 443 open to the internet.
   The Android release build only talks to `https://` URLs.
 - Outbound access to Neon, Google Drive and `api.anthropic.com`.
-- `pg_dump` (PostgreSQL client 16 or newer) for backups.
+- `pg_dump` at a version **equal to or newer than** the Neon project's server
+  version (`pg_dump` refuses to dump from a newer server than itself) --
+  check the server version against what's installable from the distro's
+  default repos before assuming it's covered; Ubuntu 24.04 only ships
+  `postgresql-client-16`, so a newer server needs the PGDG apt repo
+  (`apt.postgresql.org`) for a matching `postgresql-client-NN` package.
 
 ## First deployment
 
@@ -83,7 +88,6 @@ git archive --format=tar.gz -o /tmp/backend.tar.gz HEAD:backend
 gcloud compute scp /tmp/backend.tar.gz <host>:/tmp/ --zone=<zone>
 
 # On the host:
-sudo rm -rf /opt/ChatBot/backend/*
 sudo tar -xzf /tmp/backend.tar.gz -C /opt/ChatBot/backend
 cd /opt/ChatBot
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build app
@@ -92,6 +96,18 @@ curl -fsS https://$TMA_DOMAIN/readyz
 
 `docker compose restart` does not reread `backend/.env` -- an env-only change
 needs `up -d` (which recreates the container), not `restart`.
+
+Never `rm -rf` the host's `backend/` directory before extracting: the Drive
+service-account key lives there too (bind-mounted into the container,
+outside git, see First deployment above) and isn't in the archive, so wiping
+the directory first deletes it -- the container then crash-loops on a
+missing key, and Docker will silently create an empty *directory* at that
+path to satisfy the bind mount, which then has to be removed by hand before
+the real key file can go back. `tar -xzf ... -C backend` alone overwrites
+every file the archive contains and leaves everything else (the key,
+`.env`) untouched; the only cost is a file deleted from the repo lingering
+on the host until someone removes it by hand, which is the safer failure
+mode.
 
 Take a backup first (below) whenever the release contains a migration.
 Migrations only add columns, indexes and constraints; to roll back the code,
