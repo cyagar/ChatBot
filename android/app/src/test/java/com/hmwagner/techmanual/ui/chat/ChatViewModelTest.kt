@@ -83,13 +83,16 @@ class ChatViewModelTest {
             "started_at": "2026-08-24T00:00:00Z", "updated_at": "2026-08-24T00:00:00Z"}"""
     )
 
-    private fun awaitState(timeoutMs: Long = 10000, predicate: (ChatUiState) -> Boolean) {
+    private fun awaitState(timeoutMs: Long = 10000, predicate: (ChatUiState) -> Boolean) =
+        awaitStateOf(vm, timeoutMs, predicate)
+
+    private fun awaitStateOf(target: ChatViewModel, timeoutMs: Long = 10000, predicate: (ChatUiState) -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (predicate(vm.state.value)) return
+            if (predicate(target.state.value)) return
             Thread.sleep(5)
         }
-        throw AssertionError("Timed out waiting for state condition. Last state: ${vm.state.value}")
+        throw AssertionError("Timed out waiting for state condition. Last state: ${target.state.value}")
     }
 
     @Test
@@ -433,6 +436,53 @@ class ChatViewModelTest {
         assertTrue("the stored copy must not also render as its own bubble", state.messages.none { it.role == "user" })
         assertTrue(state.error?.isNotBlank() == true)
         assertEquals("the pending question survives for a later retry", state.pendingEcho, PendingSendStore.current.load(1))
+    }
+
+    @Test
+    fun `send never calls the network when the pending-send store fails to persist`() {
+        // If this save doesn't durably land, process death right after it
+        // can't be resumed -- the one guarantee PendingSendStore exists for.
+        // Sending anyway would silently drop that guarantee while the UI
+        // still told the technician the question was safely queued.
+        // PendingSendStore.current is only read as ChatViewModel's
+        // constructor default (see `pendingStore` there), so a fresh
+        // instance -- built after swapping it in, with its own init {
+        // refresh() } responses enqueued -- is required to actually pick up
+        // this fake; reassigning it would not affect the outer `vm` from
+        // setUp(), which already captured the real InMemoryPendingSendStore.
+        PendingSendStore.current = object : PendingSendStore {
+            override fun load(conversationId: Int): LocalEcho? = null
+            override fun save(conversationId: Int, echo: LocalEcho) = false
+            override fun clear(conversationId: Int) {}
+            override fun clearAll() {}
+        }
+        val requestsAfterInit = mutableListOf<String>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                requestsAfterInit.add("${request.method} ${request.path}")
+                return when {
+                    request.path?.endsWith("/conversations/1") == true -> conversationJsonResponse()
+                    request.path?.contains("/messages") == true && request.method == "GET" -> jsonResponse("[]")
+                    else -> MockResponse().setResponseCode(500)
+                }
+            }
+        }
+        val vm2 = ChatViewModel(conversationId = 1)
+        awaitStateOf(vm2) { !it.loadingHistory }
+        requestsAfterInit.clear()
+
+        vm2.onComposerChange("Why won't it start?")
+        vm2.send()
+        awaitStateOf(vm2) { !it.sending }
+
+        val state = vm2.state.value
+        assertTrue(
+            "must not call the network when the pending send was never durably saved, got: $requestsAfterInit",
+            requestsAfterInit.isEmpty(),
+        )
+        assertNull(state.pendingEcho)
+        assertEquals("the technician's text comes back to the composer", "Why won't it start?", state.composerText)
+        assertTrue(state.error?.isNotBlank() == true)
     }
 
     @Test

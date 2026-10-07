@@ -19,7 +19,9 @@ import javax.crypto.spec.GCMParameterSpec
  */
 interface PendingSendStore {
     fun load(conversationId: Int): LocalEcho?
-    fun save(conversationId: Int, echo: LocalEcho)
+
+    /** False if the write did not durably land -- the caller must not treat the send as resumable. */
+    fun save(conversationId: Int, echo: LocalEcho): Boolean
     fun clear(conversationId: Int)
     fun clearAll()
 
@@ -34,7 +36,10 @@ class InMemoryPendingSendStore : PendingSendStore {
     private val entries = mutableMapOf<Int, LocalEcho>()
 
     @Synchronized override fun load(conversationId: Int) = entries[conversationId]
-    @Synchronized override fun save(conversationId: Int, echo: LocalEcho) { entries[conversationId] = echo }
+    @Synchronized override fun save(conversationId: Int, echo: LocalEcho): Boolean {
+        entries[conversationId] = echo
+        return true
+    }
     @Synchronized override fun clear(conversationId: Int) { entries.remove(conversationId) }
     @Synchronized override fun clearAll() = entries.clear()
 }
@@ -101,24 +106,29 @@ class SharedPrefsPendingSendStore(context: Context) : PendingSendStore {
     }
 
     @Synchronized
-    override fun save(conversationId: Int, echo: LocalEcho) {
+    override fun save(conversationId: Int, echo: LocalEcho): Boolean {
         val plaintext = (echo.id + SEPARATOR + echo.content).toByteArray(Charsets.UTF_8)
-        try {
+        return try {
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
             val ciphertext = cipher.doFinal(plaintext)
-            // commit = true, not the default (async) apply: this call exists
-            // specifically so a process death between send() and a reply
-            // doesn't lose the Idempotency-Key needed to resume (see this
-            // class's own doc comment). An async write's commit to disk could
-            // happen after a hard process kill, exactly defeating that
-            // guarantee. commit = true blocks until the write is durable; the
-            // caller (ChatViewModel.send()) is responsible for keeping that
-            // off the UI thread.
-            prefs.edit(commit = true) {
-                putString("iv_$conversationId", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-                putString("data_$conversationId", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
-            }
+            // commit(), not apply(): this call exists specifically so a
+            // process death between send() and a reply doesn't lose the
+            // Idempotency-Key needed to resume (see this class's own doc
+            // comment). An async write's commit to disk could happen after a
+            // hard process kill, exactly defeating that guarantee. commit()
+            // blocks until the write is durable; the caller
+            // (ChatViewModel.send()) is responsible for keeping that off the
+            // UI thread. Called directly on the Editor (not via the edit()
+            // ktx extension, which discards commit()'s own return value)
+            // since a false commit -- the write did not durably land -- ran
+            // this block with no exception thrown and must still be reported.
+            val committed = prefs.edit()
+                .putString("iv_$conversationId", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+                .putString("data_$conversationId", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+                .commit()
+            if (!committed) clear(conversationId)
+            committed
         } catch (_: Exception) {
             // Encryption failing must not crash the send path -- the
             // in-memory ChatViewModel state still has the echo for this
@@ -126,6 +136,7 @@ class SharedPrefsPendingSendStore(context: Context) : PendingSendStore {
             // any stale entry so a broken Keystore doesn't resurrect an old
             // pending send instead.
             clear(conversationId)
+            false
         }
     }
 

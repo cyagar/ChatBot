@@ -234,8 +234,17 @@ class ChatViewModel(
             // reached disk by the time a hard kill (not a clean
             // backgrounding transition, which is all apply()'s own
             // QueuedWork flush is tied to) happens right after this call.
-            withContext(Dispatchers.IO) { pendingStore.save(conversationId, echo) }
-            performSend(echo)
+            val saved = withContext(Dispatchers.IO) { pendingStore.save(conversationId, echo) }
+            if (saved) {
+                performSend(echo)
+            } else {
+                // The one thing this save was for -- resuming after a process
+                // death -- can't be honored if it didn't durably land. Must not
+                // still fire the network call as if it had: that would send a
+                // question process death could silently lose track of, with
+                // the UI having told the technician it was safely queued.
+                rejectPendingQuestion(echo, "Couldn't save your question.")
+            }
         }
     }
 
