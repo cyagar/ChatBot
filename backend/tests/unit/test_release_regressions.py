@@ -809,6 +809,48 @@ def test_test_fixture_refuses_a_database_url_identical_to_production(tmp_path, m
     )
 
 
+def test_known_production_host_is_refused_even_with_no_backend_env_file(tmp_path, monkeypatch):
+    """_refuse_if_production_database's comparison against backend/.env is a
+    no-op in every clean checkout and in CI (no backend/.env exists there at
+    all) -- _refuse_known_production_host is the independent check that
+    still catches a mistakenly copied production URL in exactly that case,
+    since it's a literal, hardcoded denylist, not something read from a
+    file that might be absent."""
+    import tests.conftest as conftest_module
+
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+        conftest_module._refuse_known_production_host(
+            "postgresql://user:pw@ep-square-paper-axh8e2d0-pooler.c-4.us-east-2.aws.neon.tech/neondb",
+            "DATABASE_URL",
+        )
+    # A genuinely different host must not raise.
+    conftest_module._refuse_known_production_host(
+        "postgresql://user:pw@ep-purple-meadow-ax3rmihl-pooler.c-4.us-east-2.aws.neon.tech/neondb",
+        "DATABASE_URL",
+    )
+
+
+def test_destructive_tests_require_an_explicit_opt_in_outside_ci(monkeypatch):
+    """Running the suite locally against a real, persistent test database
+    must be a conscious choice, not an accident of whatever happens to be in
+    the environment -- CI opts in implicitly (GitHub Actions always sets
+    CI=true, and its workflow only ever points this at its own disposable
+    Postgres service container)."""
+    import tests.conftest as conftest_module
+
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("ALLOW_DESTRUCTIVE_TESTS", raising=False)
+    with pytest.raises(RuntimeError, match="ALLOW_DESTRUCTIVE_TESTS"):
+        conftest_module._require_destructive_test_opt_in()
+
+    monkeypatch.setenv("ALLOW_DESTRUCTIVE_TESTS", "1")
+    conftest_module._require_destructive_test_opt_in()  # must not raise
+
+    monkeypatch.delenv("ALLOW_DESTRUCTIVE_TESTS", raising=False)
+    monkeypatch.setenv("CI", "true")
+    conftest_module._require_destructive_test_opt_in()  # must not raise
+
+
 def test_eval_script_refuses_without_a_disposable_clone(tmp_path):
     """The eval script must require EVAL_DATABASE_URL/EVAL_DATABASE_URL_UNPOOLED
     pointing at a disposable clone, refusing hard (before any migration or

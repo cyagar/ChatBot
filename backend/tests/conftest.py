@@ -1,5 +1,7 @@
+import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 from dotenv import dotenv_values
@@ -12,6 +14,43 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # backend/.env's production DATABASE_URL, no matter what's ambient.
 TEST_ENV_FILE = Path(__file__).resolve().parent.parent / ".env.test"
 PROD_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+# This project's actual production Neon endpoints, literal -- not read from
+# backend/.env, specifically so this check still catches a mistakenly
+# copied production URL in a checkout that has no backend/.env at all (every
+# clean clone, and CI, which uses its own disposable local Postgres service
+# and never reaches this literal anyway). Update this set if the production
+# branch is ever recreated under a new Neon endpoint id.
+_KNOWN_PRODUCTION_HOSTS = frozenset({
+    "ep-square-paper-axh8e2d0-pooler.c-4.us-east-2.aws.neon.tech",
+    "ep-square-paper-axh8e2d0.c-4.us-east-2.aws.neon.tech",
+})
+
+
+def _refuse_known_production_host(url: str, var_name: str) -> None:
+    host = urlparse(url).hostname
+    if host in _KNOWN_PRODUCTION_HOSTS:
+        raise RuntimeError(
+            f"Refusing to run tests: {var_name} resolves to a known production Neon endpoint "
+            f"({host}). Tests run migrations and an unconditional TRUNCATE ... CASCADE against "
+            f"this database. Point {var_name} in {TEST_ENV_FILE} at a genuinely separate database."
+        )
+
+
+def _require_destructive_test_opt_in() -> None:
+    """TRUNCATE ... CASCADE against every table is destructive by design --
+    CI opts in implicitly (GitHub Actions sets CI=true, and its workflow
+    only ever points this at its own disposable local Postgres service
+    container, never at Neon at all). A local run against a real, persistent
+    Neon test branch must opt in explicitly, so running the suite is never
+    an accident of an inherited environment."""
+    if os.environ.get("CI") or os.environ.get("ALLOW_DESTRUCTIVE_TESTS"):
+        return
+    raise RuntimeError(
+        "Refusing to run tests: this would TRUNCATE every table in the configured test "
+        "database. Set ALLOW_DESTRUCTIVE_TESTS=1 to confirm DATABASE_URL in "
+        f"{TEST_ENV_FILE} is a genuinely disposable/test database, then re-run."
+    )
 
 
 def _refuse_if_production_database(url: str, var_name: str) -> None:
@@ -44,6 +83,7 @@ def test_env(tmp_path, monkeypatch):
     """Isolated settings + a migrated Postgres test-branch DB per test. Uses
     env vars (not the developer's backend/.env) so tests never touch
     production data."""
+    _require_destructive_test_opt_in()
     if not TEST_ENV_FILE.is_file():
         raise RuntimeError(
             f"{TEST_ENV_FILE} is missing. Tests must not fall back to "
@@ -57,6 +97,7 @@ def test_env(tmp_path, monkeypatch):
         value = test_db_vars.get(key)
         if not value:
             raise RuntimeError(f"{TEST_ENV_FILE} is missing {key}.")
+        _refuse_known_production_host(value, key)
         _refuse_if_production_database(value, key)
         monkeypatch.setenv(key, value)
 
