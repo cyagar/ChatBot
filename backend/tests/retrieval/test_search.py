@@ -382,6 +382,26 @@ def test_deactivated_document_excluded_from_retrieval(test_env):
     assert 1 not in matched_ids
 
 
+def test_hydrate_itself_excludes_a_chunk_whose_document_was_deactivated(test_env):
+    """lexical_search and vector_search each open their own connection, with
+    no shared snapshot across them or with _hydrate -- a document could be
+    deactivated, un-approved, rolled back or superseded in the gap between
+    one of those calls selecting a chunk_id and _hydrate resolving it.
+    Calling _hydrate directly with a chunk_id from an already-deactivated
+    document (bypassing lexical_search/vector_search's own filtering
+    entirely) proves hydration re-checks eligibility itself rather than
+    trusting it was already checked upstream."""
+    with get_conn() as conn:
+        _seed_two_machines_with_similar_language(conn)
+        conn.execute("UPDATE documents SET deactivated_at = now() WHERE id = 1")
+
+    from app.retrieval.search import _hydrate
+
+    hydrated = _hydrate([1, 2])
+    assert 1 not in hydrated
+    assert 2 in hydrated
+
+
 def test_superseded_document_is_excluded_from_retrieval_not_merely_penalized(test_env):
     """A superseded revision must be excluded from retrieval, not merely
     rank-penalized -- a superseded manual isn't a weaker answer, it's a

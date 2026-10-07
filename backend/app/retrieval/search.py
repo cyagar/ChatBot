@@ -183,10 +183,20 @@ def reciprocal_rank_fusion(
     return fused
 
 
-def _hydrate(chunk_ids: list[int]) -> dict[int, RetrievedChunk]:
+def _hydrate(chunk_ids: list[int], include_superseded: bool = False) -> dict[int, RetrievedChunk]:
+    """lexical_search/vector_search already restrict their candidates to
+    eligible documents, but each opens its own connection with no shared
+    snapshot across the two of them or this hydration step -- an admin
+    deactivating, un-approving or rolling back a document between those
+    calls and this one would otherwise let an ineligible chunk's content
+    through anyway, since hydration itself re-reads current document state
+    rather than trusting the eligibility already checked upstream. The same
+    filters are applied again here for that reason, not as a stylistic
+    match to the other two functions."""
     if not chunk_ids:
         return {}
     placeholders = ",".join("%s" for _ in chunk_ids)
+    revision_sql = _revision_filter_sql(include_superseded)
     sql = f"""
         SELECT c.id AS chunk_id, c.document_id, c.content, c.page_number,
                c.section_heading, c.chunk_type,
@@ -196,9 +206,13 @@ def _hydrate(chunk_ids: list[int]) -> dict[int, RetrievedChunk]:
         JOIN documents d ON d.id = c.document_id
         LEFT JOIN manufacturers m ON m.id = d.manufacturer_id
         WHERE c.id IN ({placeholders})
+          AND d.status IN ('indexed','partial')
+          AND d.deactivated_at IS NULL
+          AND d.review_status = 'approved'
+          {revision_sql}
     """
     with get_conn() as conn:
-        rows = conn.execute(sql, chunk_ids).fetchall()
+        rows = conn.execute(sql, [*chunk_ids]).fetchall()
     return {
         r["chunk_id"]: RetrievedChunk(
             chunk_id=r["chunk_id"],
@@ -276,7 +290,7 @@ def hybrid_search(
 
     lexical_map = dict(lexical)
     vector_map = dict(vector)
-    hydrated = _hydrate(list(fused.keys()))
+    hydrated = _hydrate(list(fused.keys()), include_superseded=include_superseded)
 
     results: list[RetrievedChunk] = []
     for chunk_id, fused_score in fused.items():
