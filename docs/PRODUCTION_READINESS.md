@@ -27,8 +27,8 @@ Owner column: `dev` = builders, `owner` = ceyhun@hmwagner.com.
 
 | Gate | Owner | Status | Evidence / what remains |
 |---|---|---|---|
-| Backend CI green on the release commit | dev | Open | Record the run URL for the tag. |
-| Android workflow valid and jobs run | dev | Open | `android-ci.yml` no longer references `secrets` in step conditions and `workflow-lint.yml` runs actionlint; confirm the first GitHub run creates jobs. |
+| Backend CI green on the release commit | dev | Closed | `a202f49`: https://github.com/cyagar/ChatBot/actions/runs/37641371054. Two real test bugs (hardcoded pipeline-version assumptions) and a dependency CVE (pyjwt) were found and fixed to get here -- see that commit. |
+| Android workflow valid and jobs run | dev | Closed | `a202f49`: https://github.com/cyagar/ChatBot/actions/runs/37641370896. A flaky real-time test timeout (2s, too tight for a cold CI runner) was found and fixed to get here. |
 | Signed release built by the release workflow and verified | owner | Owner | Needs the five signing secrets in GitHub, the keystore backed up outside the build machine, then a run of **Android release**. |
 | Non-demo version, real icon | dev | Closed | `versionName 1.0.0`, `versionCode 7`, adaptive launcher icon. Increment `versionCode` for every distributed build. |
 | Release record filled for the exact APK; clean and upgrade install tested on tablet and phone | owner | Owner | `RELEASE_RECORD_TEMPLATE.md`. No phone run recorded. |
