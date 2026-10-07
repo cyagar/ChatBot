@@ -23,7 +23,7 @@ from app.retrieval.embeddings import blob_to_vector, embed_query, embedding_fing
 logger = logging.getLogger(__name__)
 
 RRF_K = 60          # reciprocal-rank-fusion damping constant
-CANDIDATE_POOL = 50
+CANDIDATE_POOL = 100
 MIN_CONTENT_CHARS_FOR_RESULT = 4  # excludes near-empty extraction-noise chunks; see hybrid_search
 
 

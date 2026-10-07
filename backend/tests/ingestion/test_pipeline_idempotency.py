@@ -117,12 +117,12 @@ def test_unchanged_file_at_a_stale_pipeline_version_is_flagged_not_silently_skip
 ):
     """A document whose bytes never change must not be skipped forever
     regardless of whether extraction/chunking logic changed since it was
-    last processed. Simulates a pipeline version bump (CURRENT_CHUNKING_VERSION
-    going from 1 to 2) and confirms an otherwise-unchanged file is reported
-    as needs_reprocessing, not silently absorbed into skipped_unchanged --
-    and that it is NOT auto-reprocessed (the document's chunking_version in
-    the DB stays at what actually produced its current chunks, not the new
-    code's version, since nothing re-chunked it)."""
+    last processed. Simulates a pipeline version bump and confirms an
+    otherwise-unchanged file is reported as needs_reprocessing, not silently
+    absorbed into skipped_unchanged -- and that it is NOT auto-reprocessed
+    (the document's chunking_version in the DB stays at what actually
+    produced its current chunks, not the new code's version, since nothing
+    re-chunked it)."""
     pdf = make_pdf(["Content about the ice cream machine compressor cycle."])
     shutil.copy(pdf, manuals_dir / pdf.name)
     source = FakeDirectorySource(manuals_dir)
@@ -131,7 +131,8 @@ def test_unchanged_file_at_a_stale_pipeline_version_is_flagged_not_silently_skip
     assert first.counts().get("indexed") == 1
 
     import app.ingestion.pipeline as pipeline_module
-    monkeypatch.setattr(pipeline_module, "CURRENT_CHUNKING_VERSION", 2)
+    original_version = pipeline_module.CURRENT_CHUNKING_VERSION
+    monkeypatch.setattr(pipeline_module, "CURRENT_CHUNKING_VERSION", original_version + 1)
 
     second = ingest_all(source=source, embed=False)
     assert second.counts() == {"needs_reprocessing": 1}
@@ -140,7 +141,9 @@ def test_unchanged_file_at_a_stale_pipeline_version_is_flagged_not_silently_skip
         doc = conn.execute(
             "SELECT chunking_version, status FROM documents WHERE status = 'indexed'"
         ).fetchone()
-    assert doc["chunking_version"] == 1, "not auto-reprocessed -- version stays at what actually produced its chunks"
+    assert doc["chunking_version"] == original_version, (
+        "not auto-reprocessed -- version stays at what actually produced its chunks"
+    )
     assert doc["status"] == "indexed", "the document itself is untouched, only flagged"
 
 

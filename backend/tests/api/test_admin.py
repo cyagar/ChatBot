@@ -3,6 +3,8 @@ import threading
 from fastapi.testclient import TestClient
 
 from app.db import get_conn
+from app.ingestion.chunking import CURRENT_CHUNKING_VERSION
+from app.ingestion.extractors import CURRENT_EXTRACTION_VERSION
 from app.main import app
 from tests.conftest import register_test_user
 
@@ -22,9 +24,11 @@ def _seed_document(conn) -> int:
     conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
     cur = conn.execute(
         "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
-        "file_type, sha256, byte_size, status, manufacturer_id, doc_type, title, is_current_revision) "
+        "file_type, sha256, byte_size, status, manufacturer_id, doc_type, title, is_current_revision, "
+        "extraction_version, chunking_version) "
         "VALUES ('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
-        "'indexed', 1, 'service_repair', 'Axiom Service Manual', true) RETURNING id"
+        "'indexed', 1, 'service_repair', 'Axiom Service Manual', true, %s, %s) RETURNING id",
+        (CURRENT_EXTRACTION_VERSION, CURRENT_CHUNKING_VERSION),
     )
     doc_id = cur.fetchone()["id"]
     conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (%s, 1)", (doc_id,))
@@ -50,9 +54,8 @@ def test_list_documents_returns_seeded_document(test_env):
 
 
 def test_document_at_current_pipeline_version_does_not_need_reprocessing(test_env):
-    """Migration 0008 defaults extraction_version/chunking_version to 1,
-    matching CURRENT_EXTRACTION_VERSION/CURRENT_CHUNKING_VERSION today -- the
-    existing corpus must not be retroactively flagged as stale on upgrade."""
+    """A document already at the code's current extraction/chunking version
+    must not be flagged as needing reprocessing."""
     with get_conn() as conn:
         doc_id = _seed_document(conn)
     _register_admin()

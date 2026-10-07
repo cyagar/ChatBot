@@ -20,7 +20,7 @@ psycopg[binary]==3.2.10
 
 # --- Auth / security ---
 bcrypt==5.0.0
-pyjwt==2.14.0
+pyjwt==2.15.0
 slowapi==0.1.9
 
 # --- Document processing ---
