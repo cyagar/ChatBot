@@ -660,7 +660,11 @@ def test_a_required_warning_is_added_even_when_the_model_omits_it():
     })
     result = parse_and_validate(raw, passages, "test")
     assert result is not None
-    assert result.safety_warnings == ["WARNING: Disconnect power before servicing."]
+    # The warning's source passage (chunk_id=1) is the same one the step
+    # already cited, so it reuses that citation's marker rather than
+    # creating a second entry for the same chunk.
+    citation_index = {c.chunk_id: i + 1 for i, c in enumerate(result.citations)}
+    assert result.safety_warnings == [f"WARNING: Disconnect power before servicing. [{citation_index[1]}]"]
 
 
 def test_a_required_warning_is_added_even_from_a_passage_the_model_never_cited():
@@ -682,7 +686,11 @@ def test_a_required_warning_is_added_even_from_a_passage_the_model_never_cited()
     })
     result = parse_and_validate(raw, passages, "test")
     assert result is not None
-    assert result.safety_warnings == ["WARNING: Disconnect power before servicing."]
+    # The warning's source passage (chunk_id=2) was never cited by anything
+    # else, so a new citation is created for it, distinct from the step's.
+    citation_index = {c.chunk_id: i + 1 for i, c in enumerate(result.citations)}
+    assert result.safety_warnings == [f"WARNING: Disconnect power before servicing. [{citation_index[2]}]"]
+    assert citation_index[2] != citation_index[1]
 
 
 def test_a_required_warning_is_found_after_a_heading_not_just_at_the_start_of_the_excerpt():
@@ -701,7 +709,8 @@ def test_a_required_warning_is_found_after_a_heading_not_just_at_the_start_of_th
     })
     result = parse_and_validate(raw, passages, "test")
     assert result is not None
-    assert result.safety_warnings == ["WARNING: Disconnect power before servicing."]
+    citation_index = {c.chunk_id: i + 1 for i, c in enumerate(result.citations)}
+    assert result.safety_warnings == [f"WARNING: Disconnect power before servicing. [{citation_index[1]}]"]
 
 
 def test_two_clauses_in_one_sentence_in_the_correct_order_still_passes():
@@ -759,4 +768,105 @@ def test_a_bare_list_marker_number_in_a_claim_does_not_impose_a_bogus_order():
         "Water temperature in the tank does not meet the ready temperature. "
         "1. Tank Heater failure. 2. Control Board/Thermistor failure",
         excerpt,
+    ) is not None
+
+
+# A claim word missing from its matched excerpt sentence, whose registered
+# opposite IS in that sentence, states the reverse of what the excerpt says
+# ("above" for "below", "downstream" for "upstream") -- every other word can
+# still match, in the excerpt's own order, so only an explicit opposite-pair
+# check (not the generic unmatched-word allowance, which would otherwise
+# treat the swapped word as just a reworded one) catches it. Parametrized
+# across claim lengths because the generic allowance is zero below 5 content
+# words, 1 from 5-11, and 2 at 12+ -- a reversal must be rejected at every
+# tier, not just the one with no allowance to hide behind.
+@pytest.mark.parametrize(("claim", "excerpt"), [
+    ("Keep the tank above 150F.", "Keep the tank below 150F."),
+    (
+        "Keep the final rinse tank above 150F during the entire cycle.",
+        "Keep the final rinse tank below 150F during the entire cycle.",
+    ),
+    (
+        "Keep the final rinse tank temperature above 150F during the entire wash and rinse cycle for best results.",
+        "Keep the final rinse tank temperature below 150F during the entire wash and rinse cycle for best results.",
+    ),
+    ("Water flows downstream of the filter.", "Water flows upstream of the filter."),
+    ("Turn the inlet valve clockwise.", "Turn the inlet valve counterclockwise."),
+])
+def test_an_opposite_word_substitution_is_rejected_at_every_allowance_tier(claim, excerpt):
+    assert _single_claim(claim, excerpt) is None
+
+
+# bool("false"), bool(1) and bool(None) are all True/False in ways that
+# don't reflect the JSON value's actual type -- a provider response must be
+# rejected outright when is_no_answer or confidence carry a value the
+# contract doesn't define, not have it silently coerced into some other
+# meaning.
+@pytest.mark.parametrize("bad_is_no_answer", ["false", "true", 1, 0, None, [], {}])
+def test_a_non_boolean_is_no_answer_is_rejected(bad_is_no_answer):
+    passages = [_passage(1, 1, "Disconnect power.")]
+    raw = json.dumps({
+        "is_no_answer": bad_is_no_answer,
+        "claims": [{"text": "Disconnect power.", "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
+
+
+@pytest.mark.parametrize("bad_confidence", ["medium", "LOW", 1, True, [], {}])
+def test_an_invalid_confidence_value_is_rejected(bad_confidence):
+    passages = [_passage(1, 1, "Disconnect power.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "confidence": bad_confidence,
+        "claims": [{"text": "Disconnect power.", "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
+
+
+def test_a_missing_confidence_field_still_passes_as_high_confidence():
+    passages = [_passage(1, 1, "Disconnect power.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Disconnect power.", "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is not None
+
+
+@pytest.mark.parametrize("raw", [
+    "not json at all",
+    "null",
+    "42",
+    '["a", "list", "not", "an", "object"]',
+    '{"is_no_answer": false, "claims": "not a list", "steps": [], "warnings": []}',
+    '{"is_no_answer": false, "claims": [{"text": 5, "cited_excerpt_numbers": [1]}], "steps": [], "warnings": []}',
+    '{"is_no_answer": false, "claims": [{"text": "x"}], "steps": [], "warnings": []}',  # missing cited_excerpt_numbers
+    'Here is my answer: {"is_no_answer": false, "claims": [{"text": "Disconnect power.", '
+    '"cited_excerpt_numbers": [1]}], "steps": [], "warnings": []} extra prose after',
+])
+def test_malformed_or_schema_violating_provider_responses_are_rejected(raw):
+    passages = [_passage(1, 1, "Disconnect power.")]
+    # The "extra prose" case above is deliberately not rejected by this
+    # assertion alone -- parse_and_validate's regex extracts the embedded
+    # {...} object first (see its own docstring), so that one case is
+    # expected to parse successfully; every other row here has no valid
+    # claims/steps and must fail the "at least one material claim or step"
+    # check regardless.
+    result = parse_and_validate(raw, passages, "test")
+    if "extra prose" in raw:
+        assert result is not None
+    else:
+        assert result is None
+
+
+def test_a_passage_stating_both_sides_of_an_opposite_pair_is_not_a_false_positive():
+    """The opposite-pair check must only fire when the claim's word is absent
+    from the matched sentence and its opposite is present there instead -- a
+    sentence that legitimately states both sides (a dual threshold) must not
+    trip it just because the opposite word also appears somewhere in it."""
+    assert _single_claim(
+        "Keep the tank above 120F.",
+        "Keep the tank above 120F and below 150F.",
     ) is not None

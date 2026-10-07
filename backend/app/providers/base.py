@@ -302,6 +302,31 @@ _POLARITY_WORDS = frozenset({"not", "no", "never", "cannot", "without", "only", 
 # before them.
 _RELATIONAL_STEMS = frozenset({"to", "from", "by"})
 
+# A claim word whose matched excerpt line contains its registered opposite
+# but not the word itself is a reversed instruction, not a reworded one --
+# "below 150F" rewritten as "above 150F" keeps every other word and even
+# stays in order, so the generic unmatched-word allowance below would
+# otherwise absorb it as if it were just a reworded label. Most direction/
+# state antonyms ("open"/"close", "raise"/"lower", "enable"/"disable", ...)
+# are already in _CRITICAL_STEMS, which rejects outright whenever a claim
+# word from that set is missing from the matched line -- this covers the
+# pairs that aren't (spatial/rotational/flow direction, electrical on/off,
+# sign), checked independently of _CRITICAL_STEMS so it still catches a
+# reversal even if the specific word on either side of the pair is never
+# added there.
+_OPPOSITE_WORD_PAIRS: tuple[tuple[str, str], ...] = (
+    ("above", "below"),
+    ("over", "under"),
+    ("upstream", "downstream"),
+    ("clockwise", "counterclockwise"),
+    ("inlet", "outlet"),
+    ("forward", "reverse"),
+    ("left", "right"),
+    ("positive", "negative"),
+    ("minimum", "maximum"),
+    ("on", "off"),
+)
+
 
 def _prose_tokens(text: str) -> list[str]:
     lowered = re.sub(r"-[ \t]*\r?\n[ \t]*", "", text.lower())  # rejoin words hyphenated across lines
@@ -316,6 +341,16 @@ def _stem(word: str) -> str:
             word = word[: -len(suffix)]
             break
     return word.rstrip("e")
+
+
+# Stemmed lookup for _OPPOSITE_WORD_PAIRS, built via _stem so it stays in
+# sync with how claim/excerpt words are actually stemmed for comparison.
+_OPPOSITE_STEMS: dict[str, str] = {}
+for _opp_a, _opp_b in _OPPOSITE_WORD_PAIRS:
+    _stem_a, _stem_b = _stem(_opp_a), _stem(_opp_b)
+    _OPPOSITE_STEMS[_stem_a] = _stem_b
+    _OPPOSITE_STEMS[_stem_b] = _stem_a
+del _opp_a, _opp_b, _stem_a, _stem_b
 
 
 def _merge_unit_suffixes(tokens: list[str]) -> list[str]:
@@ -540,8 +575,15 @@ def _clause_grounded(
     if coverage < _MIN_LINE_COVERAGE:
         return None
 
-    unmatched = [w for w in claim_stems if w not in set(window_stems)]
+    window_stem_set = set(window_stems)
+    unmatched = [w for w in claim_stems if w not in window_stem_set]
     if any(w in _CRITICAL_STEMS for w in unmatched):
+        return None
+    # A claim word missing from the window whose registered opposite IS in
+    # the window is a reversed instruction, never an allowance-eligible
+    # reworded one -- checked unconditionally, before the allowance below
+    # gets a chance to absorb it as if it were harmless.
+    if any(w in _OPPOSITE_STEMS and _OPPOSITE_STEMS[w] in window_stem_set for w in unmatched):
         return None
     if len(unmatched) > _unmatched_allowance(claim_stems):
         return None
@@ -649,16 +691,21 @@ def _warning_supported(warning_text: str, cited_content: str) -> bool:
     return True
 
 
-def _extract_required_warnings(passages: list) -> list[str]:
+def _extract_required_warnings(passages: list) -> list[tuple[object, str]]:
     """Every WARNING/CAUTION/DANGER/NOTICE/IMPORTANT-labeled sentence found
     in the given excerpts, taken directly from the source text rather than
     from the model -- like detect_conflict, a provider has no channel through
     which to add or omit one of these, so it cannot silently leave a labeled
     hazard out of its own "warnings" list. This only reaches labeled
     passages; an unlabeled prerequisite the manual states as an ordinary
-    sentence is not covered."""
+    sentence is not covered.
+
+    Returns (source passage, warning text) pairs, not bare text -- the
+    caller needs the source passage to give a warning added this way the
+    same citation/marker traceability a model-cited warning already gets,
+    instead of leaving it as a string with no link back to its excerpt."""
     seen: set[str] = set()
-    out: list[str] = []
+    out: list[tuple[object, str]] = []
     for p in passages:
         for line in _excerpt_lines(p.content):
             # A label can start the whole _excerpt_lines unit, or -- since
@@ -686,7 +733,7 @@ def _extract_required_warnings(passages: list) -> list[str]:
                     key = _normalize_ws(candidate)
                     if key not in seen:
                         seen.add(key)
-                        out.append(candidate)
+                        out.append((p, candidate))
                     break
                 offset += len(physical) + 1  # +1 for the newline split() consumed
     return out
@@ -745,16 +792,16 @@ def _cited_content(item: _ClaimItem, passages: list) -> str:
     return "\n".join(passages[n - 1].content for n in item.excerpt_numbers)
 
 
+def _citation_from_passage(p) -> Citation:
+    return Citation(
+        chunk_id=p.chunk_id, document_id=p.document_id, filename=p.original_filename,
+        title=p.title, page_number=p.page_number, section_heading=p.section_heading,
+        revision=p.revision, excerpt=p.content[:500],
+    )
+
+
 def _item_citations(item: _ClaimItem, passages: list) -> list[Citation]:
-    out = []
-    for n in item.excerpt_numbers:
-        p = passages[n - 1]
-        out.append(Citation(
-            chunk_id=p.chunk_id, document_id=p.document_id, filename=p.original_filename,
-            title=p.title, page_number=p.page_number, section_heading=p.section_heading,
-            revision=p.revision, excerpt=p.content[:500],
-        ))
-    return out
+    return [_citation_from_passage(passages[n - 1]) for n in item.excerpt_numbers]
 
 
 def failing_items(raw_text: str, passages: list, machine_label: str | None = None) -> list[str]:
@@ -816,7 +863,12 @@ def parse_and_validate(
     if not isinstance(data, dict):
         return None
 
-    is_no_answer = bool(data.get("is_no_answer", False))
+    # bool("false") and bool(1) are both True in Python -- a provider
+    # returning the JSON string "false" or the number 1 for this field must
+    # be rejected as malformed, not silently coerced into true.
+    is_no_answer = data.get("is_no_answer", False)
+    if not isinstance(is_no_answer, bool):
+        return None
 
     if is_no_answer:
         # The model's own explanation is never displayed: free prose has no
@@ -826,6 +878,15 @@ def parse_and_validate(
             is_no_answer=True,
             provider=provider_name,
         )
+
+    # Absent is "high confidence" (see this function's own docstring); any
+    # other value must be one of the two the contract actually defines, not
+    # silently treated as "not low" the same as a legitimate omission --
+    # that would mask a provider sending a malformed value for a field this
+    # function's caller-visible behavior (the low-confidence caveat) depends on.
+    confidence = data.get("confidence")
+    if confidence is not None and confidence not in ("low", "high"):
+        return None
 
     claims = _parse_items(data.get("claims"), passages)
     steps = _parse_items(data.get("steps"), passages)
@@ -916,11 +977,21 @@ def parse_and_validate(
     # text, since the two can name the same sentence.
     seen_warning_keys = {_normalize_ws(w.text) for w in warnings}
     safety_warnings = [w.text for w in warnings]
-    for text in _extract_required_warnings(passages):
+    for source_passage, text in _extract_required_warnings(passages):
         key = _normalize_ws(text)
-        if key not in seen_warning_keys:
-            seen_warning_keys.add(key)
-            safety_warnings.append(text)
+        if key in seen_warning_keys:
+            continue
+        seen_warning_keys.add(key)
+        # Gives this warning the same [n] citation marker a model-cited
+        # claim/step/warning already carries, instead of leaving it as text
+        # with no link back to the excerpt it was pulled from -- reusing an
+        # existing citation for the same chunk if the model already cited
+        # it, rather than ever creating a duplicate entry for one chunk_id.
+        if source_passage.chunk_id not in seen_chunk_ids:
+            seen_chunk_ids.add(source_passage.chunk_id)
+            citations.append(_citation_from_passage(source_passage))
+            citation_index[source_passage.chunk_id] = len(citations)
+        safety_warnings.append(f"{text} [{citation_index[source_passage.chunk_id]}]")
 
     return GeneratedAnswer(
         answer="\n".join(lines),
