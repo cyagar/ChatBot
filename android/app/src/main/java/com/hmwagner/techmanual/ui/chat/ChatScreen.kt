@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,6 +31,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -37,9 +39,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -75,6 +79,13 @@ import com.hmwagner.techmanual.network.CitationOut
 import com.hmwagner.techmanual.network.MessageOut
 import com.hmwagner.techmanual.ui.common.LogoutAction
 import com.hmwagner.techmanual.ui.theme.warningColor
+
+// Asymmetric, messaging-app-style bubble shapes: a small "tail" corner on
+// the side nearest the edge the bubble is pinned to, instead of every
+// message reading as an identical, uniformly-rounded card regardless of
+// who sent it.
+private val UserBubbleShape = RoundedCornerShape(20.dp, 20.dp, 4.dp, 20.dp)
+private val AssistantBubbleShape = RoundedCornerShape(20.dp, 20.dp, 20.dp, 4.dp)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -123,6 +134,7 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                         )
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
                 actions = {
                     // Null in two-pane layout (AppNav.kt's TwoPaneHome): the
                     // machine list is already visible in the left pane, so
@@ -237,6 +249,7 @@ private fun PendingUserBubble(
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Card(
             modifier = Modifier.widthIn(max = 480.dp),
+            shape = UserBubbleShape,
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
         ) {
             Column(Modifier.padding(12.dp)) {
@@ -411,6 +424,7 @@ private fun MessageBubble(
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Card(
             modifier = Modifier.widthIn(max = 560.dp),
+            shape = if (isUser) UserBubbleShape else AssistantBubbleShape,
             colors = CardDefaults.cardColors(
                 containerColor = when {
                     isUser -> MaterialTheme.colorScheme.primaryContainer
@@ -582,30 +596,37 @@ private fun MessageBubble(
 @Composable
 private fun Composer(state: ChatUiState, vm: ChatViewModel) {
     val maxLen = 2000
-    Row(
-        // A plain Row (unlike NavigationBar/BottomAppBar) does not consume
-        // system-bar insets on its own. Without this, the composer -- and
-        // critically the send button -- render underneath the gesture
-        // navigation bar on edge-to-edge devices: touches there get eaten by
-        // the system's edge-swipe gesture handling instead of reaching the
-        // button.
-        modifier = Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(12.dp),
-        verticalAlignment = Alignment.Bottom,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        OutlinedTextField(
-            value = state.composerText,
-            onValueChange = { if (it.length <= maxLen) vm.onComposerChange(it) },
-            modifier = Modifier.weight(1f),
-            placeholder = { Text("Ask a question about the selected machine…") },
-            supportingText = { Text("${state.composerText.length} / $maxLen") },
-        )
-        // A second question waits until the pending one is answered or rejected.
-        IconButton(
-            onClick = vm::send,
-            enabled = !state.sending && state.pendingEcho == null && state.composerText.isNotBlank(),
+    // A surface distinct from the message list behind it, with its own top
+    // divider-by-tone rather than a hard line, so the composer reads as a
+    // fixed control strip instead of floating directly over whatever
+    // message happens to be scrolled underneath it.
+    Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shadowElevation = 3.dp) {
+        Row(
+            // A plain Row (unlike NavigationBar/BottomAppBar) does not consume
+            // system-bar insets on its own. Without this, the composer -- and
+            // critically the send button -- render underneath the gesture
+            // navigation bar on edge-to-edge devices: touches there get eaten by
+            // the system's edge-swipe gesture handling instead of reaching the
+            // button.
+            modifier = Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(12.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+            OutlinedTextField(
+                value = state.composerText,
+                onValueChange = { if (it.length <= maxLen) vm.onComposerChange(it) },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Ask a question about the selected machine…") },
+                supportingText = { Text("${state.composerText.length} / $maxLen") },
+                shape = MaterialTheme.shapes.large,
+            )
+            // A second question waits until the pending one is answered or rejected.
+            FilledIconButton(
+                onClick = vm::send,
+                enabled = !state.sending && state.pendingEcho == null && state.composerText.isNotBlank(),
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+            }
         }
     }
 }

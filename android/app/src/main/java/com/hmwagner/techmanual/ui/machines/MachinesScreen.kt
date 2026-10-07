@@ -1,6 +1,5 @@
 package com.hmwagner.techmanual.ui.machines
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -27,6 +26,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -39,7 +39,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hmwagner.techmanual.network.MachineOut
+import com.hmwagner.techmanual.ui.common.AppListCard
 import com.hmwagner.techmanual.ui.common.LogoutAction
+import com.hmwagner.techmanual.ui.common.transparentListItemColors
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,6 +57,7 @@ fun MachinesScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Ask about a machine") },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
                 actions = {
                     onSavedAnswersClick?.let { onClick ->
                         IconButton(onClick = onClick) {
@@ -88,6 +91,7 @@ fun MachinesScreen(
                     }
                 },
                 singleLine = true,
+                shape = MaterialTheme.shapes.large,
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -137,7 +141,7 @@ fun MachinesScreen(
                 onRefresh = vm::refresh,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             ) {
-                LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(listToShow, key = { it.id }) { machine ->
                         MachineRow(
                             machine,
@@ -160,28 +164,28 @@ private fun MachineRow(
     onClick: () -> Unit,
     onToggleFavorite: () -> Unit,
 ) {
-    ListItem(
-        headlineContent = { Text("${machine.manufacturer} ${machine.model_name}") },
-        supportingContent = {
-            val family = machine.family
-            val suffix = "${machine.document_count} manual(s)"
-            Text(if (family != null) "$family • $suffix" else suffix)
-        },
-        // Always present (not just when favorited) -- otherwise there is no
-        // way to favorite a machine that isn't already one. A tap here must
-        // not also select the machine, so this is its own IconButton rather
-        // than part of the row's clickable area.
-        leadingContent = {
-            IconButton(onClick = onToggleFavorite, enabled = enabled) {
-                if (machine.is_favorite) {
-                    Icon(Icons.Filled.Star, contentDescription = "Unfavorite")
-                } else {
-                    Icon(Icons.Outlined.StarOutline, contentDescription = "Favorite")
+    AppListCard(onClick = onClick, enabled = enabled) {
+        ListItem(
+            headlineContent = { Text("${machine.manufacturer} ${machine.model_name}") },
+            supportingContent = {
+                val family = machine.family
+                val suffix = "${machine.document_count} manual(s)"
+                Text(if (family != null) "$family • $suffix" else suffix)
+            },
+            // Always present (not just when favorited) -- otherwise there is no
+            // way to favorite a machine that isn't already one. A tap here must
+            // not also select the machine, so this is its own IconButton rather
+            // than part of the row's clickable area.
+            leadingContent = {
+                IconButton(onClick = onToggleFavorite, enabled = enabled) {
+                    if (machine.is_favorite) {
+                        Icon(Icons.Filled.Star, contentDescription = "Unfavorite", tint = MaterialTheme.colorScheme.tertiary)
+                    } else {
+                        Icon(Icons.Outlined.StarOutline, contentDescription = "Favorite")
+                    }
                 }
-            }
-        },
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(enabled = enabled, onClick = onClick),
-    )
+            },
+            colors = transparentListItemColors(),
+        )
+    }
 }

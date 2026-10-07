@@ -1,6 +1,5 @@
 package com.hmwagner.techmanual.ui.saved
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +21,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,7 +35,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hmwagner.techmanual.network.SavedAnswerOut
+import com.hmwagner.techmanual.ui.common.AppListCard
 import com.hmwagner.techmanual.ui.common.LogoutAction
+import com.hmwagner.techmanual.ui.common.transparentListItemColors
 
 /**
  * Technician-facing list of every answer saved from ChatScreen's "Save"
@@ -66,6 +68,7 @@ fun SavedAnswersScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to machines")
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
                 actions = { LogoutAction() },
             )
         },
@@ -93,7 +96,7 @@ fun SavedAnswersScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     } else {
-                        LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             items(state.answers, key = { it.answer.id }) { saved ->
                                 SavedAnswerRow(
                                     saved,
@@ -123,36 +126,38 @@ fun SavedAnswersScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SavedAnswerRow(saved: SavedAnswerOut, onClick: () -> Unit, onRemove: () -> Unit) {
-    ListItem(
-        headlineContent = { Text(saved.question ?: "Saved answer") },
-        trailingContent = {
-            IconButton(onClick = onRemove) {
-                Icon(Icons.Filled.Delete, contentDescription = "Remove saved answer")
-            }
-        },
-        supportingContent = {
-            Column {
-                Text(saved.machine_label ?: "No machine selected", style = MaterialTheme.typography.labelMedium)
-                if (saved.answer.has_withdrawn_source) {
-                    // A saved answer's source can be withdrawn AFTER it was
-                    // saved -- this bookmarks list must show the warning
-                    // here, not just after opening the full conversation.
+    AppListCard(onClick = onClick) {
+        ListItem(
+            headlineContent = { Text(saved.question ?: "Saved answer") },
+            trailingContent = {
+                IconButton(onClick = onRemove) {
+                    Icon(Icons.Filled.Delete, contentDescription = "Remove saved answer")
+                }
+            },
+            supportingContent = {
+                Column {
+                    Text(saved.machine_label ?: "No machine selected", style = MaterialTheme.typography.labelMedium)
+                    if (saved.answer.has_withdrawn_source) {
+                        // A saved answer's source can be withdrawn AFTER it was
+                        // saved -- this bookmarks list must show the warning
+                        // here, not just after opening the full conversation.
+                        Text(
+                            "Source withdrawn -- do not rely on this",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
                     Text(
-                        "Source withdrawn -- do not rely on this",
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.labelMedium,
+                        previewText(saved.answer.content),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall,
                     )
                 }
-                Text(
-                    previewText(saved.answer.content),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        },
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-    )
+            },
+            colors = transparentListItemColors(),
+        )
+    }
 }
 
 /**

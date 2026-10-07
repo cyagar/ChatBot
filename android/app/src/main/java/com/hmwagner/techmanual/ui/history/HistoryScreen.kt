@@ -1,6 +1,5 @@
 package com.hmwagner.techmanual.ui.history
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +20,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -33,7 +33,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hmwagner.techmanual.network.ConversationOut
+import com.hmwagner.techmanual.ui.common.AppListCard
 import com.hmwagner.techmanual.ui.common.LogoutAction
+import com.hmwagner.techmanual.ui.common.transparentListItemColors
 import com.hmwagner.techmanual.util.formatLocalTimestamp
 
 /**
@@ -68,6 +70,7 @@ fun HistoryScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to machines")
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
                 actions = { LogoutAction() },
             )
         },
@@ -99,7 +102,7 @@ fun HistoryScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     } else {
-                        LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             items(state.conversations, key = { it.id }) { conv ->
                                 ConversationRow(conv, onClick = { onConversationSelected(conv.id, conv.machine_label) })
                             }
@@ -125,16 +128,18 @@ fun HistoryScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ConversationRow(conv: ConversationOut, onClick: () -> Unit) {
-    ListItem(
-        headlineContent = { Text(conv.title ?: "New conversation") },
-        supportingContent = { Text(conv.machine_label ?: "No machine selected") },
-        trailingContent = {
-            Text(
-                formatLocalTimestamp(conv.updated_at),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        },
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-    )
+    AppListCard(onClick = onClick) {
+        ListItem(
+            headlineContent = { Text(conv.title ?: "New conversation") },
+            supportingContent = { Text(conv.machine_label ?: "No machine selected") },
+            trailingContent = {
+                Text(
+                    formatLocalTimestamp(conv.updated_at),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            colors = transparentListItemColors(),
+        )
+    }
 }
