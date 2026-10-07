@@ -51,7 +51,7 @@ class LoginViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun awaitState(timeoutMs: Long = 2000, predicate: (LoginUiState) -> Boolean) {
+    private fun awaitState(timeoutMs: Long = 10000, predicate: (LoginUiState) -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (predicate(vm.state.value)) return

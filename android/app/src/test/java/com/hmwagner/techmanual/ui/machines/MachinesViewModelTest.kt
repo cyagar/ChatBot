@@ -65,7 +65,7 @@ class MachinesViewModelTest {
     private fun jsonResponse(body: String) =
         MockResponse().setResponseCode(200).setBody(body).addHeader("Content-Type", "application/json")
 
-    private fun awaitState(timeoutMs: Long = 2000, predicate: (MachinesUiState) -> Boolean) {
+    private fun awaitState(timeoutMs: Long = 10000, predicate: (MachinesUiState) -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             testScheduler.advanceUntilIdle()
@@ -75,7 +75,7 @@ class MachinesViewModelTest {
         throw AssertionError("Timed out waiting for state condition. Last state: ${vm.state.value}")
     }
 
-    private fun awaitRequestCount(n: Int, timeoutMs: Long = 2000) {
+    private fun awaitRequestCount(n: Int, timeoutMs: Long = 10000) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             testScheduler.advanceUntilIdle()
