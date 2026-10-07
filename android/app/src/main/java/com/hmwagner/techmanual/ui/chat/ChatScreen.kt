@@ -57,6 +57,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
@@ -375,10 +376,10 @@ private fun FormattedAnswer(content: String) {
  * out-of-context digit right after the sentence.
  */
 @Composable
-private fun ClaimText(text: String, modifier: Modifier = Modifier) {
+private fun ClaimText(text: String, modifier: Modifier = Modifier, color: Color = Color.Unspecified) {
     val match = TRAILING_CITATION_MARKERS.find(text)
     if (match == null) {
-        Text(text, modifier = modifier)
+        Text(text, modifier = modifier, color = color)
         return
     }
     val body = text.substring(0, match.range.first)
@@ -386,8 +387,10 @@ private fun ClaimText(text: String, modifier: Modifier = Modifier) {
     val markerColor = MaterialTheme.colorScheme.onSurfaceVariant
     Text(
         buildAnnotatedString {
-            append(body)
-            append(" ")
+            withStyle(SpanStyle(color = color)) {
+                append(body)
+                append(" ")
+            }
             numbers.forEachIndexed { i, n ->
                 if (i > 0) append(" ")
                 withStyle(SpanStyle(fontSize = 11.sp, baselineShift = BaselineShift.Superscript, color = markerColor)) {
@@ -460,7 +463,11 @@ private fun MessageBubble(
                     msg.safety_warnings.forEach { warning ->
                         Row(verticalAlignment = Alignment.Top) {
                             Icon(Icons.Filled.Warning, contentDescription = null, tint = warningColor)
-                            Text(warning, color = warningColor, modifier = Modifier.padding(start = 6.dp))
+                            // A warning the server attached from a passage the model never
+                            // cited (see base.py's _extract_required_warnings) carries its
+                            // own trailing "[N]" marker, same as a claim/step line -- ClaimText
+                            // renders that as the same superscript footnote.
+                            ClaimText(warning, modifier = Modifier.padding(start = 6.dp), color = warningColor)
                         }
                     }
                 }
