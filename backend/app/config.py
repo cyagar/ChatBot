@@ -95,9 +95,9 @@ class Settings(BaseSettings):
     # manuals. Set this before any pilot.
     allowed_registration_domains: str = ""
 
-    # Backs GET /api/config. All four are read, not enforced -- a maintenance
-    # banner and a minimum-version nudge are UI concerns for whichever client
-    # reads this; nothing server-side blocks a request based on these values.
+    # Backs GET /api/config, and maintenance_mode/minimum_supported_version_code
+    # are also enforced server-side, independently of any client, by
+    # app/main.py's maintenance_and_version_gate middleware.
     maintenance_mode: bool = False
     maintenance_message: str = ""
     # minimum_supported_version is a human-readable label only -- nothing

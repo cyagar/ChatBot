@@ -142,6 +142,58 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(OriginCheckMiddleware)
 
+# Paths that must keep working regardless of maintenance_mode or a client's
+# reported version: config/health checks (a client needs these to even find
+# out it's blocked), auth (so an admin can still log in to lift maintenance),
+# admin (so an admin can still administer during the window), and the
+# non-API-prefixed static/docs surface.
+_GATE_EXEMPT_PREFIXES = ("/api/config", "/api/auth", "/api/admin", "/healthz", "/readyz", "/static", "/docs", "/redoc", "/openapi.json")
+
+
+@app.middleware("http")
+async def maintenance_and_version_gate(request: Request, call_next):
+    """GET /api/config already tells a client about maintenance_mode and
+    minimum_supported_version_code, and the Android app acts on that at
+    startup -- but that is advisory only: nothing stops a client that
+    ignores it (an old cached APK built before this check existed, a
+    modified client, or direct API use) from calling the real endpoints
+    during a declared maintenance window or below the minimum version.
+    Enforced here, server-side, on every request those endpoints
+    describe -- a client with no X-App-Version-Code header at all (any
+    release before this header was added) is let through on version,
+    exactly preserving today's advisory-only behavior for it; maintenance
+    mode still applies to it like everyone else."""
+    path = request.url.path
+    if not path.startswith("/api/") or path.startswith(_GATE_EXEMPT_PREFIXES):
+        return await call_next(request)
+
+    settings = get_settings()
+    if settings.maintenance_mode:
+        return JSONResponse(
+            status_code=503,
+            content=error_body(
+                request, 503,
+                settings.maintenance_message or "This app is temporarily in maintenance mode.",
+                code="MAINTENANCE_MODE", retryable=True,
+            ),
+        )
+
+    version_header = request.headers.get("x-app-version-code")
+    if version_header is not None:
+        try:
+            client_version = int(version_header)
+        except ValueError:
+            client_version = None
+        if client_version is not None and client_version < settings.minimum_supported_version_code:
+            return JSONResponse(
+                status_code=426,
+                content=error_body(
+                    request, 426, "This app version is no longer supported. Please update to continue.",
+                    code="UPGRADE_REQUIRED", retryable=False,
+                ),
+            )
+    return await call_next(request)
+
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):

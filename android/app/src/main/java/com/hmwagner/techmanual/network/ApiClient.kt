@@ -104,6 +104,19 @@ object ApiClient {
             level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC else HttpLoggingInterceptor.Level.NONE
         }
 
+        // Lets the server's own maintenance_and_version_gate middleware
+        // (backend/app/main.py) enforce minimum_supported_version_code, not
+        // just this app's own startup check in AppNav.kt -- a client that
+        // skips or predates that startup check (an old cached APK, direct
+        // API use) still identifies its version on every request.
+        val versionHeaderInterceptor = okhttp3.Interceptor { chain ->
+            chain.proceed(
+                chain.request().newBuilder()
+                    .header("X-App-Version-Code", BuildConfig.VERSION_CODE.toString())
+                    .build()
+            )
+        }
+
         val authExpiryInterceptor = okhttp3.Interceptor { chain ->
             val request = chain.request()
             val response = chain.proceed(request)
@@ -146,6 +159,7 @@ object ApiClient {
         okHttpClient = OkHttpClient.Builder()
             .cookieJar(cookieJar)
             .addInterceptor(logging)
+            .addInterceptor(versionHeaderInterceptor)
             .addInterceptor(authExpiryInterceptor)
             .addInterceptor(getRetryInterceptor)
             // Retrieval + provider call runs synchronously server-side (see

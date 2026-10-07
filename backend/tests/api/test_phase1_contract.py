@@ -138,6 +138,72 @@ def test_config_reflects_maintenance_mode(test_env, monkeypatch):
         get_settings.cache_clear()
 
 
+def test_maintenance_mode_blocks_api_routes_not_just_the_advisory_config_flag(test_env, monkeypatch):
+    """GET /api/config telling a client maintenance_mode=true is advisory --
+    nothing stops a client that ignores it (an old cached APK, a modified
+    client, direct API use) from still calling the real endpoints. The
+    server's own maintenance_and_version_gate middleware must reject them
+    independently of whether any client ever checked /api/config at all."""
+    from app.config import get_settings
+    monkeypatch.setenv("MAINTENANCE_MODE", "true")
+    get_settings.cache_clear()
+    try:
+        resp = client.get("/api/machines")
+        assert resp.status_code == 503
+        assert resp.json()["code"] == "MAINTENANCE_MODE"
+    finally:
+        monkeypatch.delenv("MAINTENANCE_MODE", raising=False)
+        get_settings.cache_clear()
+
+
+def test_maintenance_mode_does_not_block_config_auth_or_admin(test_env, monkeypatch):
+    """A client needs /api/config to even find out it's in maintenance, and
+    an admin needs /api/auth + /api/admin to still be able to log in and lift
+    maintenance -- these must stay reachable while everything else is
+    blocked."""
+    from app.config import get_settings
+    register_test_user(client, "maint-admin@example.com", role="administrator")
+    monkeypatch.setenv("MAINTENANCE_MODE", "true")
+    get_settings.cache_clear()
+    try:
+        assert client.get("/api/config").status_code == 200
+        assert client.get("/api/admin/machines").status_code == 200
+    finally:
+        monkeypatch.delenv("MAINTENANCE_MODE", raising=False)
+        get_settings.cache_clear()
+
+
+def test_a_client_below_the_minimum_version_code_is_rejected(test_env, monkeypatch):
+    from app.config import get_settings
+    register_test_user(client, "version-gate@example.com")
+    monkeypatch.setenv("MINIMUM_SUPPORTED_VERSION_CODE", "10")
+    get_settings.cache_clear()
+    try:
+        resp = client.get("/api/machines", headers={"X-App-Version-Code": "9"})
+        assert resp.status_code == 426
+        assert resp.json()["code"] == "UPGRADE_REQUIRED"
+
+        assert client.get("/api/machines", headers={"X-App-Version-Code": "10"}).status_code == 200
+    finally:
+        monkeypatch.delenv("MINIMUM_SUPPORTED_VERSION_CODE", raising=False)
+        get_settings.cache_clear()
+
+
+def test_a_client_sending_no_version_header_is_not_blocked_by_the_version_gate(test_env, monkeypatch):
+    """Every release before this header existed sends none at all -- the
+    version gate must not newly lock out clients that predate it; only a
+    client that DOES report a version below the minimum is rejected."""
+    from app.config import get_settings
+    register_test_user(client, "version-gate-no-header@example.com")
+    monkeypatch.setenv("MINIMUM_SUPPORTED_VERSION_CODE", "10")
+    get_settings.cache_clear()
+    try:
+        assert client.get("/api/machines").status_code == 200
+    finally:
+        monkeypatch.delenv("MINIMUM_SUPPORTED_VERSION_CODE", raising=False)
+        get_settings.cache_clear()
+
+
 def test_me_capabilities_differ_by_role(test_env):
     register_test_user(client, "phase1-tech@example.com", role="technician")
     tech_caps = client.get("/api/auth/me").json()["capabilities"]
