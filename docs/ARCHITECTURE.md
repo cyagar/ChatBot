@@ -103,12 +103,14 @@ gate) -- CPU-bound and will need re-measuring as the corpus grows.
   as a "claim" can't vanish while a hazardous step stays. A rejection
   triggers one repair attempt that names the failing items, then a fixed
   "could not verify" answer. Separately, every WARNING/CAUTION/DANGER/
-  NOTICE/IMPORTANT-labeled sentence in the excerpts the answer's own claims
-  and steps cite is attached to the response regardless of what the model's
-  own `warnings` list contains (`_extract_required_warnings`) -- a model that
-  grounds a step in a passage but leaves out the labeled hazard next to it
-  cannot make that hazard disappear; this only reaches labeled passages, not
-  an unlabeled prerequisite stated as an ordinary sentence. The
+  NOTICE/IMPORTANT-labeled sentence in every passage retrieval put in front
+  of the model for this question -- not just the ones its claims and steps
+  actually cite -- is attached to the response regardless of what the
+  model's own `warnings` list contains (`_extract_required_warnings`) -- a
+  model that grounds a step in one retrieved passage but leaves out a hazard
+  label that lives in a different retrieved passage it never cited cannot
+  make that hazard disappear; this only reaches labeled passages, not an
+  unlabeled prerequisite stated as an ordinary sentence. The
   technician-visible text is assembled server-side from validated lines with
   inline `[n]` citation markers; a no-answer response shows fixed server
   text, never model prose. Revision conflict notes are computed from
@@ -116,7 +118,12 @@ gate) -- CPU-bound and will need re-measuring as the corpus grows.
 
 These checks are lexical, not semantic entailment: a claim can still pass by
 selecting words from the excerpt in a way that reads misleadingly even in the
-excerpt's own order, so the excerpt stays one tap away as evidence. The
+excerpt's own order, so the excerpt stays one tap away as evidence. A direct
+opposite-word substitution (a claim stating "above" a threshold the excerpt
+actually states as "below" it, and the other direction/state pairs in
+`_OPPOSITE_WORD_PAIRS`) is rejected outright, independent of the generic
+unmatched-word allowance -- this does not generalize to every form of
+semantic reversal, only the registered pairs. The
 retrieval evaluation has been run against the live provider (9 of 11 cases,
 small-N; see PRODUCTION_READINESS.md for the two known corpus-quality
 exceptions, one of which is a safety-category retrieval miss, not merely a

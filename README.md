@@ -18,8 +18,10 @@ corpus, reviews, invitations and audit trail.
 ## Prerequisites
 
 - Python 3.12+ (3.14 is used for local development; the container uses 3.12).
-- A PostgreSQL 16+ database with the `pgvector` extension: a Neon project
-  (see `docs/OWNER_DECISION_GATE.md`) or a local instance.
+- A PostgreSQL 16+ database: a Neon project (see `docs/OWNER_DECISION_GATE.md`)
+  or a local instance. The `pgvector` extension is not required -- embeddings
+  are stored as `BYTEA` and compared with brute-force NumPy cosine similarity
+  at query time (see `embeddings` in `backend/migrations/0001_initial_schema.sql`).
 - Tesseract OCR (optional; needed only to index scanned pages). Set
   `TESSERACT_CMD` in `.env`.
 - Docker (optional; container deployment).

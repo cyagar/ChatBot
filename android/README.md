@@ -86,8 +86,12 @@ Before distributing a build:
 - A conversation loads its newest 200 messages; "Load earlier messages" pages
   backward.
 - The app fetches `/api/config` once at startup with a five-second timeout and
-  fails open (maintenance mode and minimum version are best-effort). Minimum
-  version compares dotted numeric parts of `versionName`.
+  fails open on that call (so a slow/unreachable config check never blocks
+  launch). Minimum version compares integer `BuildConfig.VERSION_CODE`
+  against `minimum_supported_version_code`, not `versionName`. The server
+  also enforces maintenance mode and the minimum version code on every
+  `/api/*` request independently (see `maintenance_and_version_gate` in
+  `backend/app/main.py`), not just via this startup check.
 
 ## Known limitations
 

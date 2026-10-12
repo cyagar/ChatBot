@@ -842,9 +842,10 @@ def parse_and_validate(
     no-answer response displays NO_ANSWER_TEXT instead of the model's text.
     Each claim/step line carries inline [n] markers keyed to its position in
     the returned `citations` list. `safety_warnings` includes every labeled
-    warning in the passages the answer actually cites, not only the ones the
-    model chose to list (see _extract_required_warnings) -- the model's own
-    warnings list can be a proper subset of what's returned.
+    warning in every retrieved passage put in front of the model for this
+    question, not only the ones in passages the answer actually cites, and
+    not only the ones the model chose to list (see _extract_required_warnings)
+    -- the model's own warnings list can be a proper subset of what's returned.
 
     These checks are lexical. They do not establish that a claim is entailed by
     its excerpt, only that it is composed of the excerpt's own words, in order,

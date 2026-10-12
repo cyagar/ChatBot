@@ -89,10 +89,12 @@ class Settings(BaseSettings):
     # rate limit into one shared bucket.
     trusted_proxy_ips: str = "127.0.0.1"
 
-    # Comma-separated email domains allowed to self-register (e.g.
-    # "hmwagner.com,contractor-partner.com"). Empty = open registration --
-    # fine for local dev, NOT for a real deployment holding proprietary
-    # manuals. Set this before any pilot.
+    # Comma-separated email domains an admin may issue an invitation to (e.g.
+    # "hmwagner.com,contractor-partner.com") -- there is no self-registration
+    # endpoint; every account is created from an admin-issued, single-use
+    # invitation (see TESTER_ONBOARDING.md). Empty = no domain restriction on
+    # who can be invited, not open registration. Required (startup refuses to
+    # run without it) for APP_ENV=production.
     allowed_registration_domains: str = ""
 
     # Backs GET /api/config, and maintenance_mode/minimum_supported_version_code
