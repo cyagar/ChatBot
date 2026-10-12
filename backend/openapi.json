@@ -1905,7 +1905,7 @@
     },
     "/api/admin/feedback": {
       "get": {
-        "description": "An admin triaging an \"incorrect\" report needs machine, model, and\ncitation context, not just rating/comment/user/conversation_id, or they'd\nhave to separately open the conversation (if they could even find it) to\nsee what the technician was actually asking about. Reports message_id\n(feedback is per-answer, not per-conversation), the machine the answer\nwas generated for, and every citation the answer actually used, batched\nin one extra query rather than N+1 per row.",
+        "description": "An admin triaging an \"incorrect\" report needs machine, model, and\ncitation context, not just rating/comment/user/conversation_id, or they'd\nhave to separately open the conversation (if they could even find it) to\nsee what the technician was actually asking about. Reports message_id\n(feedback is per-answer, not per-conversation), the machine the answer\nwas generated for, and every citation the answer actually used, batched\nin one extra query rather than N+1 per row.\n\nThe answer's OWN machine_id is used first, not the conversation's: a\nconversation's machine_id can change after this message was answered\n(a technician switching machines mid-conversation), which would\notherwise show the wrong equipment for an older message in that same\nconversation. messages.machine_id is nullable (a message from before\nthis column existed), so it falls back to the conversation's machine_id\nrather than showing no machine at all for those rows.",
         "operationId": "list_feedback_api_admin_feedback_get",
         "parameters": [
           {
