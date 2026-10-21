@@ -56,8 +56,8 @@ android {
         // java.time (no desugaring) and adaptive launcher icons both need API 26.
         minSdk = 26
         targetSdk = 37
-        versionCode = 9
-        versionName = "1.1.1"
+        versionCode = 10
+        versionName = "1.1.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
