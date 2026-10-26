@@ -157,9 +157,12 @@ def test_concurrent_machine_confirmation_does_not_duplicate_the_answer(test_env)
 
 
 def test_asking_a_new_question_clears_a_stale_pending_clarification(test_env):
+    # Needs an eligible document, not just a bare machine row -- the second
+    # question below resolves "Axiom" directly via _resolve_machine_mention's
+    # own name match, which (like search_machines/recent_machines) only
+    # matches a machine with something actually retrievable.
     with get_conn() as conn:
-        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
-        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        _seed_axiom_with_heater_chunks(conn)
 
     _register("stalepending@example.com")
     conv = client.post("/api/conversations", json={"machine_id": None}).json()

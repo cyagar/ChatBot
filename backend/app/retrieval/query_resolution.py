@@ -1,7 +1,8 @@
 """Resolve a conversational follow-up into a standalone retrieval query,
 stored before hybrid_search runs; the default provider uses that resolved
-query. hybrid_search has no conversational reasoning -- it is BM25 + cosine
-similarity over the literal query text -- so a follow-up like "What about
+query. hybrid_search has no conversational reasoning -- it is Postgres
+full-text ranking (ts_rank, not BM25) + cosine similarity over the literal
+query text -- so a follow-up like "What about
 replacing it?" retrieves on the word "replacing" alone and never finds
 passages about the actual antecedent (e.g. "heating element").
 

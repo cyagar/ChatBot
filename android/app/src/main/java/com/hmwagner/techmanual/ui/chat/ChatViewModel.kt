@@ -172,6 +172,27 @@ class ChatViewModel(
         }
     }
 
+    // Best-effort refresh of state.conversation alone -- not a full
+    // loadMessages() reload, just enough to pick up a machine this send may
+    // have just resolved (see its one call site in performSend). Guarded by
+    // loadGeneration the same way loadMessages() is, so a slower response
+    // here can never overwrite a newer reload's own, more complete state.
+    private suspend fun refreshConversationBestEffort() {
+        val generation = loadGeneration
+        try {
+            val resp = ApiClient.service.getConversation(conversationId)
+            if (generation != loadGeneration) return
+            if (resp.isSuccessful) {
+                _state.value = _state.value.copy(conversation = resp.body())
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Best-effort -- the toolbar just keeps its previous/nav-arg
+            // label until some later reload succeeds.
+        }
+    }
+
     fun loadEarlier() {
         val cursor = _state.value.earlierCursor ?: return
         if (_state.value.loadingEarlier) return
@@ -276,7 +297,10 @@ class ChatViewModel(
             pendingEcho = null,
             pendingEchoUncertain = false,
             pendingEchoStillProcessing = false,
-            error = if (newerDraftTyped) message else "$message Your draft wasn't lost -- retype it.",
+            // composerText below already puts the question straight back
+            // into the box in this same update -- "retype it" would be
+            // telling the technician to redo work that's already done.
+            error = if (newerDraftTyped) message else "$message Your draft has been restored.",
             composerText = if (newerDraftTyped) _state.value.composerText else echo.content,
         )
     }
@@ -308,6 +332,16 @@ class ChatViewModel(
                     pendingEchoUncertain = false,
                     pendingEchoStillProcessing = false,
                 )
+                // Only when this conversation had no machine selected yet --
+                // _resolve_machine_mention (routes_chat.py) is "never called
+                // again once a machine is set," so that's the only case
+                // this send could just have resolved one, and the toolbar
+                // title (ChatScreen reads state.conversation?.machine_label)
+                // would otherwise keep showing "No machine selected" until
+                // some unrelated later reload happened to run.
+                if (_state.value.conversation?.machine_id == null) {
+                    refreshConversationBestEffort()
+                }
                 return
             }
             val failure = resp.describeErrorWithCode("Couldn't send that question")

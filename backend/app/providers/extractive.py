@@ -22,10 +22,12 @@ WARNING_RE = re.compile(r"^(WARNING|CAUTION|DANGER|NOTICE|IMPORTANT)\b.*", re.IG
 # there's always *something* at some rank.
 #
 # Two signals were tried and measured against this corpus (see
-# data/reports/retrieval_eval_report.md and the debug scripts used to produce
-# these numbers) before picking a threshold:
+# data/reports/retrieval_eval_report.md -- gitignored and local-only, not
+# present in a fresh clone -- and the debug scripts used to produce these
+# numbers) before picking a threshold:
 #   - lexical_score > 0 is USELESS as a gate: a full-text OR-of-all-terms query means any
-#     shared stopword ("the", "is", "a", "for") produces a positive BM25 score,
+#     shared stopword ("the", "is", "a", "for") produces a positive ts_rank score
+#     (Postgres full-text ranking, not BM25 -- this backend has no BM25 implementation),
 #     and even genuine content-word overlap on a single word ("pressure" in
 #     "tire pressure" vs. "water pressure") produces scores (3.6-12.6) that
 #     overlap heavily with genuinely relevant queries (6.8-19.1) — no clean

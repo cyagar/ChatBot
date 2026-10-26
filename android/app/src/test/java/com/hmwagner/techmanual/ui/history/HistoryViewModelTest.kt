@@ -3,6 +3,8 @@ package com.hmwagner.techmanual.ui.history
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.ApiService
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -11,10 +13,13 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -152,5 +157,65 @@ class HistoryViewModelTest {
 
         assertEquals(1, vm.state.value.conversations.size)
         assertEquals(2, vm.state.value.conversations[0].id)
+    }
+
+    @Test
+    fun `a refresh that completes while loadMore is still in flight supersedes it and clears loadingMore`() {
+        server.enqueue(
+            jsonResponse(
+                """[{"id": 1, "machine_id": null, "machine_label": null, "title": "First",
+                    "started_at": "2026-08-25 10:00:00", "updated_at": "2026-08-25 10:00:00"}]"""
+            ).addHeader("X-Next-Cursor", "page2cursor")
+        )
+        vm = HistoryViewModel()
+        vm.refresh()
+        awaitState { !it.loading }
+        assertEquals("page2cursor", vm.state.value.nextCursor)
+
+        val loadMoreReachedServer = CountDownLatch(1)
+        val releaseLoadMore = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            var dispatchCount = 0
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                dispatchCount++
+                return when (dispatchCount) {
+                    // loadMore()'s request -- held open until the refresh()
+                    // below has fully completed, reproducing "a NEWER
+                    // refresh starts and finishes while an older loadMore is
+                    // still genuinely in flight," not just issued earlier.
+                    1 -> {
+                        loadMoreReachedServer.countDown()
+                        releaseLoadMore.await(2, TimeUnit.SECONDS)
+                        jsonResponse(
+                            """[{"id": 2, "machine_id": null, "machine_label": null, "title": "Second (stale)",
+                                "started_at": "2026-08-25 09:00:00", "updated_at": "2026-08-25 09:00:00"}]"""
+                        )
+                    }
+                    2 -> jsonResponse(
+                        """[{"id": 99, "machine_id": null, "machine_label": null, "title": "Fresh",
+                            "started_at": "2026-08-25 11:00:00", "updated_at": "2026-08-25 11:00:00"}]"""
+                    )
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        vm.loadMore()
+        assertTrue(loadMoreReachedServer.await(2, TimeUnit.SECONDS))
+        assertTrue(vm.state.value.loadingMore)
+
+        vm.refresh()
+        awaitState { it.conversations.any { c -> c.id == 99 } }
+
+        // Now let loadMore's stale response land.
+        releaseLoadMore.countDown()
+        Thread.sleep(150)
+
+        assertEquals(
+            "the stale page must never be appended onto the list refresh() already replaced",
+            listOf(99),
+            vm.state.value.conversations.map { it.id },
+        )
+        assertFalse("a superseded loadMore must not leave its spinner stuck", vm.state.value.loadingMore)
     }
 }

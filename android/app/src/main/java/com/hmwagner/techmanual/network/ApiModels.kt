@@ -117,15 +117,22 @@ data class EvidenceOut(
 )
 
 // Every error response carries a correlation id the backend's own logs can
-// be searched by (see backend/app/api/errors.py's error_body).
-// ErrorMessages.kt's correlationSuffix() reads this to surface it in every
-// error message shown to a technician.
+// be searched by, plus detail/message/retryable/field_errors (see
+// backend/app/api/errors.py's error_body) -- ErrorMessages.kt's
+// describeErrorWithCode() reads all of these to surface them in every error
+// message shown to a technician, instead of a generic "(code N)" string.
 @Serializable
 data class ApiErrorBody(
     val detail: String? = null,
     val correlation_id: String? = null,
     val code: String? = null,
+    val message: String? = null,
+    val retryable: Boolean? = null,
+    val field_errors: List<ApiFieldError> = emptyList(),
 )
+
+@Serializable
+data class ApiFieldError(val field: String, val message: String)
 
 @Serializable
 data class SavedAnswerOut(

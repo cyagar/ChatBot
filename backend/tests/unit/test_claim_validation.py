@@ -302,7 +302,7 @@ def test_claim_naming_the_machine_is_not_rejected():
         # fabricated negative is rejected against a positive excerpt.
         ("The sensor reads 240 V nominal.", "The sensor reads -240 V nominal.", False),
         ("The minimum storage temperature is -40F.", "The minimum storage temperature is -40F.", True),
-        # the REVERSE direction (FinalChanges.txt F03): an unsigned claim
+        # the REVERSE direction: an unsigned claim
         # must not be satisfied by a genuinely negative excerpt either --
         # the sign is part of the fact in both directions.
         ("The pump is rated at -24 V.", "The pump is rated at 24 V.", False),
@@ -884,7 +884,7 @@ def test_a_passage_stating_both_sides_of_an_opposite_pair_is_not_a_false_positiv
     ) is not None
 
 
-# FinalChanges.txt F01 -- cross-item procedure ordering. Each of the two
+# Cross-item procedure ordering. Each of the two
 # steps below is, on its own, exactly the excerpt's own wording in the
 # excerpt's own order -- _claim_grounded's intra-item check has nothing to
 # reject in either one. Only comparing where each SEPARATE item grounded,
@@ -958,8 +958,7 @@ def test_a_claim_restating_a_fact_from_later_in_the_steps_is_not_a_false_positiv
 
 
 def test_a_multiclause_steps_governing_condition_can_stay_in_its_first_clause():
-    """FinalChanges.txt F02 regression found during live smoke testing: _claim_clauses
-    legitimately splits 'If the tank is empty, disconnect power and refill
+    """_claim_clauses legitimately splits 'If the tank is empty, disconnect power and refill
     before continuing.' into two clauses ('If the tank is empty, disconnect
     power' and 'refill before continuing') because each side names its own
     action. The governing 'if' correctly stays in the first clause only --
@@ -973,10 +972,9 @@ def test_a_multiclause_steps_governing_condition_can_stay_in_its_first_clause():
     ) is not None
 
 
-# FinalChanges.txt F02 -- a dropped prerequisite/condition word. Both
-# examples below are live-reproduced in the audit: the step is, word for
+# A dropped prerequisite/condition word. Both examples below are, word for
 # word, a genuine substring of the excerpt in the excerpt's own order, so
-# nothing before this fix rejected either one.
+# the order/wording check alone has nothing to reject in either one.
 def test_a_before_prerequisite_naming_a_different_action_cannot_be_dropped():
     assert _single_claim(
         "Remove the cover.",

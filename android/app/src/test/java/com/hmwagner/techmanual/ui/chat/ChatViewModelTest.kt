@@ -251,16 +251,31 @@ class ChatViewModelTest {
         )
     }
 
+    // setUp()'s conversation has no machine yet (machine_id null), so a
+    // successful send() in every test below also issues its own best-effort
+    // getConversation -- see performSend's refreshConversationBestEffort()
+    // call. Routed by path/method via a custom Dispatcher, not sequential
+    // enqueue()s: FIFO enqueue order only matches REQUEST ARRIVAL order, and
+    // that best-effort GET fires from inside the SAME coroutine that just
+    // set `sending = false` -- a sequential enqueue assumes it always wins
+    // the race to reach the server before whatever the test does next, which
+    // is not guaranteed.
     @Test
     fun `a successful save call is reflected in state`() {
-        server.enqueue(jsonResponse(
-            """{"id": 5, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
-        ))
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path?.endsWith("/messages") == true && request.method == "POST" -> jsonResponse(
+                    """{"id": 5, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
+                )
+                request.path?.endsWith("/conversations/1") == true -> conversationJsonResponse()
+                request.path?.contains("/messages/5/save") == true -> MockResponse().setResponseCode(204)
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
         vm.onComposerChange("Why won't it start?")
         vm.send()
         awaitState { !it.sending }
 
-        server.enqueue(MockResponse().setResponseCode(204))
         vm.saveAnswer(5)
         awaitState { it.savedMessageIds.contains(5) }
         assertTrue(vm.state.value.savedMessageIds.contains(5))
@@ -268,6 +283,17 @@ class ChatViewModelTest {
 
     @Test
     fun `a network failure on save surfaces an error instead of failing silently`() {
+        // A fresh vm whose conversation already has a machine selected --
+        // unlike the shared setUp() one -- so performSend's own best-effort
+        // getConversation (refreshConversationBestEffort) never fires here;
+        // this test is about the save request's own failure, nothing else.
+        server.enqueue(jsonResponse(
+            """{"id": 1, "machine_id": 7, "machine_label": "Acme 3000", "started_at": "2026-08-24T00:00:00Z", "updated_at": "2026-08-24T00:00:00Z"}"""
+        ))
+        server.enqueue(jsonResponse("[]"))
+        val vm2 = ChatViewModel(conversationId = 1)
+        awaitStateOf(vm2) { !it.loadingHistory }
+
         // "Connection: close" on the send response forces the save request
         // onto a genuinely fresh connection -- otherwise OkHttp transparently
         // retries a disconnect on a REUSED pooled connection (a routine
@@ -276,31 +302,40 @@ class ChatViewModelTest {
         server.enqueue(jsonResponse(
             """{"id": 8, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
         ).addHeader("Connection", "close"))
-        vm.onComposerChange("Why won't it start?")
-        vm.send()
-        awaitState { !it.sending }
+        vm2.onComposerChange("Why won't it start?")
+        vm2.send()
+        awaitStateOf(vm2) { !it.sending }
 
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
-        vm.saveAnswer(8)
-        awaitState { it.error != null }
-        assertTrue(vm.state.value.error!!.contains("save", ignoreCase = true))
-        assertFalse(vm.state.value.savedMessageIds.contains(8))
+        vm2.saveAnswer(8)
+        awaitStateOf(vm2) { it.error != null }
+        assertTrue(vm2.state.value.error!!.contains("save", ignoreCase = true))
+        assertFalse(vm2.state.value.savedMessageIds.contains(8))
     }
 
     @Test
     fun `a successful save clears a stale error left over from a prior failure`() {
-        server.enqueue(jsonResponse(
-            """{"id": 9, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
-        ))
+        var saveAttempts = 0
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path?.endsWith("/messages") == true && request.method == "POST" -> jsonResponse(
+                    """{"id": 9, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
+                )
+                request.path?.endsWith("/conversations/1") == true -> conversationJsonResponse()
+                request.path?.contains("/messages/9/save") == true -> {
+                    saveAttempts++
+                    if (saveAttempts == 1) MockResponse().setResponseCode(500) else MockResponse().setResponseCode(204)
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
         vm.onComposerChange("Why won't it start?")
         vm.send()
         awaitState { !it.sending }
 
-        server.enqueue(MockResponse().setResponseCode(500))
         vm.saveAnswer(9)
         awaitState { it.error != null }
 
-        server.enqueue(MockResponse().setResponseCode(204))
         vm.saveAnswer(9)
         awaitState { it.savedMessageIds.contains(9) }
         assertNull(vm.state.value.error)
@@ -308,18 +343,24 @@ class ChatViewModelTest {
 
     @Test
     fun `a successful unsave call removes the message from saved state`() {
-        server.enqueue(jsonResponse(
-            """{"id": 10, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
-        ))
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path?.endsWith("/messages") == true && request.method == "POST" -> jsonResponse(
+                    """{"id": 10, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
+                )
+                request.path?.endsWith("/conversations/1") == true -> conversationJsonResponse()
+                request.path?.contains("/messages/10/save") == true -> MockResponse().setResponseCode(200)
+                request.path?.contains("/messages/10/unsave") == true -> MockResponse().setResponseCode(200)
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
         vm.onComposerChange("Why won't it start?")
         vm.send()
         awaitState { !it.sending }
 
-        server.enqueue(MockResponse().setResponseCode(200))
         vm.saveAnswer(10)
         awaitState { it.savedMessageIds.contains(10) }
 
-        server.enqueue(MockResponse().setResponseCode(200))
         vm.unsaveAnswer(10)
         awaitState { !it.savedMessageIds.contains(10) }
         assertFalse(vm.state.value.savedMessageIds.contains(10))
@@ -327,22 +368,33 @@ class ChatViewModelTest {
 
     @Test
     fun `a network failure on unsave surfaces an error and leaves saved state unchanged`() {
+        // A fresh vm whose conversation already has a machine selected --
+        // unlike the shared setUp() one -- so performSend's own best-effort
+        // getConversation (refreshConversationBestEffort) never fires here;
+        // this test is about the unsave request's own failure, nothing else.
+        server.enqueue(jsonResponse(
+            """{"id": 1, "machine_id": 7, "machine_label": "Acme 3000", "started_at": "2026-08-24T00:00:00Z", "updated_at": "2026-08-24T00:00:00Z"}"""
+        ))
+        server.enqueue(jsonResponse("[]"))
+        val vm2 = ChatViewModel(conversationId = 1)
+        awaitStateOf(vm2) { !it.loadingHistory }
+
         server.enqueue(jsonResponse(
             """{"id": 11, "role": "assistant", "content": "Check the fuse.", "created_at": "2026-08-24T00:00:00Z"}"""
         ).addHeader("Connection", "close"))
-        vm.onComposerChange("Why won't it start?")
-        vm.send()
-        awaitState { !it.sending }
+        vm2.onComposerChange("Why won't it start?")
+        vm2.send()
+        awaitStateOf(vm2) { !it.sending }
 
         server.enqueue(MockResponse().setResponseCode(200).addHeader("Connection", "close"))
-        vm.saveAnswer(11)
-        awaitState { it.savedMessageIds.contains(11) }
+        vm2.saveAnswer(11)
+        awaitStateOf(vm2) { it.savedMessageIds.contains(11) }
 
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
-        vm.unsaveAnswer(11)
-        awaitState { it.error != null }
-        assertTrue(vm.state.value.error!!.contains("saved answer", ignoreCase = true))
-        assertTrue(vm.state.value.savedMessageIds.contains(11))
+        vm2.unsaveAnswer(11)
+        awaitStateOf(vm2) { it.error != null }
+        assertTrue(vm2.state.value.error!!.contains("saved answer", ignoreCase = true))
+        assertTrue(vm2.state.value.savedMessageIds.contains(11))
     }
 
     @Test
@@ -509,7 +561,7 @@ class ChatViewModelTest {
         // A real gateway timeout/error often carries no JSON body at all --
         // this is the shape that would make a code-field-only check (looking
         // only at the parsed error body's `code`) miss it entirely, since
-        // there is no body to parse. FinalChanges.txt F09.
+        // there is no body to parse.
         server.enqueue(MockResponse().setResponseCode(502).setBody("<html>Bad Gateway</html>"))
 
         vm.onComposerChange("Why won't it start?")

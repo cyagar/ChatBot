@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.LoginRequest
+import com.hmwagner.techmanual.network.describeError
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -36,17 +37,17 @@ class LoginViewModel : ViewModel() {
                 if (resp.isSuccessful) {
                     _state.value = _state.value.copy(loading = false, loggedIn = true)
                 } else {
-                    _state.value = _state.value.copy(loading = false, error = errorMessage(resp.code()))
+                    // Same describeError path every other screen uses, not a
+                    // bare-status-code switch -- the server's own detail
+                    // (e.g. "Invalid email or password.", or a rate-limit
+                    // message naming the actual wait) is more specific than
+                    // any fixed per-code string here could be, and it comes
+                    // with a correlation id for anything unexpected.
+                    _state.value = _state.value.copy(loading = false, error = resp.describeError("Sign-in failed"))
                 }
             } catch (e: Exception) {
                 _state.value = _state.value.copy(loading = false, error = "Can't reach the server. Check your connection.")
             }
         }
-    }
-
-    private fun errorMessage(code: Int): String = when (code) {
-        401 -> "Incorrect email or password."
-        429 -> "Too many attempts. Wait a moment and try again."
-        else -> "Sign-in failed (code $code)."
     }
 }

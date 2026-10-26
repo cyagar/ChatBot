@@ -1053,9 +1053,11 @@ def list_feedback(admin: CurrentUser = Depends(require_admin), limit: int = Quer
 
 
 @router.get("/unanswered")
-def frequently_unanswered(admin: CurrentUser = Depends(require_admin), limit: int = Query(default=50, ge=1, le=200)):
+def recent_unanswered_questions(admin: CurrentUser = Depends(require_admin), limit: int = Query(default=50, ge=1, le=200)):
     """Questions the system explicitly could not answer (is_no_answer=1 on the
-    assistant's reply), most recent first — surfaces gaps in manual coverage."""
+    assistant's reply), most recent first — surfaces gaps in manual coverage.
+    Not an aggregation: this is a recency-ordered list, not grouped or
+    counted by question, so it does not identify which gaps recur most."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT prev.content AS question, m.created_at, m.conversation_id "

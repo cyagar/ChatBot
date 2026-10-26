@@ -8,9 +8,15 @@ FastAPI backend in `../backend` over its JSON API.
 
 - Android Studio with AGP 9.3.2, Kotlin 2.4.10 and `compileSdk`/`targetSdk` 37,
   or the command-line SDK with `platforms;android-37.0` and `build-tools;36.0.0`.
-- Do not install Gradle or a JDK for it. Use the wrapper (`./gradlew`); the
-  Gradle daemon JDK (25) is provisioned automatically from
-  `gradle/gradle-daemon-jvm.properties`.
+- Do not install Gradle for it -- use the wrapper (`./gradlew`). The Gradle
+  *daemon* JDK (25) is provisioned automatically from
+  `gradle/gradle-daemon-jvm.properties`, but Gradle itself still needs a
+  *launcher* JDK to even start that provisioning -- automatic daemon
+  provisioning does not make "no JDK install needed" a safe universal setup
+  instruction. Android Studio's own bundled JDK satisfies this; a bare
+  command-line setup still needs one. That file also carries no
+  `toolchainChecksum` entries, so the provisioned JDK download is not
+  integrity-verified against a pinned hash.
 - `minSdk` 26.
 
 ## Backend endpoint
@@ -97,6 +103,4 @@ Before distributing a build:
 
 - No CI coverage for instrumented tests; no phone, screen-reader, split-screen or
   offline/reconnect matrix has been recorded (only a Galaxy Tab A9+).
-- A citation's page image that fails to load shows an error state rather than a
-  text-first fallback.
 - Timestamps use the device locale and time zone.

@@ -313,7 +313,12 @@ function renderAccess() {
       <thead><tr><th>Email</th><th>Role</th><th>Created</th><th>Expires</th><th>Status</th><th></th></tr></thead>
       <tbody>
         ${state.invitations.map((i) => {
-          const invStatus = i.used_at ? "used" : i.revoked_at ? "revoked" : "pending";
+          // A pending invite past its own expires_at is already unusable --
+          // register() itself rejects it with "This invitation has
+          // expired." -- so showing it as still "pending" here is
+          // misleading, and offering a Revoke button for it is pointless.
+          const expired = !i.used_at && !i.revoked_at && new Date(i.expires_at) <= new Date();
+          const invStatus = i.used_at ? "used" : i.revoked_at ? "revoked" : expired ? "expired" : "pending";
           return `
           <tr>
             <td>${esc(i.email)}</td><td>${esc(i.role)}</td><td>${esc(i.created_at)}</td><td>${esc(i.expires_at)}</td>
@@ -563,7 +568,7 @@ function renderFeedback() {
         </tr>
       `).join("") || `<tr><td colspan="8">No feedback yet.</td></tr>`}</tbody>
     </table>
-    <h2 class="h2-inline mt-xl">Frequently unanswered questions</h2>
+    <h2 class="h2-inline mt-xl">Recent unanswered questions</h2>
     <table class="admin-table">
       <thead><tr><th>When</th><th>Question</th></tr></thead>
       <tbody>${state.unanswered.map((u) => `

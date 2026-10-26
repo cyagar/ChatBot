@@ -48,11 +48,16 @@ that matter for a first run:
 Never commit `.env`, keystores or service-account keys.
 
 Generated answers (`AI_PROVIDER=anthropic`) are checked lexically against
-their cited excerpts: numbers and identifiers must appear verbatim, warnings
-must be quoted, and each claim and step must be the excerpt's own wording
-(directions, actions and negations preserved, order kept for actions). A no-answer response shows fixed server text
-rather than model prose. This is a mechanical check, not proof that a statement
-is entailed by its source, so technicians must verify against the cited page.
+their cited excerpts before being shown: numbers, identifiers, units and signs
+must appear verbatim; warnings are quoted verbatim; each claim and step must
+be the excerpt's own wording, clause by clause, in the excerpt's own order;
+and a step can't be reordered against another step citing the same excerpt. A
+direct opposite-word substitution (e.g. a claim stating "above" a threshold
+the excerpt states as "below") is rejected, but this does not generalize to
+every form of semantic reversal. A no-answer response shows fixed server
+text, never model prose. This is a mechanical, lexical check, not proof that a
+statement is entailed by its source -- see `docs/ARCHITECTURE.md` for the
+exact rules -- so technicians must still verify against the cited page.
 
 ## Running locally
 
@@ -100,7 +105,9 @@ python -m pytest
 Tests run migrations and `TRUNCATE ... CASCADE` against the database named in
 `backend/.env.test` (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`). Point it at a
 disposable Neon branch or local Postgres, never production; the suite refuses to
-start if it matches `backend/.env`. Do not run two pytest processes at once
+start if it matches `backend/.env`. Outside CI, it also refuses to start at all
+unless `ALLOW_DESTRUCTIVE_TESTS=1` is set, confirming `.env.test` really is
+disposable (CI sets this implicitly). Do not run two pytest processes at once
 against one test database. CI (`.github/workflows/backend-ci.yml`) runs the
 full suite against a PostgreSQL 16 service container.
 

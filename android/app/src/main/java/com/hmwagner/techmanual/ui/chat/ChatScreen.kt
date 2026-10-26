@@ -1,5 +1,9 @@
 package com.hmwagner.techmanual.ui.chat
 
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,6 +56,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,7 +66,12 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
@@ -134,8 +144,19 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(state.messages.size, state.pendingEcho) {
-        val lastIndex = state.messages.size + (if (state.pendingEcho != null) 1 else 0)
+    // Keyed on the LAST message's own id, not state.messages.size -- size
+    // also changes when loadEarlier() prepends an older page at the FRONT
+    // of the list (the last message's id is unchanged then), and this must
+    // never auto-scroll away from the older messages the technician just
+    // asked to see. A genuine new message (or the pending echo appearing/
+    // resolving) does change the last id, so that case still scrolls.
+    LaunchedEffect(state.messages.lastOrNull()?.id, state.pendingEcho) {
+        // +1 for the "Load earlier messages" button's own item slot when
+        // present -- omitting it undercounts the list by one row, so the
+        // computed "last" index actually lands one row short of the real
+        // last message whenever that button is showing.
+        val earlierButtonSlot = if (state.earlierCursor != null) 1 else 0
+        val lastIndex = earlierButtonSlot + state.messages.size + (if (state.pendingEcho != null) 1 else 0)
         if (lastIndex > 0) listState.animateScrollToItem(lastIndex - 1)
     }
 
@@ -211,6 +232,7 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                         items(state.messages, key = { it.id }) { msg ->
                             MessageBubble(msg, onCitationClick = vm::openCitation, onRetry = { vm.retry(msg.id) },
                                 onClarifyingSelect = vm::selectClarifyingMachine,
+                                onPickMachine = onBack,
                                 onSave = {
                                     if (state.savedMessageIds.contains(msg.id)) vm.unsaveAnswer(msg.id) else vm.saveAnswer(msg.id)
                                 },
@@ -438,6 +460,7 @@ private fun MessageBubble(
     onCitationClick: (CitationOut) -> Unit,
     onRetry: () -> Unit,
     onClarifyingSelect: (Int) -> Unit,
+    onPickMachine: (() -> Unit)?,
     onSave: () -> Unit,
     saved: Boolean,
     onFeedback: (String, String?) -> Unit,
@@ -557,6 +580,23 @@ private fun MessageBubble(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                } else if (msg.is_clarifying_question && isLatestMessage) {
+                    // The zero-candidate case (routes_chat.py's "please
+                    // select a manufacturer and model" branch) has nothing
+                    // to offer as chips -- msg.content promises a picker, so
+                    // this renders an actual way to reach one instead of
+                    // silently showing nothing below that promise.
+                    // onPickMachine is ChatScreen's own onBack: in the
+                    // single-pane layout that's the real machine list;
+                    // null in the two-pane layout, where that list is
+                    // already visible beside this conversation.
+                    onPickMachine?.let { pick ->
+                        TextButton(onClick = pick) { Text("Choose a machine") }
+                    } ?: Text(
+                        "Pick a machine from the list on the left.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
 
                 if (msg.citations.isNotEmpty()) {
@@ -755,8 +795,50 @@ private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: ()
                         // actually re-requesting.
                         var retryToken by remember { mutableIntStateOf(0) }
                         val imageFailed = painterState is AsyncImagePainter.State.Error
+                        // Pinch-to-zoom/pan on the manual page -- small print
+                        // (part numbers, wiring tables) is often otherwise
+                        // unreadable at a size that fits a phone screen.
+                        // Reset (both here and showText below) whenever url
+                        // changes, by virtue of living inside key(url).
+                        var scale by remember { mutableFloatStateOf(1f) }
+                        var offset by remember { mutableStateOf(Offset.Zero) }
                         Box(
-                            Modifier.fillMaxWidth().then(if (imageFailed) Modifier else Modifier.fillMaxHeight(0.75f)),
+                            Modifier.fillMaxWidth()
+                                .then(if (imageFailed) Modifier else Modifier.fillMaxHeight(0.75f))
+                                .clipToBounds()
+                                // Not detectTransformGestures: it consumes
+                                // every touch event it processes, single-
+                                // finger drags included, regardless of what
+                                // this code does with the resulting pan --
+                                // that would swallow the sheet's own
+                                // verticalScroll on a single-finger drag even
+                                // at 1x, when there's nothing to pan. Only
+                                // consuming once a second pointer is down (an
+                                // actual pinch) or already zoomed in (a
+                                // single-finger drag IS a legitimate pan then)
+                                // leaves a plain one-finger scroll at 1x alone.
+                                .pointerInput(Unit) {
+                                    awaitEachGesture {
+                                        do {
+                                            val event = awaitPointerEvent()
+                                            if (event.changes.size >= 2 || scale > 1f) {
+                                                val zoom = event.calculateZoom()
+                                                val pan = event.calculatePan()
+                                                val newScale = (scale * zoom).coerceIn(1f, 6f)
+                                                scale = newScale
+                                                // No panning once back at 1x -- otherwise the
+                                                // image could be left dragged off-center with
+                                                // no zoom to justify it, with no visible way
+                                                // back except the double-tap reset below.
+                                                offset = if (newScale <= 1f) Offset.Zero else offset + pan
+                                                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                                            }
+                                        } while (event.changes.any { it.pressed })
+                                    }
+                                }
+                                .pointerInput(Unit) {
+                                    detectTapGestures(onDoubleTap = { scale = 1f; offset = Offset.Zero })
+                                },
                             contentAlignment = Alignment.Center,
                         ) {
                             AsyncImage(
@@ -765,7 +847,8 @@ private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: ()
                                 contentDescription = "Manual page ${evidence.page_number}",
                                 contentScale = ContentScale.Fit,
                                 onState = { painterState = it },
-                                modifier = if (imageFailed) Modifier.fillMaxWidth() else Modifier.fillMaxWidth().fillMaxHeight(),
+                                modifier = (if (imageFailed) Modifier.fillMaxWidth() else Modifier.fillMaxWidth().fillMaxHeight())
+                                    .graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
                             )
                             when (painterState) {
                                 is AsyncImagePainter.State.Loading -> CircularProgressIndicator()
@@ -784,8 +867,19 @@ private fun EvidenceSheet(state: ChatUiState, onDismiss: () -> Unit, onRetry: ()
                                 else -> {}
                             }
                         }
-                        // The cited text stays readable when the page image cannot load.
-                        if (imageFailed) {
+                        // The extracted text is always reachable, not only when
+                        // the image fails -- a toggle, since a photographed or
+                        // scanned page can still be a worse read than the
+                        // extracted text even zoomed in (imperfect contrast,
+                        // skew, a technician's lighting), and there's no harm
+                        // in letting them check both.
+                        var showText by remember { mutableStateOf(false) }
+                        if (!imageFailed) {
+                            TextButton(onClick = { showText = !showText }) {
+                                Text(if (showText) "Hide extracted text" else "Show extracted text")
+                            }
+                        }
+                        if (imageFailed || showText) {
                             Text("Text extracted from this page:", style = MaterialTheme.typography.labelMedium)
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                                 Text(evidence.content, modifier = Modifier.padding(12.dp))

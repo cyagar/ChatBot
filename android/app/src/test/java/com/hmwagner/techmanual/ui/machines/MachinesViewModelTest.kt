@@ -391,4 +391,56 @@ class MachinesViewModelTest {
         assertFalse("a cancelled debounce must not leave the spinner stuck", vm.state.value.loading)
         assertEquals(1, vm.state.value.results.size)
     }
+
+    @Test
+    fun `a double tap favorite toggle does not let the first request's failure revert the second request's success`() {
+        server.enqueue(jsonResponse(
+            """[{"id": 1, "manufacturer": "Bunn", "model_name": "Axiom", "document_count": 3, "is_favorite": false}]"""
+        ))
+        vm = MachinesViewModel()
+        awaitState { it.recent.size == 1 }
+        // Both calls below close over this SAME stale MachineOut (is_favorite
+        // still false), exactly as two rapid taps on the same list row would
+        // before Compose has a chance to recompose between them -- both
+        // therefore compute newValue = true.
+        val staleMachine = vm.state.value.recent[0]
+
+        val firstReachedServer = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            var dispatchCount = 0
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                dispatchCount++
+                return when (dispatchCount) {
+                    // The first (soon-to-be-stale) toggle -- held open until
+                    // the second one below has already succeeded.
+                    1 -> {
+                        firstReachedServer.countDown()
+                        releaseFirst.await(2, TimeUnit.SECONDS)
+                        MockResponse().setResponseCode(500)
+                    }
+                    2 -> MockResponse().setResponseCode(200) // the second (latest, real) toggle
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        vm.toggleFavorite(staleMachine)
+        assertTrue(firstReachedServer.await(2, TimeUnit.SECONDS))
+        vm.toggleFavorite(staleMachine)
+        awaitState { it.recent[0].is_favorite } // the second call's own optimistic flip
+
+        // Now let the first request's failure response land.
+        releaseFirst.countDown()
+        Thread.sleep(150)
+
+        assertTrue(
+            "the first (now-superseded) request's failure must not revert the second request's success",
+            vm.state.value.recent[0].is_favorite,
+        )
+        assertNull(
+            "a superseded request's own failure must not surface an error either",
+            vm.state.value.error,
+        )
+    }
 }

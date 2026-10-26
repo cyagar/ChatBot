@@ -26,10 +26,17 @@ interface ApiService {
     suspend fun getConfig(): Response<ConfigOut>
 
     @GET("api/machines")
-    suspend fun searchMachines(@Query("q") query: String = "", @Query("limit") limit: Int = 25): Response<List<MachineOut>>
+    suspend fun searchMachines(
+        @Query("q") query: String = "",
+        @Query("limit") limit: Int = 25,
+        @Query("cursor") cursor: String? = null,
+    ): Response<List<MachineOut>>
 
     @GET("api/machines/recent")
-    suspend fun recentMachines(@Query("limit") limit: Int = 10): Response<List<MachineOut>>
+    suspend fun recentMachines(
+        @Query("limit") limit: Int = 10,
+        @Query("cursor") cursor: String? = null,
+    ): Response<List<MachineOut>>
 
     @POST("api/machines/{machineId}/touch")
     suspend fun touchMachine(@Path("machineId") machineId: Int): Response<Unit>

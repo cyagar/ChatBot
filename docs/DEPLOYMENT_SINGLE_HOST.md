@@ -29,6 +29,11 @@ android, top-level README) is never deployed or kept in sync. Transfer it as
 a tarball, not a clone:
 
 ```bash
+# Create the destination directory on the host FIRST -- scp has no parent
+# directory to land in otherwise on a fresh host, and the three scp calls
+# right after this one all target paths under it.
+gcloud compute ssh <host> --zone=<zone> -- sudo mkdir -p /opt/ChatBot && sudo chown $(whoami) /opt/ChatBot
+
 # From a local checkout, at the commit/tag to deploy:
 git archive --format=tar.gz -o /tmp/backend.tar.gz HEAD:backend
 gcloud compute scp /tmp/backend.tar.gz <host>:/tmp/ --zone=<zone>
@@ -41,11 +46,15 @@ sudo tar -xzf /tmp/backend.tar.gz -C /opt/ChatBot/backend
 cd /opt/ChatBot
 
 cp backend/.env.example backend/.env       # then edit; see below
+chmod 600 backend/.env                     # restrictive regardless of what Compose itself requires -- see Security notes
 cp /path/to/service-account.json backend/  # Drive key, never committed
 cat > .env <<EOF
 GOOGLE_SERVICE_ACCOUNT_JSON_FILENAME=service-account.json
 TMA_DOMAIN=tma.example.com
 EOF
+# .env's TMA_DOMAIN is read by Compose alone (env_file:), not by this shell --
+# export it separately for the curl checks later in this same session:
+export TMA_DOMAIN=tma.example.com
 
 # The app container runs as a non-root user, UID/GID 10001 (see
 # backend/Dockerfile). backend/.env is loaded via Compose's env_file:, so its
@@ -146,7 +155,10 @@ current plan and record it in `OWNER_DECISION_GATE.md`. A backup is not proven
 until restored: restore the newest dump into a scratch Neon branch
 (`pg_restore --no-owner -d <scratch url> db-*.dump`), unpack the object storage
 tarball into an empty directory, start the app against them with a different
-`.env`, and record the elapsed time in the release record.
+`.env`, confirm `/readyz` returns 200 (proving at least one restored document
+is still approved, current and machine-linked -- a restore that silently lost
+review state would otherwise look successful right up to that check), and
+record the elapsed time in the release record.
 
 The Drive cache (`data/gdrive_cache`) is not a source of record.
 

@@ -1,6 +1,7 @@
 package com.hmwagner.techmanual.ui.machines
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -141,6 +142,7 @@ fun MachinesScreen(
                 onRefresh = vm::refresh,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             ) {
+                val nextCursor = if (state.query.isBlank()) state.recentNextCursor else state.resultsNextCursor
                 LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(listToShow, key = { it.id }) { machine ->
                         MachineRow(
@@ -149,6 +151,17 @@ fun MachinesScreen(
                             onClick = { vm.selectMachine(machine, onCreated = onMachineSelected) },
                             onToggleFavorite = { vm.toggleFavorite(machine) },
                         )
+                    }
+                    if (nextCursor != null) {
+                        item {
+                            Box(Modifier.fillMaxWidth().padding(12.dp)) {
+                                if (state.loadingMore) {
+                                    CircularProgressIndicator(modifier = Modifier.padding(8.dp))
+                                } else {
+                                    TextButton(onClick = vm::loadMore) { Text("Load more") }
+                                }
+                            }
+                        }
                     }
                 }
             }

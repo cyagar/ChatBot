@@ -3,6 +3,8 @@ package com.hmwagner.techmanual.ui.saved
 import com.hmwagner.techmanual.network.ApiClient
 import com.hmwagner.techmanual.network.ApiService
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -11,8 +13,10 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -112,5 +116,45 @@ class SavedAnswersViewModelTest {
         assertEquals(1, vm.state.value.answers.size)
         assertEquals(6, vm.state.value.answers[0].answer.id)
         assertNotNull(vm.state.value.error)
+    }
+
+    @Test
+    fun `a failed unsave does not resurrect another item a concurrent unsave already removed`() {
+        server.enqueue(jsonResponse("[${savedAnswerJson(10)}, ${savedAnswerJson(20)}]"))
+        vm.refresh()
+        awaitState { it.answers.size == 2 }
+
+        val firstReachedServer = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                // messageId 10's unsave -- held open until messageId 20's own
+                // unsave (below) has already succeeded.
+                return if (request.path?.contains("/messages/10/unsave") == true) {
+                    firstReachedServer.countDown()
+                    releaseFirst.await(2, TimeUnit.SECONDS)
+                    MockResponse().setResponseCode(500)
+                } else {
+                    MockResponse().setResponseCode(200)
+                }
+            }
+        }
+
+        vm.unsave(10)
+        assertTrue(firstReachedServer.await(2, TimeUnit.SECONDS))
+        assertEquals(listOf(20), vm.state.value.answers.map { it.answer.id })
+
+        vm.unsave(20)
+        awaitState { it.answers.isEmpty() }
+
+        // Now let message 10's failed unsave response land.
+        releaseFirst.countDown()
+        awaitState(timeoutMs = 2000) { it.answers.isNotEmpty() }
+
+        assertEquals(
+            "only the failed item's own removal should be undone, not the other, already-successfully-removed one",
+            listOf(10),
+            vm.state.value.answers.map { it.answer.id },
+        )
     }
 }

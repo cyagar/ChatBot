@@ -40,7 +40,7 @@ we think it is" has no answer.
   manager, secret store, etc. — never "on my laptop" as the only copy)
 - **Backup exists:** yes/no — where
 - **Who holds the store/key passwords:** (names or roles, not the
-  passwords themselves — see `backend/local.properties` handling: those
+  passwords themselves — see `android/local.properties` handling: those
   values must never be pasted into this record or any chat/ticket)
 - **Restore tested:** yes/no — date last verified someone besides the
   original builder can produce an identically-signed build from the backed

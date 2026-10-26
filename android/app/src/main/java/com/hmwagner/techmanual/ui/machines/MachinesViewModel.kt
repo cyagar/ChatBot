@@ -20,6 +20,12 @@ data class MachinesUiState(
     val results: List<MachineOut> = emptyList(),
     val loading: Boolean = false,
     val refreshing: Boolean = false,
+    val loadingMore: Boolean = false,
+    // Tracked separately, not one shared field -- switching between a blank
+    // query and a search (and back) must not lose either list's own
+    // position just because the other one is on screen for a while.
+    val recentNextCursor: String? = null,
+    val resultsNextCursor: String? = null,
     val creatingConversation: Boolean = false,
     val error: String? = null,
 )
@@ -47,9 +53,14 @@ class MachinesViewModel : ViewModel() {
                     // a machine after an earlier, unrelated failed request
                     // would still show "Can't reach the server" even though
                     // the favorite call itself succeeded.
-                    _state.value = _state.value.copy(recent = resp.body().orEmpty(), error = null)
+                    _state.value = _state.value.copy(
+                        recent = resp.body().orEmpty(),
+                        recentNextCursor = resp.headers()["X-Next-Cursor"],
+                        error = null,
+                    )
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 // Recents are a convenience, not critical -- fail quietly and
                 // let the technician search instead.
             }
@@ -80,7 +91,10 @@ class MachinesViewModel : ViewModel() {
                 if (q.isBlank()) {
                     val resp = ApiClient.service.recentMachines()
                     if (resp.isSuccessful) {
-                        _state.value = _state.value.copy(recent = resp.body().orEmpty())
+                        _state.value = _state.value.copy(
+                            recent = resp.body().orEmpty(),
+                            recentNextCursor = resp.headers()["X-Next-Cursor"],
+                        )
                     } else {
                         _state.value = _state.value.copy(error = resp.describeError("Couldn't refresh"))
                     }
@@ -90,7 +104,10 @@ class MachinesViewModel : ViewModel() {
                     // could have changed while this request was in flight.
                     if (_state.value.query != q) return@launch
                     if (resp.isSuccessful) {
-                        _state.value = _state.value.copy(results = resp.body().orEmpty())
+                        _state.value = _state.value.copy(
+                            results = resp.body().orEmpty(),
+                            resultsNextCursor = resp.headers()["X-Next-Cursor"],
+                        )
                     } else {
                         _state.value = _state.value.copy(error = resp.describeError("Couldn't refresh"))
                     }
@@ -187,7 +204,11 @@ class MachinesViewModel : ViewModel() {
             // overwriting that newer query's results.
             if (_state.value.query != q) return
             if (resp.isSuccessful) {
-                _state.value = _state.value.copy(loading = false, results = resp.body().orEmpty())
+                _state.value = _state.value.copy(
+                    loading = false,
+                    results = resp.body().orEmpty(),
+                    resultsNextCursor = resp.headers()["X-Next-Cursor"],
+                )
             } else {
                 _state.value = _state.value.copy(loading = false, error = resp.describeError("Search failed"))
             }
@@ -196,6 +217,69 @@ class MachinesViewModel : ViewModel() {
         } catch (_: Exception) {
             if (_state.value.query != q) return
             _state.value = _state.value.copy(loading = false, error = "Can't reach the server. Check your connection.")
+        }
+    }
+
+    /**
+     * Passes a cursor to GET /machines or GET /machines/recent (whichever
+     * list is currently showing) so a corpus with more machines than one
+     * page can see anything past it -- same append-don't-replace shape as
+     * HistoryViewModel.loadMore. recentNextCursor/resultsNextCursor are
+     * tracked separately so switching back and forth between a search and
+     * the blank-query recents list never loses either one's own position.
+     */
+    fun loadMore() {
+        if (_state.value.loadingMore) return
+        val q = _state.value.query
+        viewModelScope.launch {
+            if (q.isBlank()) {
+                val cursor = _state.value.recentNextCursor ?: return@launch
+                _state.value = _state.value.copy(loadingMore = true, error = null)
+                try {
+                    val resp = ApiClient.service.recentMachines(cursor = cursor)
+                    if (resp.isSuccessful) {
+                        _state.value = _state.value.copy(
+                            recent = _state.value.recent + resp.body().orEmpty(),
+                            loadingMore = false,
+                            recentNextCursor = resp.headers()["X-Next-Cursor"],
+                        )
+                    } else {
+                        _state.value = _state.value.copy(loadingMore = false, error = resp.describeError("Couldn't load more"))
+                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    _state.value = _state.value.copy(loadingMore = false, error = "Can't reach the server. Check your connection.")
+                }
+            } else {
+                val cursor = _state.value.resultsNextCursor ?: return@launch
+                _state.value = _state.value.copy(loadingMore = true, error = null)
+                try {
+                    val resp = ApiClient.service.searchMachines(query = q, cursor = cursor)
+                    // Unlike the staleness checks elsewhere in this file,
+                    // this one must still clear loadingMore before bailing --
+                    // it was set to true just above, and nothing else here
+                    // will ever flip it back for this launch once stale.
+                    if (_state.value.query != q) {
+                        _state.value = _state.value.copy(loadingMore = false)
+                        return@launch
+                    }
+                    if (resp.isSuccessful) {
+                        _state.value = _state.value.copy(
+                            results = _state.value.results + resp.body().orEmpty(),
+                            loadingMore = false,
+                            resultsNextCursor = resp.headers()["X-Next-Cursor"],
+                        )
+                    } else {
+                        _state.value = _state.value.copy(loadingMore = false, error = resp.describeError("Couldn't load more"))
+                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    _state.value = _state.value.copy(
+                        loadingMore = false,
+                        error = if (_state.value.query == q) "Can't reach the server. Check your connection." else _state.value.error,
+                    )
+                }
+            }
         }
     }
 
@@ -224,11 +308,24 @@ class MachinesViewModel : ViewModel() {
                 } else {
                     _state.value = _state.value.copy(creatingConversation = false, error = resp.describeError("Couldn't start a conversation"))
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 _state.value = _state.value.copy(creatingConversation = false, error = "Can't reach the server. Check your connection.")
             }
         }
     }
+
+    // Keyed by machine id, bumped on every toggleFavorite() call for that
+    // machine -- a rollback below only applies if its own generation is
+    // still the latest one issued for this machine. Without this, a double
+    // tap (toggle, then toggle back, before the first request resolves)
+    // could have the FIRST request's failure handler revert past the
+    // SECOND request's own success: both calls close over the same `machine`
+    // parameter (captured from whatever was on screen when each was
+    // dispatched) and so compute the identical "revert to" value, with
+    // nothing otherwise distinguishing an in-order failure from a
+    // superseded one.
+    private val favoriteRequestGeneration = mutableMapOf<Int, Int>()
 
     /**
      * Toggles favorite state for [machine] in both the recent and search
@@ -240,6 +337,8 @@ class MachinesViewModel : ViewModel() {
      */
     fun toggleFavorite(machine: MachineOut) {
         val newValue = !machine.is_favorite
+        val generation = (favoriteRequestGeneration[machine.id] ?: 0) + 1
+        favoriteRequestGeneration[machine.id] = generation
         fun apply(list: List<MachineOut>, value: Boolean) =
             list.map { if (it.id == machine.id) it.copy(is_favorite = value) else it }
         _state.value = _state.value.copy(
@@ -251,13 +350,16 @@ class MachinesViewModel : ViewModel() {
             try {
                 val resp = ApiClient.service.setFavorite(machine.id, newValue)
                 if (!resp.isSuccessful) {
+                    if (favoriteRequestGeneration[machine.id] != generation) return@launch
                     _state.value = _state.value.copy(
                         recent = apply(_state.value.recent, machine.is_favorite),
                         results = apply(_state.value.results, machine.is_favorite),
                         error = resp.describeError("Couldn't update favorite"),
                     )
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (favoriteRequestGeneration[machine.id] != generation) return@launch
                 _state.value = _state.value.copy(
                     recent = apply(_state.value.recent, machine.is_favorite),
                     results = apply(_state.value.results, machine.is_favorite),
@@ -275,6 +377,7 @@ class MachinesViewModel : ViewModel() {
                     Log.w(TAG, "touchMachine($machineId) failed: HTTP ${resp.code()}")
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 // Recency/favorites tracking only -- never blocks or reports
                 // failure on the conversation this was attached to, which
                 // has already opened by the time this runs. Logged (not
@@ -303,7 +406,8 @@ class MachinesViewModel : ViewModel() {
                 } else {
                     _state.value = _state.value.copy(creatingConversation = false, error = resp.describeError("Couldn't start a conversation"))
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 _state.value = _state.value.copy(creatingConversation = false, error = "Can't reach the server. Check your connection.")
             }
         }

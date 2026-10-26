@@ -33,12 +33,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
@@ -54,6 +58,7 @@ import com.hmwagner.techmanual.ui.login.LoginScreen
 import com.hmwagner.techmanual.ui.machines.MachinesScreen
 import com.hmwagner.techmanual.ui.saved.SavedAnswersScreen
 import com.hmwagner.techmanual.util.isVersionCodeBelowMinimum
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -114,14 +119,123 @@ private enum class LaunchSessionState { Checking, SignedIn, SignedOut }
 
 // GET /api/config carries maintenance state and a minimum supported
 // version, so a maintenance incident or a forced-upgrade decision can reach
-// a technician through the app itself.
-private data class BlockingConfigState(val title: String, val message: String, val supportContact: String)
+// a technician through the app itself. updateUrl is populated from the same
+// config response whenever it's non-blank, so an "Update required" screen
+// can offer somewhere to actually go, not just a dead end.
+private data class BlockingConfigState(val title: String, val message: String, val supportContact: String, val updateUrl: String?)
 
 // Unlike BlockingConfigState, this never prevents the app from being used --
 // config.latest_version/update_url advertise a newer build without requiring
 // it. Both fields on ConfigOut must be non-blank for this to appear at all
 // (see ConfigOut's own doc comment).
 private data class UpdateAvailableState(val version: String, val updateUrl: String)
+
+/**
+ * Shared by AppNav's cold-launch check and its mid-session re-check (gate
+ * hit, or the app returning to the foreground) -- both need the exact same
+ * maintenance/minimum-version/latest-version logic against a freshly
+ * fetched config, not two copies that could drift apart. Returns null when
+ * the fetch itself failed/timed out -- distinct from a successful fetch
+ * reporting "not blocked" (a Pair of two nulls) -- so a caller re-checking
+ * an ALREADY-blocked screen (ON_RESUME) can tell "confirmed clear, safe to
+ * unblock" apart from "couldn't reach the server this time, leave the
+ * existing blocking state alone." Silently treating a failed mid-session
+ * re-check as "not blocked" would let a technician through a maintenance
+ * window or forced-upgrade screen just because the network blipped.
+ */
+private suspend fun fetchBlockingAndUpdateState(): Pair<BlockingConfigState?, UpdateAvailableState?>? {
+    val config = withTimeoutOrNull(5_000) {
+        try {
+            ApiClient.service.getConfig().takeIf { it.isSuccessful }?.body()
+        } catch (_: Exception) {
+            null
+        }
+    } ?: return null
+
+    val blocking = when {
+        config.maintenance_mode -> BlockingConfigState(
+            title = "Maintenance",
+            message = config.maintenance_message.ifBlank { "This app is temporarily in maintenance mode." },
+            supportContact = config.support_contact,
+            updateUrl = config.update_url.takeIf { it.isNotBlank() },
+        )
+        isVersionCodeBelowMinimum(BuildConfig.VERSION_CODE, config.minimum_supported_version_code) -> BlockingConfigState(
+            title = "Update required",
+            message = "A newer version of this app is required to continue.",
+            supportContact = config.support_contact,
+            updateUrl = config.update_url.takeIf { it.isNotBlank() },
+        )
+        else -> null
+    }
+    // Checked independently of the blocking branch above (not an `else` on
+    // it): a technician stuck below the minimum version sees the blocking
+    // screen regardless, but a technician who is merely behind the LATEST
+    // version -- still above minimum -- should see both Home and this
+    // notice, not one or the other.
+    val update = if (blocking == null && config.latest_version.isNotBlank() && config.update_url.isNotBlank() &&
+        isVersionCodeBelowMinimum(BuildConfig.VERSION_CODE, config.latest_version_code)
+    ) {
+        UpdateAvailableState(config.latest_version, config.update_url)
+    } else {
+        null
+    }
+    return blocking to update
+}
+
+/**
+ * The real /me validity check -- shared by the cold-launch LaunchedEffect
+ * and the Retry/ON_RESUME path that must run it LATE if the app launched
+ * straight into a blocking screen (see the comment on launchCheckCompleted
+ * in AppNav for why that case exists at all).
+ */
+private suspend fun resolveLaunchSessionState(): LaunchSessionState {
+    return if (!ApiClient.hasSession()) {
+        LaunchSessionState.SignedOut
+    } else {
+        // Bounded well below the client's real 15s connect / 90s read
+        // timeouts (ApiClient.kt) -- those are sized for a slow real
+        // answer, not for how long a technician should stare at an
+        // unlabeled spinner on cold launch. A timeout here fails open
+        // the same way an outright connection exception does, below;
+        // the real /me call is left to finish in the background and its
+        // result is simply discarded.
+        withTimeoutOrNull(5_000) {
+            try {
+                val resp = ApiClient.service.me()
+                if (resp.isSuccessful) {
+                    LaunchSessionState.SignedIn
+                } else if (resp.code() == 401) {
+                    // authExpiryInterceptor already cleared the cookie and
+                    // set sessionExpired for a 401 here; consuming it now
+                    // avoids a redundant navigate() once Home/Login mount.
+                    ApiClient.clearSession()
+                    ApiClient.onSessionExpiredHandled()
+                    LaunchSessionState.SignedOut
+                } else {
+                    // A temporary 500/503/429 here must not be treated
+                    // like a 401, or an outage during cold launch would
+                    // sign a technician out of a perfectly valid
+                    // session. Only 401 (get_current_user's own "session expired or
+                    // invalid" / "user no longer exists" / "disabled"
+                    // rejections -- see app/auth/deps.py) is proof the
+                    // session itself is bad; anything else is a server
+                    // hiccup and must fail open, same as the connection
+                    // exception below.
+                    LaunchSessionState.SignedIn
+                }
+            } catch (_: Exception) {
+                // Couldn't reach the server to validate -- fail open on a
+                // cached session rather than locking a technician out of
+                // the whole app while merely offline. Every real action
+                // still requires connectivity (plan: "Internet is
+                // required for AI answers"), so this only affects
+                // whether Home renders while offline, not whether stale
+                // data is trusted for anything that matters.
+                LaunchSessionState.SignedIn
+            }
+        } ?: LaunchSessionState.SignedIn
+    }
+}
 
 @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
 @Composable
@@ -137,95 +251,36 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
     var launchState by remember { mutableStateOf(LaunchSessionState.Checking) }
     var blockingConfig by remember { mutableStateOf<BlockingConfigState?>(null) }
     var updateAvailable by remember { mutableStateOf<UpdateAvailableState?>(null) }
+    // Set once the cold-launch effect below has run to completion, whichever
+    // way it went -- guards the ON_RESUME re-check further down from firing
+    // concurrently with THIS SAME check on cold launch (Activity start fires
+    // its own first ON_RESUME almost immediately), which would otherwise
+    // send two /api/config requests racing each other and -- more
+    // concretely, in an instrumented test driving a single MockWebServer
+    // queue -- consume two enqueued responses for a scenario that only
+    // expects one.
+    var launchCheckCompleted by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         // Bounded the same way the /me check below is -- a slow/unreachable
         // config endpoint must not meaningfully delay startup, and a
         // technician must never be locked OUT of the app by a config check
         // that itself couldn't complete (fails open: null on any failure).
-        val config = withTimeoutOrNull(5_000) {
-            try {
-                ApiClient.service.getConfig().takeIf { it.isSuccessful }?.body()
-            } catch (_: Exception) {
-                null
-            }
-        }
-        if (config != null) {
-            blockingConfig = when {
-                config.maintenance_mode -> BlockingConfigState(
-                    title = "Maintenance",
-                    message = config.maintenance_message.ifBlank { "This app is temporarily in maintenance mode." },
-                    supportContact = config.support_contact,
-                )
-                isVersionCodeBelowMinimum(BuildConfig.VERSION_CODE, config.minimum_supported_version_code) -> BlockingConfigState(
-                    title = "Update required",
-                    message = "A newer version of this app is required to continue.",
-                    supportContact = config.support_contact,
-                )
-                else -> null
-            }
-            // Checked independently of the blocking branch above (not an
-            // `else` on it): a technician stuck below the minimum version
-            // sees the blocking screen regardless, but a technician who is
-            // merely behind the LATEST version -- still above minimum --
-            // should see both Home and this notice, not one or the other.
-            if (blockingConfig == null && config.latest_version.isNotBlank() && config.update_url.isNotBlank() &&
-                isVersionCodeBelowMinimum(BuildConfig.VERSION_CODE, config.latest_version_code)
-            ) {
-                updateAvailable = UpdateAvailableState(config.latest_version, config.update_url)
-            }
-        }
+        val result = fetchBlockingAndUpdateState()
+        blockingConfig = result?.first
+        updateAvailable = result?.second
         // Skip the session check entirely once blocked -- nothing it could
         // find changes what renders, and (more concretely, in tests) it
         // would otherwise wait out its own 5s timeout for a response no one
-        // needs to enqueue.
-        if (blockingConfig != null) return@LaunchedEffect
-
-        launchState = if (!ApiClient.hasSession()) {
-            LaunchSessionState.SignedOut
-        } else {
-            // Bounded well below the client's real 15s connect / 90s read
-            // timeouts (ApiClient.kt) -- those are sized for a slow real
-            // answer, not for how long a technician should stare at an
-            // unlabeled spinner on cold launch. A timeout here fails open
-            // the same way an outright connection exception does, below;
-            // the real /me call is left to finish in the background and its
-            // result is simply discarded.
-            withTimeoutOrNull(5_000) {
-                try {
-                    val resp = ApiClient.service.me()
-                    if (resp.isSuccessful) {
-                        LaunchSessionState.SignedIn
-                    } else if (resp.code() == 401) {
-                        // authExpiryInterceptor already cleared the cookie and
-                        // set sessionExpired for a 401 here; consuming it now
-                        // avoids a redundant navigate() once Home/Login mount.
-                        ApiClient.clearSession()
-                        ApiClient.onSessionExpiredHandled()
-                        LaunchSessionState.SignedOut
-                    } else {
-                        // A temporary 500/503/429 here must not be treated
-                        // like a 401, or an outage during cold launch would
-                        // sign a technician out of a perfectly valid
-                        // session. Only 401 (get_current_user's own "session expired or
-                        // invalid" / "user no longer exists" / "disabled"
-                        // rejections -- see app/auth/deps.py) is proof the
-                        // session itself is bad; anything else is a server
-                        // hiccup and must fail open, same as the connection
-                        // exception below.
-                        LaunchSessionState.SignedIn
-                    }
-                } catch (_: Exception) {
-                    // Couldn't reach the server to validate -- fail open on a
-                    // cached session rather than locking a technician out of
-                    // the whole app while merely offline. Every real action
-                    // still requires connectivity (plan: "Internet is
-                    // required for AI answers"), so this only affects
-                    // whether Home renders while offline, not whether stale
-                    // data is trusted for anything that matters.
-                    LaunchSessionState.SignedIn
-                }
-            } ?: LaunchSessionState.SignedIn
+        // needs to enqueue. launchState is left at Checking in that case;
+        // recheckAndMaybeUnblock() below runs this same check later, once
+        // the block actually clears, rather than leaving the technician
+        // staring at "Checking your session…" forever once it does.
+        if (blockingConfig != null) {
+            launchCheckCompleted = true
+            return@LaunchedEffect
         }
+        launchState = resolveLaunchSessionState()
+        launchCheckCompleted = true
     }
 
     // A deliberate logout() shares this exact flag/handling with a 401
@@ -274,6 +329,69 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
         }
     }
 
+    // A maintenance window or minimum-version bump declared AFTER the
+    // LaunchedEffect(Unit) startup check above already passed must still
+    // reach a technician already past it -- ApiClient's interceptor flips
+    // blockingGateHit the moment the server's gate middleware rejects any
+    // request with 426/503. Re-fetches /api/config for the authoritative
+    // message/update-url rather than trusting the one rejected response.
+    val blockingGateHit by ApiClient.blockingGateHit.collectAsState()
+    LaunchedEffect(blockingGateHit) {
+        if (blockingGateHit) {
+            // A failed re-check here just means the triggering request's own
+            // error surfaces normally through whatever screen made it --
+            // never treated as "so it must not be blocked after all."
+            val result = fetchBlockingAndUpdateState()
+            if (result?.first != null) blockingConfig = result.first
+            if (result?.second != null) updateAvailable = result.second
+            ApiClient.onBlockingGateHandled()
+        }
+    }
+
+    // Shared by the foreground re-check below and the blocking screen's own
+    // Retry button -- both need "only act on a SUCCESSFUL re-check" (see
+    // fetchBlockingAndUpdateState's doc comment): confirming still-blocked,
+    // or genuinely clearing it once the window has passed, never clearing
+    // an active block just because this one fetch happened to fail.
+    val coroutineScope = rememberCoroutineScope()
+    suspend fun recheckAndMaybeUnblock() {
+        val result = fetchBlockingAndUpdateState()
+        if (result != null) {
+            blockingConfig = result.first
+            if (result.second != null) updateAvailable = result.second
+            // The cold-launch effect above never ran resolveLaunchSessionState()
+            // because it was blocked from the very first frame -- launchState
+            // is still sitting at its initial Checking value. Now that this
+            // block has actually cleared, run it for the first time, or the
+            // `when` below falls through to LaunchChecking() forever (nothing
+            // else is left to ever flip launchState away from Checking).
+            if (blockingConfig == null && launchState == LaunchSessionState.Checking) {
+                launchState = resolveLaunchSessionState()
+            }
+        }
+    }
+
+    // Also re-checked on the app returning to the foreground -- a
+    // maintenance window can start and end entirely between two requests,
+    // with no 426/503 in between to trigger the check above (e.g. a
+    // technician who put the app in the background before the window
+    // opened and brings it back after it's over, or still blocked and
+    // wants a Retry on foregrounding without tapping a button).
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            // launchCheckCompleted guard: skip the very first ON_RESUME,
+            // which fires on cold launch almost immediately after the
+            // LaunchedEffect(Unit) above starts -- without it, both would
+            // race a /api/config call at startup every time.
+            if (event == Lifecycle.Event.ON_RESUME && launchCheckCompleted) {
+                coroutineScope.launch { recheckAndMaybeUnblock() }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     val blocking = blockingConfig
     when {
         // Checked ahead of launchState entirely: a maintenance window or a
@@ -281,7 +399,10 @@ fun AppNav(windowSizeClass: WindowSizeClass) {
         // to have a valid session -- an outdated or maintenance-mode client
         // must not reach Login either, since there is nothing useful to do
         // there until the incident clears.
-        blocking != null -> BlockingConfigScreen(blocking)
+        blocking != null -> BlockingConfigScreen(
+            state = blocking,
+            onRetry = { coroutineScope.launch { recheckAndMaybeUnblock() } },
+        )
         launchState == LaunchSessionState.Checking -> LaunchChecking()
         else -> {
             val startDestination = if (launchState == LaunchSessionState.SignedIn) Routes.HOME else Routes.LOGIN
@@ -317,7 +438,8 @@ private fun LaunchChecking() {
 }
 
 @Composable
-private fun BlockingConfigScreen(state: BlockingConfigState) {
+private fun BlockingConfigScreen(state: BlockingConfigState, onRetry: () -> Unit) {
+    val context = LocalContext.current
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -332,6 +454,24 @@ private fun BlockingConfigScreen(state: BlockingConfigState) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // A maintenance window needs only Retry (there's nothing to
+                // update to); "Update required" needs both, since installing
+                // the update is the actual way out and Retry alone would
+                // just keep re-confirming the same block.
+                state.updateUrl?.let { url ->
+                    TextButton(onClick = {
+                        // Same best-effort pattern as UpdateAvailableBanner's
+                        // own Update button below -- fails silently only if
+                        // the device has nothing that can open a URL at all.
+                        try {
+                            context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, url.toUri()))
+                        } catch (_: Exception) {
+                        }
+                    }) { Text("Update") }
+                }
+                TextButton(onClick = onRetry) { Text("Retry") }
             }
         }
     }

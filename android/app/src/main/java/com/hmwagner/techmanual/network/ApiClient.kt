@@ -42,6 +42,22 @@ object ApiClient {
         _sessionExpired.value = false
     }
 
+    // Flips true the moment any request comes back 426 or 503 -- the only
+    // two statuses app/main.py's maintenance_and_version_gate middleware
+    // ever returns (a maintenance window or a now-below-minimum app
+    // version declared mid-session, after AppNav's own startup /api/config
+    // check already passed). AppNav observes this and re-fetches /api/config
+    // for the authoritative message/update-url rather than parsing it out of
+    // this one rejected response, then shows the same blocking screen the
+    // startup check would have shown if the gate had already been active at
+    // launch.
+    private val _blockingGateHit = MutableStateFlow(false)
+    val blockingGateHit: StateFlow<Boolean> = _blockingGateHit
+
+    fun onBlockingGateHandled() {
+        _blockingGateHit.value = false
+    }
+
     /**
      * A visible, explicit sign-out, reachable from every signed-in screen.
      * Always ends the local session even if the server can't be reached --
@@ -94,6 +110,7 @@ object ApiClient {
     // the way overrideServiceForTest's JVM unit tests do.
     fun initForTest(context: Context, baseUrl: String) {
         _sessionExpired.value = false
+        _blockingGateHit.value = false
         build(context, baseUrl)
     }
 
@@ -126,6 +143,9 @@ object ApiClient {
             if (response.code == 401 && !request.url.encodedPath.endsWith("/api/auth/login")) {
                 cookieJar.clear()
                 _sessionExpired.value = true
+            }
+            if (response.code == 426 || response.code == 503) {
+                _blockingGateHit.value = true
             }
             response
         }

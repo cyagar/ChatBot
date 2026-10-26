@@ -53,6 +53,6 @@ anthropic==0.125.0
 
 pytesseract==0.3.13
 
-# --- Google Drive document source (DOCUMENT_SOURCE=google_drive) ---
+# --- Google Drive document source (the only corpus source; no DOCUMENT_SOURCE setting exists) ---
 google-api-python-client==2.199.0
 google-auth==2.56.3

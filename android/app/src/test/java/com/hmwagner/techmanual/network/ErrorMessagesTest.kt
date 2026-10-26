@@ -43,7 +43,7 @@ class ErrorMessagesTest {
     }
 
     @Test
-    fun `describeError includes the correlation id when the error body carries one`() = runBlocking {
+    fun `describeError uses the server's own detail text, with the correlation id appended as a ref`() = runBlocking {
         server.enqueue(
             MockResponse().setResponseCode(500)
                 .setHeader("Content-Type", "application/json")
@@ -56,7 +56,24 @@ class ErrorMessagesTest {
         val resp = service.me()
         val message = resp.describeError("Couldn't load this")
 
-        assertEquals("Couldn't load this (code 500, ref: abc-123-def).", message)
+        // The server's own specific detail wins over the generic
+        // "$action (code N)" wrapper -- that generic form is only a
+        // fallback for when the body carries no detail at all (below).
+        assertEquals("Something broke (ref: abc-123-def)", message)
+    }
+
+    @Test
+    fun `describeError falls back to the message field when detail is blank`() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(500)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"detail": "", "message": "Something broke", "correlation_id": "abc-123-def"}"""),
+        )
+
+        val resp = service.me()
+        val message = resp.describeError("Couldn't load this")
+
+        assertEquals("Something broke (ref: abc-123-def)", message)
     }
 
     @Test
@@ -81,5 +98,40 @@ class ErrorMessagesTest {
         val message = resp.describeError("Couldn't load this")
 
         assertEquals("Couldn't load this (code 502).", message)
+    }
+
+    @Test
+    fun `describeError uses the server detail with no ref suffix when there is no correlation id`() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(409)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"detail": "An account with this email already exists."}"""),
+        )
+
+        val resp = service.me()
+        val message = resp.describeError("Couldn't register")
+
+        assertEquals("An account with this email already exists.", message)
+    }
+
+    @Test
+    fun `describeErrorWithCode surfaces retryable and field_errors from the body`() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(422)
+                .setHeader("Content-Type", "application/json")
+                .setBody(
+                    """{"detail": "Invalid request.", "code": "VALIDATION_ERROR", "retryable": false,
+                        "field_errors": [{"field": "email", "message": "not a valid email"}]}""",
+                ),
+        )
+
+        val resp = service.me()
+        val failure = resp.describeErrorWithCode("Couldn't submit")
+
+        assertEquals("VALIDATION_ERROR", failure.code)
+        assertEquals(false, failure.retryable)
+        assertEquals(1, failure.fieldErrors.size)
+        assertEquals("email", failure.fieldErrors[0].field)
+        assertEquals("not a valid email", failure.fieldErrors[0].message)
     }
 }

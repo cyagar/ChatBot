@@ -97,9 +97,9 @@ def test_a_question_is_askable_again_once_the_lock_is_released(test_env, monkeyp
 
 
 def test_a_zombie_write_is_fenced_out_by_a_real_row_lock_after_lease_reclaim(test_env, monkeypatch):
-    """FinalChanges.txt F06/F07, driven under REAL concurrent requests (two
-    threads, the real TestClient, real Postgres) rather than mocked
-    connections: a slow attempt whose lease expires while its provider call
+    """Driven under REAL concurrent requests (two threads, the real
+    TestClient, real Postgres) rather than mocked connections: a slow
+    attempt whose lease expires while its provider call
     is still blocked must not be able to persist its answer once a LATER
     attempt has reclaimed the lease and answered a different question --
     _generate_and_persist_answer's fencing is now a real row lock on

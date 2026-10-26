@@ -88,7 +88,28 @@ class LoginViewModelTest {
     }
 
     @Test
-    fun `wrong password surfaces a specific message and does not log in`() {
+    fun `wrong password surfaces the server's own detail message and does not log in`() {
+        // The real shape app/auth/routes.py's login() actually returns for
+        // bad credentials -- asserting against it (not an empty 401 body)
+        // is what proves this path uses describeError's detail, not a
+        // fixed per-status-code string that would just discard it.
+        server.enqueue(
+            MockResponse().setResponseCode(401)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"detail": "Invalid email or password.", "code": "UNAUTHORIZED"}"""),
+        )
+
+        vm.onEmailChange("tech.demo@hmwagner.com")
+        vm.onPasswordChange("wrong")
+        vm.login()
+        awaitState { !it.loading }
+
+        assertFalse(vm.state.value.loggedIn)
+        assertEquals("Invalid email or password.", vm.state.value.error)
+    }
+
+    @Test
+    fun `a status with no parseable body still surfaces a generic message with the code`() {
         server.enqueue(MockResponse().setResponseCode(401))
 
         vm.onEmailChange("tech.demo@hmwagner.com")
@@ -97,7 +118,7 @@ class LoginViewModelTest {
         awaitState { !it.loading }
 
         assertFalse(vm.state.value.loggedIn)
-        assertEquals("Incorrect email or password.", vm.state.value.error)
+        assertEquals("Sign-in failed (code 401).", vm.state.value.error)
     }
 
     @Test

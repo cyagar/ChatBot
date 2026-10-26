@@ -27,8 +27,13 @@ Google Drive folder ──▶ ingestion ──▶ PostgreSQL (Neon)  ◀──�
 ## Ingestion
 
 `app/ingestion/`: `GoogleDriveSource` lists the shared folder and caches each
-file by Drive file ID (checksum-verified). Per file, under a PostgreSQL
-advisory lock and a processing lease:
+file by Drive file ID (checksum-verified). One PostgreSQL advisory lock is
+held for the WHOLE RUN, not re-acquired per file, plus a process-local lock
+that refuses a second concurrent run in the same process. Neither is the
+chat processing lease (`PROCESSING_LEASE_SECONDS`/`processing_attempt_id` in
+`routes_chat.py`) -- ingestion has no reclaimable-lease construct of its own;
+a killed run is instead recovered at the next startup (orphaned `running`
+rows are failed, see "Document lifecycle" below). Per file:
 
 1. Type detection by content (magic bytes), not extension.
 2. Extraction: PyMuPDF text and headings, pdfplumber tables, optional Tesseract
@@ -37,7 +42,13 @@ advisory lock and a processing lease:
 3. Metadata from a curated manufacturer/model catalog and regexes.
 4. Chunking by heading, numbered procedure, warning line and table.
 5. Deduplication by SHA-256 and near-duplicate containment.
-6. Embedding with a pinned `BAAI/bge-small-en-v1.5` revision baked into the image.
+
+Once every file in the run has gone through that per-file pass, a separate,
+batched step (`_embed_pending_chunks`) embeds every pending chunk across the
+whole run -- and any leftover pending chunks from earlier runs -- with a
+pinned `BAAI/bge-small-en-v1.5` revision baked into the image. This is not a
+sixth per-file step: it runs once, after the per-file loop, over all chunks
+at once.
 
 Runs are idempotent and resumable, recorded in `ingestion_runs` /
 `ingestion_events`, and reconcile against the Drive listing: a document that

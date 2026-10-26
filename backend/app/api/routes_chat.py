@@ -158,8 +158,20 @@ def _resolve_machine_mention(question: str) -> tuple[int | None, list[dict]]:
     already is."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT m.id, m.model_name, m.aliases, mf.name AS manufacturer FROM machines m "
-            "JOIN manufacturers mf ON mf.id = m.manufacturer_id"
+            # Same eligibility rules as routes_machines.py's search_machines/
+            # recent_machines (approved link, indexed/partial + approved +
+            # current-revision document) -- without this join, a free-text
+            # mention could resolve to a machine the explicit picker would
+            # never even show, immediately dead-ending into "no manuals"
+            # right after the technician just confirmed which machine they
+            # meant. DISTINCT, not GROUP BY: nothing here is aggregated, just
+            # de-duplicated against however many qualifying links/documents
+            # a machine happens to have.
+            "SELECT DISTINCT m.id, m.model_name, m.aliases, mf.name AS manufacturer FROM machines m "
+            "JOIN manufacturers mf ON mf.id = m.manufacturer_id "
+            "JOIN document_machines dm ON dm.machine_id = m.id AND dm.review_status = 'approved' "
+            "JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial') "
+            "AND d.deactivated_at IS NULL AND d.review_status = 'approved' AND d.is_current_revision = true"
         ).fetchall()
     q_lower = question.lower()
 
