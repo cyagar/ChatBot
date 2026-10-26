@@ -47,6 +47,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -55,6 +56,9 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -106,6 +110,29 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
     val vm: ChatViewModel = viewModel(key = "chat-$conversationId", factory = ChatViewModel.Factory(conversationId))
     val state by vm.state.collectAsState()
     val listState = rememberLazyListState()
+
+    // Refreshes whenever this screen becomes the active one again -- both
+    // when the whole app returns to the foreground (ON_RESUME) and when the
+    // two-pane layout switches back to this conversation after viewing
+    // another one. TwoPaneHome's key(selectedId) disposes and recreates
+    // THIS composable's own composition on every switch (even back to a
+    // prior id), but the retained ChatViewModel above is deliberately kept
+    // alive across that -- its `init` block already ran once and never
+    // re-runs, so without an effect here, reopening a conversation after a
+    // source was withdrawn, a retry elsewhere finished, or another device
+    // answered would show only the stale state already in memory.
+    // refresh() is safe to call redundantly: loadGeneration/
+    // askQuestionInFlight (ChatViewModel) already guard it against racing
+    // an in-flight send or an older response overwriting a newer one.
+    LaunchedEffect(vm) { vm.refresh() }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, vm) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) vm.refresh()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(state.messages.size, state.pendingEcho) {
         val lastIndex = state.messages.size + (if (state.pendingEcho != null) 1 else 0)

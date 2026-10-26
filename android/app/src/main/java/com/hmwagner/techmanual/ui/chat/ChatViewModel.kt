@@ -316,10 +316,26 @@ class ChatViewModel(
                 // pending under the same key and check on it.
                 _state.value = _state.value.copy(sending = false)
                 loadMessages()
+            } else if (resp.code() in 500..599) {
+                // A 5xx is not proof the question was never accepted -- a
+                // gateway can time out or error AFTER the backend already
+                // committed the user turn (and a gateway timeout often
+                // carries no parseable backend body at all, so branching on
+                // `failure.code` alone would miss this). Treated the same as
+                // the connection-exception branch below: stays pending under
+                // its key so Retry replays/resumes it, instead of clearing
+                // the key and risking a second, duplicate turn on the next
+                // Send.
+                _state.value = _state.value.copy(
+                    sending = false,
+                    pendingEchoUncertain = true,
+                    pendingEchoStillProcessing = false,
+                    error = "${failure.message} Tap Retry to check whether it went through.",
+                )
             } else {
                 // Any other rejection -- a busy conversation, a superseded or
-                // mismatched key, a validation or server error -- means this
-                // question was not accepted for answering.
+                // mismatched key, a validation error -- means this question
+                // was not accepted for answering.
                 rejectPendingQuestion(echo, failure.message)
             }
         } catch (e: CancellationException) {

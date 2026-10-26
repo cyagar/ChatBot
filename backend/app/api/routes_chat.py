@@ -539,54 +539,38 @@ def _generate_and_persist_answer(
     result.citations = deduped_citations
 
     with get_conn() as conn:
-        # The fencing check happens INSIDE the same write statement
-        # (EXISTS subquery), not as a separate read beforehand -- a
-        # read-then-write here would itself be a TOCTOU race against a
-        # concurrent reclaim. Fencing is skipped only when attempt_id wasn't
+        # Fenced FIRST, as its own real row lock on `conversations` -- an
+        # UPDATE statement takes and holds a row-level lock until this
+        # transaction commits or rolls back, which an EXISTS subquery
+        # embedded in the message write below does not: EXISTS only reads a
+        # snapshot of processing_attempt_id at that instant, so a concurrent
+        # reclaim's own UPDATE to that same column could still commit
+        # between this statement's snapshot and the message write actually
+        # landing -- two statements inside the same transaction are not
+        # automatically serialized against a DIFFERENT transaction just by
+        # both appearing here. Taking the lock up front means a concurrent
+        # reclaim attempt (which must itself UPDATE this same conversations
+        # row) blocks until we commit or roll back, closing that gap. This
+        # also folds in the conversation's updated_at bump -- previously a
+        # separate, entirely unfenced statement after the message write --
+        # since that touch is just as much this attempt's exclusive work as
+        # the message itself. Fencing is skipped only when attempt_id wasn't
         # given at all (defensive default; every real caller passes one).
         fence_ok = True
         if attempt_id is not None:
-            if retry_message_id is not None:
-                # Replace this message's own prior sources -- a retry's new
-                # passages/citations must not be appended alongside the failed
-                # attempt's, which could otherwise resurrect a source the new
-                # attempt never actually cited. Sources are only touched once
-                # the fenced UPDATE below confirms this attempt still owns the
-                # lease.
-                claim = conn.execute(
-                    "UPDATE messages SET content = %s, is_no_answer = %s, machine_id = %s, "
-                    "safety_warnings = %s, conflict_note = %s, provider = %s, answer_status = %s, "
-                    "retry_count = retry_count + 1 WHERE id = %s AND EXISTS ("
-                    "SELECT 1 FROM conversations WHERE id = %s AND processing_attempt_id = %s)",
-                    (
-                        result.answer, result.is_no_answer, machine_id,
-                        json.dumps(result.safety_warnings) if result.safety_warnings else None,
-                        result.conflict_note, result.provider, answer_status, retry_message_id,
-                        conversation_id, attempt_id,
-                    ),
-                )
-                fence_ok = claim.rowcount > 0
-                if fence_ok:
-                    conn.execute("DELETE FROM message_sources WHERE message_id = %s", (retry_message_id,))
-                msg_id = retry_message_id
-            else:
-                cur = conn.execute(
-                    "INSERT INTO messages (conversation_id, role, content, is_no_answer, machine_id, "
-                    "safety_warnings, conflict_note, provider, answer_status, reply_to_message_id) "
-                    "SELECT %s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s WHERE EXISTS ("
-                    "SELECT 1 FROM conversations WHERE id = %s AND processing_attempt_id = %s) "
-                    "RETURNING id",
-                    (
-                        conversation_id, result.answer, result.is_no_answer, machine_id,
-                        json.dumps(result.safety_warnings) if result.safety_warnings else None,
-                        result.conflict_note, result.provider, answer_status, user_message_id,
-                        conversation_id, attempt_id,
-                    ),
-                )
-                inserted = cur.fetchone()
-                fence_ok = inserted is not None
-                msg_id = inserted["id"] if inserted else None
-        elif retry_message_id is not None:
+            fence_claim = conn.execute(
+                "UPDATE conversations SET updated_at = now() WHERE id = %s AND processing_attempt_id = %s",
+                (conversation_id, attempt_id),
+            )
+            fence_ok = fence_claim.rowcount > 0
+
+        if fence_ok and retry_message_id is not None:
+            # Replace this message's own prior sources -- a retry's new
+            # passages/citations must not be appended alongside the failed
+            # attempt's, which could otherwise resurrect a source the new
+            # attempt never actually cited. Safe to do unconditionally here:
+            # either fencing passed and we hold the conversation row lock for
+            # the rest of this transaction, or attempt_id was never given.
             conn.execute("DELETE FROM message_sources WHERE message_id = %s", (retry_message_id,))
             conn.execute(
                 "UPDATE messages SET content = %s, is_no_answer = %s, machine_id = %s, "
@@ -599,7 +583,7 @@ def _generate_and_persist_answer(
                 ),
             )
             msg_id = retry_message_id
-        else:
+        elif fence_ok:
             cur = conn.execute(
                 "INSERT INTO messages (conversation_id, role, content, is_no_answer, machine_id, "
                 "safety_warnings, conflict_note, provider, answer_status, reply_to_message_id) "
@@ -652,31 +636,26 @@ def _generate_and_persist_answer(
                     citation_ordinal_by_chunk.get(p.chunk_id),
                 ),
             )
-        conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (conversation_id,))
+        if attempt_id is None:
+            # The fencing UPDATE above already bumped updated_at when an
+            # attempt_id was given -- only the legacy no-fencing path (see
+            # that UPDATE's own comment) still needs it done here.
+            conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (conversation_id,))
         # pending_message_id is already cleared by the caller before this runs
         # -- ask_question clears it unconditionally on any new user turn, and
         # set_conversation_machine claims it atomically before resuming --
         # so there is nothing left to clear here.
-        row = conn.execute(
-            "SELECT created_at, retry_count FROM messages WHERE id=%s", (msg_id,)
-        ).fetchone()
-
-    return MessageOut(
-        id=msg_id, role="assistant", content=result.answer,
-        is_clarifying_question=False, is_no_answer=result.is_no_answer,
-        answer_status=answer_status,
-        citations=[
-            CitationOut(chunk_id=c.chunk_id, document_id=c.document_id, filename=c.filename,
-                        title=c.title, page_number=c.page_number, section_heading=c.section_heading,
-                        revision=c.revision, excerpt=c.excerpt)
-            for c in result.citations
-        ],
-        safety_warnings=result.safety_warnings,
-        conflict_note=result.conflict_note,
-        retry_count=row["retry_count"],
-        created_at=row["created_at"],
-        reply_to_message_id=user_message_id,
-    )
+        #
+        # Hydrated the same way a reload reads it back (_hydrate_message),
+        # not hand-built from `result`/`passages` -- those were captured
+        # BEFORE the provider call, which can run long enough for a source's
+        # eligibility (document deactivated/un-approved, or its link to
+        # THIS machine rejected) to change before this response goes out.
+        # Hand-building citations from stale pre-call data let a since
+        # -withdrawn source reach the technician marked current in the live
+        # response, only becoming visibly withdrawn after a later reload.
+        row = conn.execute(f"SELECT {_MESSAGE_COLUMNS} FROM messages WHERE id=%s", (msg_id,)).fetchone()
+        return _hydrate_message(conn, row, user_id)
 
 
 class SetMachineRequest(BaseModel):
@@ -726,8 +705,23 @@ def set_conversation_machine(
             # or a conversation stuck by a dead worker becomes reclaimable
             # for questions/retries but permanently stuck for machine
             # switches.
+            #
+            # That expired-lease case also means processing_attempt_id can
+            # still hold a PRIOR (now-abandoned) attempt's fencing token --
+            # nothing clears it until that attempt's own release runs, which
+            # hasn't happened yet (its provider call is still in flight).
+            # Left alone, a switch here would change machine_id while that
+            # token still matches, so a delayed zombie write from the OLD
+            # attempt could still pass _generate_and_persist_answer's fence
+            # check afterward and persist an answer for the OLD machine under
+            # a conversation now labeled with the NEW one. Clearing the
+            # processing columns in this SAME statement closes that gap --
+            # harmless when is_processing was already false (nothing to
+            # clear), and correct cleanup of a lease that's already overdue
+            # when it wasn't.
             claim = conn.execute(
-                "UPDATE conversations SET machine_id = %s, updated_at = now() "
+                "UPDATE conversations SET machine_id = %s, updated_at = now(), "
+                "is_processing = false, processing_attempt_id = NULL, processing_claimed_at = NULL "
                 f"WHERE id = %s AND {_LEASE_AVAILABLE_SQL}",
                 (payload.machine_id, conversation_id, PROCESSING_LEASE_SECONDS),
             )
@@ -738,58 +732,53 @@ def set_conversation_machine(
                            "finish, or start a new conversation, before switching machines.",
                 )
         else:
-            conn.execute(
-                "UPDATE conversations SET machine_id = %s, updated_at = now() WHERE id = %s",
-                (payload.machine_id, conversation_id),
+            # Atomically combined with the pending-message claim below, not a
+            # separate unconditional write: a double-tap on a clarify button
+            # fires two concurrent requests that would otherwise both read
+            # the same pending_id, and an UNCONDITIONAL machine_id write here
+            # let the LOSER of that race (whose pending-claim correctly fails
+            # below) still clobber the WINNER's machine_id choice after the
+            # winner had already started generating against it. Folding both
+            # into one UPDATE, gated on the same pending_message_id = %s
+            # compare-and-swap, means only the winner's machine selection is
+            # ever applied.
+            claim = conn.execute(
+                "UPDATE conversations SET machine_id = %s, updated_at = now(), pending_message_id = NULL "
+                "WHERE id = %s AND pending_message_id = %s",
+                (payload.machine_id, conversation_id, pending_id),
             )
         pending_question = None
         pending_history: list[HistoryTurn] | None = None
-        if pending_id is not None:
-            # Atomically claim the pending message before generating anything.
-            # A double-tap on a clarify button (easy on a tablet) fires two
-            # concurrent requests that would otherwise both read the same
-            # pending_id here and both call the provider -- this UPDATE's WHERE
-            # clause is an atomic compare-and-swap (Postgres row-level locking
-            # during the UPDATE serializes concurrent writers on this same
-            # row), so only one of these UPDATEs can match the row while
-            # pending_message_id still equals pending_id; the loser sees
-            # rowcount 0 and skips generation entirely instead of producing a
-            # second duplicate answer.
-            claim = conn.execute(
-                "UPDATE conversations SET pending_message_id = NULL "
-                "WHERE id = %s AND pending_message_id = %s",
-                (conversation_id, pending_id),
-            )
-            if claim.rowcount == 1:
-                # This resume also does retrieval/provider work, so it must
-                # hold the same conversation-level processing lock
-                # ask_question does -- an
-                # ask_question racing in at exactly this moment must not be
-                # able to start a second concurrent provider call. If the
-                # lock is already held (shouldn't happen in practice, but
-                # would otherwise silently drop this pending question),
-                # restore the pending claim so a later request can retry it
-                # instead of orphaning it.
-                attempt_id = _claim_conversation_processing(conn, conversation_id)
-                if attempt_id:
-                    pending_row = conn.execute("SELECT content FROM messages WHERE id = %s", (pending_id,)).fetchone()
-                    if pending_row is not None:
-                        pending_question = pending_row["content"]
-                        pending_history = _fetch_history(conn, conversation_id, before_message_id=pending_id)
-                    else:
-                        # Same-connection release, fenced on attempt_id -- see
-                        # the matching comment in ask_question's
-                        # clarifying-question branch.
-                        conn.execute(
-                            "UPDATE conversations SET is_processing = false, processing_attempt_id = NULL, "
-                            "processing_claimed_at = NULL WHERE id = %s AND processing_attempt_id = %s",
-                            (conversation_id, attempt_id),
-                        )
+        if pending_id is not None and claim.rowcount == 1:
+            # This resume also does retrieval/provider work, so it must
+            # hold the same conversation-level processing lock
+            # ask_question does -- an
+            # ask_question racing in at exactly this moment must not be
+            # able to start a second concurrent provider call. If the
+            # lock is already held (shouldn't happen in practice, but
+            # would otherwise silently drop this pending question),
+            # restore the pending claim so a later request can retry it
+            # instead of orphaning it.
+            attempt_id = _claim_conversation_processing(conn, conversation_id)
+            if attempt_id:
+                pending_row = conn.execute("SELECT content FROM messages WHERE id = %s", (pending_id,)).fetchone()
+                if pending_row is not None:
+                    pending_question = pending_row["content"]
+                    pending_history = _fetch_history(conn, conversation_id, before_message_id=pending_id)
                 else:
+                    # Same-connection release, fenced on attempt_id -- see
+                    # the matching comment in ask_question's
+                    # clarifying-question branch.
                     conn.execute(
-                        "UPDATE conversations SET pending_message_id = %s WHERE id = %s",
-                        (pending_id, conversation_id),
+                        "UPDATE conversations SET is_processing = false, processing_attempt_id = NULL, "
+                        "processing_claimed_at = NULL WHERE id = %s AND processing_attempt_id = %s",
+                        (conversation_id, attempt_id),
                     )
+            else:
+                conn.execute(
+                    "UPDATE conversations SET pending_message_id = %s WHERE id = %s",
+                    (pending_id, conversation_id),
+                )
 
         row = conn.execute(
             "SELECT id, machine_id, title, started_at, updated_at FROM conversations WHERE id = %s",
@@ -1064,8 +1053,7 @@ def ask_question(
         idempotency_key = None
 
     with get_conn() as conn:
-        conv = _require_own_conversation(conn, conversation_id, user.id)
-        machine_id = conv["machine_id"]
+        _require_own_conversation(conn, conversation_id, user.id)
 
         # A stored turn under this key is either replayed (it has a reply) or,
         # when it was accepted but never answered and is still the newest
@@ -1103,6 +1091,18 @@ def ask_question(
                 "CONVERSATION_BUSY",
                 retryable=True,
             )
+
+        # Re-read, not the value captured before the claim above: a
+        # concurrent machine switch (set_conversation_machine's
+        # _LEASE_AVAILABLE_SQL-gated branch) only blocks once the lease is
+        # actually held -- it can still run and commit in the gap between
+        # that earlier read and this claim succeeding. Using the stale value
+        # from before the claim would generate this answer against the OLD
+        # machine while the conversation row -- and its header on reload --
+        # already show the NEW one.
+        machine_id = conn.execute(
+            "SELECT machine_id FROM conversations WHERE id = %s", (conversation_id,)
+        ).fetchone()["machine_id"]
 
         if resume_message_id is not None:
             # The claim can succeed just after the original attempt finished;
@@ -1254,9 +1254,28 @@ def retry_answer(
         if not row or row["role"] != "assistant":
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Message not found.")
 
+        # A process death between this commit and _generate_and_persist_answer
+        # finishing (outside this `with get_conn()` block, below) would leave
+        # answer_status stuck at 'retrying' forever if the only way back to
+        # 'failed' were this same WHERE clause -- a later retry_answer call
+        # only ever matches 'failed', never 'retrying'. Recovering a 'retrying'
+        # row is folded into this SAME claim, not a separate read-then-write:
+        # a row stuck at 'retrying' is only reclaimable once the conversation
+        # -level processing lease it was generated under has itself gone free
+        # (expired or never actually held), the same signal
+        # _claim_conversation_processing already uses -- a retry genuinely
+        # still in flight always holds that lease for its whole duration, so
+        # this cannot reclaim a retry that's actually still running. Two
+        # concurrent requests racing this is harmless even if both pass it:
+        # the conversation-level claim right below still only lets one of
+        # them actually proceed, and the loser falls back to the ordinary
+        # "someone else is answering" recovery that already existed.
         claim = conn.execute(
-            "UPDATE messages SET answer_status = 'retrying' WHERE id = %s AND answer_status = 'failed'",
-            (message_id,),
+            "UPDATE messages SET answer_status = 'retrying' WHERE id = %s AND ("
+            "answer_status = 'failed' OR (answer_status = 'retrying' AND EXISTS ("
+            f"SELECT 1 FROM conversations WHERE id = %s AND {_LEASE_AVAILABLE_SQL}"
+            ")))",
+            (message_id, conversation_id, PROCESSING_LEASE_SECONDS),
         )
         if claim.rowcount == 0:
             if row["answer_status"] == "retrying":

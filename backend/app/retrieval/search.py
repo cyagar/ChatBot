@@ -183,20 +183,29 @@ def reciprocal_rank_fusion(
     return fused
 
 
-def _hydrate(chunk_ids: list[int], include_superseded: bool = False) -> dict[int, RetrievedChunk]:
+def _hydrate(
+    chunk_ids: list[int], machine_id: int | None = None, include_superseded: bool = False
+) -> dict[int, RetrievedChunk]:
     """lexical_search/vector_search already restrict their candidates to
     eligible documents, but each opens its own connection with no shared
     snapshot across the two of them or this hydration step -- an admin
-    deactivating, un-approving or rolling back a document between those
-    calls and this one would otherwise let an ineligible chunk's content
-    through anyway, since hydration itself re-reads current document state
-    rather than trusting the eligibility already checked upstream. The same
-    filters are applied again here for that reason, not as a stylistic
-    match to the other two functions."""
+    deactivating, un-approving or rolling back a document (or rejecting the
+    specific document-machine link that made a chunk eligible for THIS
+    machine) between those calls and this one would otherwise let an
+    ineligible chunk's content through anyway, since hydration itself
+    re-reads current document state rather than trusting the eligibility
+    already checked upstream. The same filters -- machine link included --
+    are applied again here for that reason, not as a stylistic match to the
+    other two functions. machine_id is optional (callers that already
+    resolved chunk_ids without a machine filter, e.g. a cross-machine admin
+    lookup, pass None) but every machine-scoped caller must pass it, or a
+    source whose link to that machine was rejected between retrieval and
+    hydration would hydrate as if still eligible."""
     if not chunk_ids:
         return {}
     placeholders = ",".join("%s" for _ in chunk_ids)
     revision_sql = _revision_filter_sql(include_superseded)
+    filter_sql, filter_params = _machine_filter_sql(machine_id)
     sql = f"""
         SELECT c.id AS chunk_id, c.document_id, c.content, c.page_number,
                c.section_heading, c.chunk_type,
@@ -210,9 +219,10 @@ def _hydrate(chunk_ids: list[int], include_superseded: bool = False) -> dict[int
           AND d.deactivated_at IS NULL
           AND d.review_status = 'approved'
           {revision_sql}
+          {filter_sql}
     """
     with get_conn() as conn:
-        rows = conn.execute(sql, [*chunk_ids]).fetchall()
+        rows = conn.execute(sql, [*chunk_ids, *filter_params]).fetchall()
     return {
         r["chunk_id"]: RetrievedChunk(
             chunk_id=r["chunk_id"],
@@ -290,7 +300,7 @@ def hybrid_search(
 
     lexical_map = dict(lexical)
     vector_map = dict(vector)
-    hydrated = _hydrate(list(fused.keys()), include_superseded=include_superseded)
+    hydrated = _hydrate(list(fused.keys()), machine_id=machine_id, include_superseded=include_superseded)
 
     results: list[RetrievedChunk] = []
     for chunk_id, fused_score in fused.items():

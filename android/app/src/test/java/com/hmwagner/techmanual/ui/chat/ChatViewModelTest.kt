@@ -505,6 +505,53 @@ class ChatViewModelTest {
     }
 
     @Test
+    fun `a 502 with no parseable body is uncertain, not a rejection`() {
+        // A real gateway timeout/error often carries no JSON body at all --
+        // this is the shape that would make a code-field-only check (looking
+        // only at the parsed error body's `code`) miss it entirely, since
+        // there is no body to parse. FinalChanges.txt F09.
+        server.enqueue(MockResponse().setResponseCode(502).setBody("<html>Bad Gateway</html>"))
+
+        vm.onComposerChange("Why won't it start?")
+        vm.send()
+        awaitState { !it.sending }
+
+        val state = vm.state.value
+        assertEquals(
+            "the question stays pending under its key, same as a connection exception, since the " +
+                "backend may have already committed it before the gateway failed",
+            "Why won't it start?", state.pendingEcho?.content,
+        )
+        assertTrue(state.pendingEchoUncertain)
+        assertEquals("the draft is NOT restored to the composer -- the question is still in flight", "", state.composerText)
+        assertEquals(
+            "the durable pending-send key must survive a 502 so Retry can replay/resume it",
+            "Why won't it start?", PendingSendStore.current.load(1)?.content,
+        )
+    }
+
+    @Test
+    fun `a 503 and a 504 are also uncertain, not a rejection`() {
+        server.enqueue(MockResponse().setResponseCode(503)
+            .setBody("""{"detail": "unavailable", "code": "SOME_OTHER_CODE", "correlation_id": "c1"}""")
+            .addHeader("Content-Type", "application/json"))
+        vm.onComposerChange("First")
+        vm.send()
+        awaitState { !it.sending }
+        assertTrue(vm.state.value.pendingEchoUncertain)
+        assertEquals("First", vm.state.value.pendingEcho?.content)
+
+        // retryPendingSend() replays the SAME pending question under the
+        // retained key after an uncertain 5xx -- it must not have been
+        // cleared, and a 504 on the retry attempt must stay uncertain too.
+        server.enqueue(MockResponse().setResponseCode(504))
+        vm.retryPendingSend()
+        awaitState { !it.sending }
+        assertTrue(vm.state.value.pendingEchoUncertain)
+        assertEquals("First", vm.state.value.pendingEcho?.content)
+    }
+
+    @Test
     fun `a second question cannot be sent while the first has no answer yet`() {
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
         vm.onComposerChange("First question")
