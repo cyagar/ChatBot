@@ -302,6 +302,18 @@ def test_claim_naming_the_machine_is_not_rejected():
         # fabricated negative is rejected against a positive excerpt.
         ("The sensor reads 240 V nominal.", "The sensor reads -240 V nominal.", False),
         ("The minimum storage temperature is -40F.", "The minimum storage temperature is -40F.", True),
+        # the REVERSE direction (FinalChanges.txt F03): an unsigned claim
+        # must not be satisfied by a genuinely negative excerpt either --
+        # the sign is part of the fact in both directions.
+        ("The pump is rated at -24 V.", "The pump is rated at 24 V.", False),
+        ("The pump is rated at -24 V.", "The pump is rated at -24 V.", True),
+        # decimal and degree-unit variants of the same reverse check.
+        ("The minimum temperature is -5.5°F.", "The minimum temperature is 5.5°F.", False),
+        # Unicode minus sign (U+2212), not just ASCII hyphen-minus.
+        ("The reading is −40PSI.", "The reading is 40PSI.", False),
+        # a genuine range hyphen is not a sign -- an unsigned claim must
+        # still match a value that's part of a hyphenated range.
+        ("Voltage range is 200-240V.", "Voltage range is 240V.", True),
         # unsupported parts -- a prefix of the real part number is a genuine
         # substring, so a plain "in" check alone would wrongly accept it.
         (
@@ -869,4 +881,134 @@ def test_a_passage_stating_both_sides_of_an_opposite_pair_is_not_a_false_positiv
     assert _single_claim(
         "Keep the tank above 120F.",
         "Keep the tank above 120F and below 150F.",
+    ) is not None
+
+
+# FinalChanges.txt F01 -- cross-item procedure ordering. Each of the two
+# steps below is, on its own, exactly the excerpt's own wording in the
+# excerpt's own order -- _claim_grounded's intra-item check has nothing to
+# reject in either one. Only comparing where each SEPARATE item grounded,
+# across items, catches a model emitting two individually-valid steps in the
+# wrong relative order.
+def test_two_separate_steps_citing_the_same_excerpt_cannot_be_reversed():
+    passages = [_passage(1, 1, "Disconnect power. Remove the cover.")]
+
+    def _steps(order):
+        return json.dumps({
+            "is_no_answer": False,
+            "claims": [],
+            "steps": [{"text": t, "cited_excerpt_numbers": [1]} for t in order],
+            "warnings": [],
+        })
+
+    assert parse_and_validate(_steps(["Disconnect power.", "Remove the cover."]), passages, "test") is not None
+    assert parse_and_validate(_steps(["Remove the cover.", "Disconnect power."]), passages, "test") is None
+
+
+def test_steps_citing_genuinely_different_excerpts_impose_no_order_on_each_other():
+    """There is no reliable signal for cross-excerpt sequence -- two steps
+    that each cite their OWN excerpt, with no excerpt number shared between
+    them, must not be rejected just because of the order they're listed in."""
+    passages = [
+        _passage(1, 1, "Remove the cover."),
+        _passage(2, 1, "Disconnect power."),
+    ]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [],
+        "steps": [
+            {"text": "Remove the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Disconnect power.", "cited_excerpt_numbers": [2]},
+        ],
+        "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is not None
+
+
+def test_a_claim_restating_a_fact_from_later_in_the_steps_is_not_a_false_positive():
+    """Cross-item ordering (see the test above) is scoped to steps only, not
+    claims -- a claim is a standalone fact, not a position in a numbered
+    sequence, and commonly restates something a LATER step also states (a
+    replacement part number called out as its own claim as well as inside
+    the step that uses it, exactly as the system prompt asks for). The claim
+    here is grounded in the excerpt's THIRD sentence while step one is
+    grounded in its FIRST -- this must not be treated as the claim and the
+    first step being "out of order"."""
+    passages = [_passage(1, 1, (
+        "Disconnect power before removing the cover. Remove the four screws "
+        "and lift off the cover. Replace the sprayhead with a new one, part "
+        "number 81-118-31. Reinstall the cover and reconnect power."
+    ))]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [
+            {"text": "Replace the sprayhead with a new one, part number 81-118-31.",
+             "cited_excerpt_numbers": [1]},
+        ],
+        "steps": [
+            {"text": "Disconnect power before removing the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Remove the four screws and lift off the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Replace the sprayhead with a new one, part number 81-118-31.",
+             "cited_excerpt_numbers": [1]},
+            {"text": "Reinstall the cover and reconnect power.", "cited_excerpt_numbers": [1]},
+        ],
+        "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is not None
+
+
+def test_a_multiclause_steps_governing_condition_can_stay_in_its_first_clause():
+    """FinalChanges.txt F02 regression found during live smoke testing: _claim_clauses
+    legitimately splits 'If the tank is empty, disconnect power and refill
+    before continuing.' into two clauses ('If the tank is empty, disconnect
+    power' and 'refill before continuing') because each side names its own
+    action. The governing 'if' correctly stays in the first clause only --
+    checking the SECOND clause's dropped-conditional words against just its
+    own text (instead of the whole step's text) would wrongly flag it for
+    'dropping' a word its sibling clause already accounts for."""
+    assert _single_claim(
+        "If the tank is empty, disconnect power and refill before continuing.",
+        "If the tank is empty, disconnect power and refill before continuing.",
+        as_step=True,
+    ) is not None
+
+
+# FinalChanges.txt F02 -- a dropped prerequisite/condition word. Both
+# examples below are live-reproduced in the audit: the step is, word for
+# word, a genuine substring of the excerpt in the excerpt's own order, so
+# nothing before this fix rejected either one.
+def test_a_before_prerequisite_naming_a_different_action_cannot_be_dropped():
+    assert _single_claim(
+        "Remove the cover.",
+        "Disconnect power before removing the cover.",
+        as_step=True,
+    ) is None
+
+
+def test_an_if_condition_cannot_be_dropped():
+    assert _single_claim(
+        "Disconnect power.",
+        "If the tank is empty, disconnect power.",
+        as_step=True,
+    ) is None
+
+
+@pytest.mark.parametrize(("excerpt", "claim"), [
+    ("While the pump is running, do not open the drain valve.", "Do not open the drain valve."),
+    ("When the display shows E4, replace the thermistor.", "Replace the thermistor."),
+    ("Do not operate the unit except during a scheduled cycle.", "Do not operate the unit."),
+])
+def test_other_conditional_words_cannot_be_dropped(excerpt, claim):
+    assert _single_claim(claim, excerpt) is None
+
+
+def test_a_before_qualifier_on_a_single_action_is_not_a_false_positive():
+    """Distinct from the dropped-prerequisite case above: 'before service' is
+    an ordinary timing adverb on ONE action, not a word sequencing two
+    different actions -- the excerpt names no other action the claim left
+    out, so dropping 'before service' must still pass, the same as dropping
+    any other reworded qualifier."""
+    assert _single_claim(
+        "Disconnect power.",
+        "Before service, disconnect power.",
     ) is not None

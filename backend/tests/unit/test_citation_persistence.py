@@ -42,10 +42,19 @@ def test_parse_and_validate_rejects_unsupported_answer_instead_of_citing_everyth
 
 
 def test_parse_and_validate_keeps_only_the_cited_subset():
+    # Two separate single-excerpt claims, not one claim spanning both --
+    # a claim's content must concentrate in its own cited excerpt's own
+    # sentence (see base.py's _MIN_LINE_COVERAGE docstring), the same as a
+    # real model response already has to; this still exercises the subset
+    # behavior this test is actually about (citations end up [2, 5], not
+    # all 6 retrieved passages).
     passages = [_passage(i, 1, f"excerpt {i}") for i in range(1, 7)]
     raw = json.dumps({
         "is_no_answer": False,
-        "claims": [{"text": "Excerpt 2 and excerpt 5.", "cited_excerpt_numbers": [2, 5]}],
+        "claims": [
+            {"text": "Excerpt 2.", "cited_excerpt_numbers": [2]},
+            {"text": "Excerpt 5.", "cited_excerpt_numbers": [5]},
+        ],
         "steps": [],
         "warnings": [],
     })
@@ -64,7 +73,10 @@ class _SubsetCitingProvider(AIProvider):
     def generate(self, question, machine_label, passages, history=None):
         raw = json.dumps({
             "is_no_answer": False,
-            "claims": [{"text": "Excerpt 2 and excerpt 5.", "cited_excerpt_numbers": [2, 5]}],
+            "claims": [
+                {"text": "Excerpt 2.", "cited_excerpt_numbers": [2]},
+                {"text": "Excerpt 5.", "cited_excerpt_numbers": [5]},
+            ],
             "steps": [],
             "warnings": [],
         })

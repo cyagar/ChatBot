@@ -168,20 +168,30 @@ class _NumericToken:
     unit: str | None
 
 
-def _leading_sign(text: str, token_start: int) -> str:
-    """A "-" immediately before a token is a minus sign only when IT is also
+# ASCII hyphen-minus and Unicode minus sign (U+2212) -- a model or a PDF's
+# own extracted text can use either to write a negative number.
+_SIGN_CHARS = "-−"
+
+
+def _is_true_sign(text: str, pos: int) -> bool:
+    """A sign character at `pos` is a real minus sign only when it is itself
     preceded by whitespace/start-of-string/an opening paren -- otherwise it's
     a hyphen inside a compound identifier or a range ("TF-DBC-12",
-    "cover-mounted", "200-240V") that the token regex's own hyphen-inclusive
-    shape would normally have consumed as part of the token; seeing it split
-    off here means something word-shaped sits right before it, i.e. it's a
-    separator, not a sign."""
-    if token_start == 0 or text[token_start - 1] != "-":
+    "cover-mounted", "200-240V"), where something word-shaped sits right
+    before it. Shared by _leading_sign (extracting a claim/step's own sign)
+    and _token_supported (checking whether a haystack match sits right after
+    a real negative sign, not a range/identifier hyphen)."""
+    if text[pos] not in _SIGN_CHARS:
+        return False
+    if pos == 0:
+        return True
+    return text[pos - 1] in " \t\n("
+
+
+def _leading_sign(text: str, token_start: int) -> str:
+    if token_start == 0 or not _is_true_sign(text, token_start - 1):
         return ""
-    before = token_start - 1
-    if before == 0 or text[before - 1] in " \t\n(":
-        return "-"
-    return ""
+    return "-"
 
 
 def _extract_tokens(text: str, *, strict_bare_numbers: bool) -> list[str | _NumericToken]:
@@ -251,7 +261,21 @@ def _token_supported(token: str | _NumericToken, haystack: str) -> bool:
         pattern += r"\s*" + re.escape(token.unit.upper()) + r"(?![A-Za-z0-9])"
     else:
         pattern += r"(?!\d)"
-    return re.search(pattern, haystack) is not None
+    for m in re.finditer(pattern, haystack):
+        if token.sign:
+            return True
+        # An unsigned claim token ("24V") must not be satisfied by a REAL
+        # negative in the haystack ("-24V") -- the lookbehind above only
+        # blocks an embedded match (a digit/dot right before), not a sign.
+        # Skip past a match sitting right after a true minus (checked with
+        # _is_true_sign's own rule, not a bare "preceded by '-'" check, so a
+        # range/identifier hyphen like "200-240V" still matches "240V" as
+        # before -- only re-check the OTHER candidate matches in that case.
+        start = m.start()
+        if start > 0 and _is_true_sign(haystack, start - 1):
+            continue
+        return True
+    return False
 
 
 def _normalize_ws(text: str) -> str:
@@ -351,6 +375,23 @@ for _opp_a, _opp_b in _OPPOSITE_WORD_PAIRS:
     _OPPOSITE_STEMS[_stem_a] = _stem_b
     _OPPOSITE_STEMS[_stem_b] = _stem_a
 del _opp_a, _opp_b, _stem_a, _stem_b
+
+
+# A word that makes an action conditional on something else happening first,
+# at the same time, or not at all -- dropping it from a claim/step turns a
+# conditional instruction into an unconditional one (or silently removes the
+# other action it sequences against). "if"/"when"/"while"/"except" are
+# unambiguous: whatever immediately follows one in a technical manual sentence
+# is a real condition, so dropping one is always rejected outright. "before"/
+# "after" are also ordinary time adverbs ("Before service, disconnect
+# power." condensed to "Disconnect power." loses no real dependency), so
+# dropping one of those two is only rejected when the matched window ALSO
+# names a second, different action the claim never mentions at all --
+# evidence the word was actually sequencing two distinct steps, not just
+# timing one of them (see the gating check in _clause_grounded below).
+_CONDITIONAL_ALWAYS_STEMS = frozenset(_stem(w) for w in ("if", "when", "while", "except"))
+_CONDITIONAL_GATED_STEMS = frozenset(_stem(w) for w in ("before", "after"))
+_CONDITIONAL_STEMS = _CONDITIONAL_ALWAYS_STEMS | _CONDITIONAL_GATED_STEMS
 
 
 def _merge_unit_suffixes(tokens: list[str]) -> list[str]:
@@ -515,45 +556,87 @@ def _line_coverage(claim_set: set[str], line: str) -> tuple[float, list[str]]:
     return coverage, line_stems
 
 
-def _local_polarity(window: str, claim_set: set[str]) -> set[str]:
-    """Polarity words near where the claim's own content actually matched in
-    `window`, not polarity words anywhere in it.
+def _best_overlap_scope(window: str, claim_set: set[str]) -> str:
+    """The physical-line (or adjacent-line-pair) substring of `window` that
+    best overlaps this claim's own content words.
 
     `window` is one _excerpt_lines unit -- normally one real sentence, in
-    which case this just scans the whole thing (there is only one physical
+    which case this just returns the whole thing (there is only one physical
     line, so the loop below never narrows anything). But _excerpt_lines only
     splits on sentence-ending punctuation, and this corpus's troubleshooting
     tables and spec/bullet lists commonly run many unrelated facts together
     on separate physical lines with no punctuation between them at all, so
     one such table becomes ONE giant "sentence" here. An unrelated "will not
-    operate" on some other row of that table must not poison every claim
-    grounded against a different row in the same table -- scanning pairs of
-    adjacent physical lines (a bullet's header is often wrapped onto the next
-    line) for the one that best overlaps the claim's own words, and reading
-    polarity only from that pair, keeps the check scoped to the claim's own
-    row instead of the whole table."""
+    operate" (or a dropped "before"/"if") on some other row of that table
+    must not poison every claim grounded against a different row in the same
+    table -- scanning pairs of adjacent physical lines (a bullet's header is
+    often wrapped onto the next line) for the one that best overlaps the
+    claim's own words, and reading polarity/conditionals only from that
+    pair, keeps every such check scoped to the claim's own row instead of
+    the whole table."""
     lines = window.split("\n")
     if len(lines) <= 1:
-        return {w for w in _prose_tokens(window) if w in _POLARITY_WORDS}
+        return window
     best_i, best_overlap = 0, -1
     for i in range(len(lines) - 1):
         overlap = len(claim_set & set(_content_stems(lines[i] + " " + lines[i + 1])))
         if overlap > best_overlap:
             best_overlap, best_i = overlap, i
-    scope = lines[best_i] + " " + lines[best_i + 1]
+    return lines[best_i] + " " + lines[best_i + 1]
+
+
+def _local_polarity(window: str, claim_set: set[str]) -> set[str]:
+    """Polarity words near where the claim's own content actually matched in
+    `window`, not polarity words anywhere in it -- see _best_overlap_scope."""
+    scope = _best_overlap_scope(window, claim_set)
     return {w for w in _prose_tokens(scope) if w in _POLARITY_WORDS}
 
 
-_NO_ORDER = (-1, -1)  # a clause with no content words of its own imposes no order
+_NO_ORDER = (-1, -1, -1, -1)  # a clause with no content words of its own imposes no order
+
+
+def _tagged_excerpt_lines(excerpt_numbers: list[int], passages: list) -> list[tuple[int, int, int, str]]:
+    """Sentence-like units from each of an item's own cited excerpts, each
+    tagged with (flat_index, excerpt_number, local_index, text): flat_index
+    increases across the item's own excerpt_numbers in the order it cited
+    them (the same ordering a flat concatenated line list would have had),
+    which is what intra-item clause order in _claim_grounded compares.
+    local_index is this line's own position within just that excerpt
+    number's lines, recomputed the same way regardless of what ELSE the item
+    cited -- that's what makes it safe to compare across two DIFFERENT items
+    that may cite different combinations/orders of excerpts (see
+    parse_and_validate's cross-item ordering check, which flat_index alone
+    cannot support)."""
+    out: list[tuple[int, int, int, str]] = []
+    flat_index = 0
+    for n in excerpt_numbers:
+        for local_index, line in enumerate(_excerpt_lines(passages[n - 1].content)):
+            out.append((flat_index, n, local_index, line))
+            flat_index += 1
+    return out
 
 
 def _clause_grounded(
-    clause_text: str, lines: list[str], machine_stems: set[str]
-) -> tuple[int, int] | None:
-    """None if ungrounded; otherwise (excerpt-line index, position within
-    that line) of where this clause is grounded, so the caller can check
-    that clauses appear in the same order as their matched text does -- both
-    across different excerpt lines and within one shared line."""
+    clause_text: str, lines: list[tuple[int, int, int, str]], machine_stems: set[str], item_stems: set[str]
+) -> tuple[int, int, int, int] | None:
+    """None if ungrounded; otherwise (flat_index, position, excerpt_number,
+    local_index) of where this clause is grounded. (flat_index, position) --
+    the first two elements, which dominate tuple comparison -- is exactly
+    what the caller already compared before this tuple grew two more
+    elements; (excerpt_number, local_index) is carried only so a DIFFERENT
+    item's clause, grounded against the same excerpt number, can also be
+    ordered against this one (see parse_and_validate).
+
+    item_stems is the content stems of the WHOLE claim/step text (every
+    clause combined), used only by the conditional-word check below -- a
+    governing "if"/"before" can legitimately stay in clause A while clause B
+    is the one that best matches the window containing it (see
+    _claim_clauses: "If the tank is empty, disconnect power and refill
+    before continuing." splits into "If the tank is empty, disconnect
+    power" and "refill before continuing", both correctly grounded, but
+    only the FIRST clause's own text still contains "if"). Checking against
+    this clause's OWN words instead of the item's would reject that second
+    clause for "dropping" a word its sibling clause already accounts for."""
     claim_stems = [w for w in _content_stems(clause_text) if w not in machine_stems]
     # A clause left with only bare digits after this filtering is a list
     # marker ("1.", "2.") that _claim_clauses split off a copied enumerated
@@ -569,11 +652,11 @@ def _clause_grounded(
     # the check here, rather than letting it draw from the whole excerpt, is
     # what stops a claim built by combining words from two unrelated
     # sentences ("hot water" from one, "is safe" from another).
-    best_i, (coverage, window_stems, window) = max(
-        enumerate(_line_coverage(claim_set, ln) + (ln,) for ln in lines), key=lambda x: x[1][0]
-    )
+    scored = [(entry, _line_coverage(claim_set, entry[3]) + (entry[3],)) for entry in lines]
+    best_entry, (coverage, window_stems, window) = max(scored, key=lambda x: x[1][0])
     if coverage < _MIN_LINE_COVERAGE:
         return None
+    flat_index, excerpt_number, local_index, _window_text = best_entry
 
     window_stem_set = set(window_stems)
     unmatched = [w for w in claim_stems if w not in window_stem_set]
@@ -611,10 +694,32 @@ def _clause_grounded(
     window_polarity = _local_polarity(window, claim_set)
     if claim_polarity != window_polarity:
         return None
-    return (best_i, end_pos)
+
+    # A conditional/sequencing word (before/after/while/if/when/except) in
+    # the claim's own matched row, but absent from the claim, means the
+    # excerpt made this action depend on something the claim dropped --
+    # "if"/"when"/"while"/"except" are rejected outright (there is no
+    # ordinary-adverb reading of those in this corpus); "before"/"after" are
+    # only rejected when the row ALSO names a different action the claim
+    # never mentions at all, which is what distinguishes a real two-action
+    # sequence ("Disconnect power before removing the cover." trimmed to
+    # "Remove the cover.") from a harmless timing adverb on one action
+    # ("Before service, disconnect power." trimmed to "Disconnect power.").
+    scope_stems = set(_content_stems(_best_overlap_scope(window, claim_set)))
+    dropped_conditionals = (scope_stems & _CONDITIONAL_STEMS) - item_stems
+    if dropped_conditionals & _CONDITIONAL_ALWAYS_STEMS:
+        return None
+    if dropped_conditionals & _CONDITIONAL_GATED_STEMS:
+        other_action_dropped = scope_stems & _CRITICAL_STEMS - _CONDITIONAL_GATED_STEMS - item_stems
+        if other_action_dropped:
+            return None
+
+    return (flat_index, end_pos, excerpt_number, local_index)
 
 
-def _claim_grounded(item_text: str, cited_content: str, machine_label: str | None = None) -> bool:
+def _claim_grounded(
+    item_text: str, excerpt_numbers: list[int], passages: list, machine_label: str | None = None
+) -> list[tuple[int, int, int, int]] | None:
     """A lexical check that a claim or step is the cited excerpt's own wording,
     lightly trimmed, not a rewrite. Each clause of the claim (see
     _claim_clauses) is checked independently against its own best-matching
@@ -623,36 +728,48 @@ def _claim_grounded(item_text: str, cited_content: str, machine_label: str | Non
     (numbers and identifiers included, not just action words), the clause's
     other words must be present there too (a small allowance for a reworded
     label, withheld for a short letter-like identifier), and the clause adds
-    no negation or restriction that sentence lacks, or drops one it has. A
-    multi-clause claim/step's clauses must be grounded in the same relative
-    order as their matched text, whether that's two different excerpt
-    sentences or two spans of the same one -- a claim built by stating the
-    excerpt's own steps in the wrong order, or swapping which value or
-    identifier goes with which step, is still built from the excerpt's own
-    words, but changes what it instructs.
+    no negation, restriction or condition that sentence lacks, or drops one
+    it has. A multi-clause claim/step's clauses must be grounded in the same
+    relative order as their matched text, whether that's two different
+    excerpt sentences or two spans of the same one -- a claim built by
+    stating the excerpt's own steps in the wrong order, or swapping which
+    value or identifier goes with which step, is still built from the
+    excerpt's own words, but changes what it instructs.
 
     This catches inverted, reordered, permission-flipped, cross-sentence and
     invented prose that carries no number or part code, including a claim
     that keeps two entities from the excerpt but swaps their roles. It is not
     semantic entailment: a claim can still pass by selecting words from the
     excerpt in a way that reads misleadingly even in the excerpt's own order,
-    so the excerpt stays one tap away as evidence."""
-    machine_stems = set(_content_stems(machine_label or ""))
-    lines = _excerpt_lines(cited_content)
-    if not lines:
-        return not [w for w in _content_stems(item_text) if w not in machine_stems]
+    so the excerpt stays one tap away as evidence.
 
+    Returns the ordered list of (flat_index, position, excerpt_number,
+    local_index) reached by each of this item's own grounded clauses
+    (clauses with no orderable content -- e.g. a bare list-marker digit --
+    contribute nothing to this list), or None if any clause fails to ground
+    at all. parse_and_validate uses this returned list, in addition to the
+    intra-item order check already done above, to also catch two DIFFERENT
+    steps grounded out of order relative to EACH OTHER when they cite the
+    same excerpt number."""
+    machine_stems = set(_content_stems(machine_label or ""))
+    item_stems = {w for w in _content_stems(item_text) if w not in machine_stems}
+    lines = _tagged_excerpt_lines(excerpt_numbers, passages)
+    if not lines:
+        return [] if not item_stems else None
+
+    positions: list[tuple[int, int, int, int]] = []
     last = _NO_ORDER
     for clause in _claim_clauses(item_text):
-        result = _clause_grounded(clause, lines, machine_stems)
+        result = _clause_grounded(clause, lines, machine_stems, item_stems)
         if result is None:
-            return False
+            return None
         if result == _NO_ORDER:
             continue
         if result < last:
-            return False
+            return None
         last = result
-    return True
+        positions.append(result)
+    return positions
 
 
 def _warning_supported(warning_text: str, cited_content: str) -> bool:
@@ -821,7 +938,7 @@ def failing_items(raw_text: str, passages: list, machine_label: str | None = Non
                 ok = _warning_supported(item.text, cited)
             else:
                 ok = _claim_supported(item.text, cited, machine_label) and _claim_grounded(
-                    item.text, cited, machine_label)
+                    item.text, item.excerpt_numbers, passages, machine_label) is not None
             if not ok:
                 failing.append(item.text)
     return failing
@@ -910,12 +1027,43 @@ def parse_and_validate(
     # be able to vanish while a hazardous action stays: dropping it would
     # display a partial, misleadingly-confident answer instead of failing
     # closed to a repair retry / the "could not verify" fallback.
-    for item in claims + steps:
+    for item in claims:
         cited = _cited_content(item, passages)
         if not _claim_supported(item.text, cited, machine_label):
             return None
-        if not _claim_grounded(item.text, cited, machine_label):
+        if _claim_grounded(item.text, item.excerpt_numbers, passages, machine_label) is None:
             return None
+
+    # Steps are additionally checked against EACH OTHER: a later step that
+    # cites the same excerpt number as an earlier one must not ground to an
+    # EARLIER position in that excerpt than the earlier step already
+    # reached. This is what catches two numbered steps listed in the wrong
+    # relative order -- each step's _claim_grounded call above only checks
+    # that step in isolation, and cannot see that a DIFFERENT step was
+    # already grounded further along the same excerpt. Only excerpt numbers
+    # a step actually shares with an earlier one are constrained; steps
+    # citing different excerpts impose no ordering on each other -- there is
+    # no reliable signal for cross-excerpt sequence here. Scoped to steps
+    # only, not claims: a claim is a standalone fact, not a position in a
+    # numbered sequence, and commonly restates something ALSO stated by a
+    # step elsewhere in the same excerpt (e.g. a replacement part number
+    # called out as its own claim as well as inside the step that uses it)
+    # -- comparing it against step order the same way steps compare against
+    # each other produced exactly that false rejection in testing.
+    last_position_by_excerpt: dict[int, tuple[int, int]] = {}
+    for item in steps:
+        cited = _cited_content(item, passages)
+        if not _claim_supported(item.text, cited, machine_label):
+            return None
+        clause_positions = _claim_grounded(item.text, item.excerpt_numbers, passages, machine_label)
+        if clause_positions is None:
+            return None
+        for _flat_index, end_pos, excerpt_number, local_index in clause_positions:
+            key = (local_index, end_pos)
+            prior = last_position_by_excerpt.get(excerpt_number)
+            if prior is not None and key < prior:
+                return None
+            last_position_by_excerpt[excerpt_number] = max(key, prior) if prior is not None else key
     for item in warnings:
         if not _warning_supported(item.text, _cited_content(item, passages)):
             return None
