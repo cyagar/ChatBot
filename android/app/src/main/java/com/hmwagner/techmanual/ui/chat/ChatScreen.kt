@@ -215,7 +215,7 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                                     if (state.savedMessageIds.contains(msg.id)) vm.unsaveAnswer(msg.id) else vm.saveAnswer(msg.id)
                                 },
                                 saved = state.savedMessageIds.contains(msg.id),
-                                onFeedback = { rating -> vm.submitFeedback(msg.id, rating) },
+                                onFeedback = { rating, comment -> vm.submitFeedback(msg.id, rating, comment) },
                                 feedback = state.feedbackByMessageId[msg.id],
                                 // A clarifying-question message's chips must
                                 // stay live only on the message still
@@ -440,7 +440,7 @@ private fun MessageBubble(
     onClarifyingSelect: (Int) -> Unit,
     onSave: () -> Unit,
     saved: Boolean,
-    onFeedback: (String) -> Unit,
+    onFeedback: (String, String?) -> Unit,
     feedback: String?,
     isLatestMessage: Boolean,
 ) {
@@ -611,19 +611,47 @@ private fun MessageBubble(
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(
                             selected = feedback == "helpful",
-                            onClick = { onFeedback("helpful") },
+                            onClick = { onFeedback("helpful", null) },
                             label = { Text("Helpful") },
                         )
                         FilterChip(
                             selected = feedback == "incorrect",
-                            onClick = { onFeedback("incorrect") },
+                            onClick = { onFeedback("incorrect", null) },
                             label = { Text("Incorrect") },
                         )
                         FilterChip(
                             selected = feedback == "missing_info",
-                            onClick = { onFeedback("missing_info") },
+                            onClick = { onFeedback("missing_info", null) },
                             label = { Text("Missing info") },
                         )
+                    }
+                    // A rating alone is a fire-and-forget quick tap (above);
+                    // this optional comment is a second, separate submission
+                    // of the SAME rating with a comment attached -- feedback
+                    // rows are append-only and intentionally re-submittable
+                    // (submit_feedback's own docstring), so the admin
+                    // feedback listing simply shows both rows for this
+                    // message, the detailed one carrying the comment.
+                    if (feedback != null) {
+                        var comment by remember(msg.id) { mutableStateOf("") }
+                        var sent by remember(msg.id) { mutableStateOf(false) }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            OutlinedTextField(
+                                value = comment,
+                                onValueChange = { comment = it; sent = false },
+                                label = { Text("Add details (optional)") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(
+                                enabled = comment.isNotBlank() && !sent,
+                                onClick = { onFeedback(feedback, comment.trim()); sent = true },
+                            ) { Text(if (sent) "Sent" else "Send") }
+                        }
                     }
                 }
             }

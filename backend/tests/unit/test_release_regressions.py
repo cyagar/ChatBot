@@ -117,6 +117,89 @@ def test_a_metadata_only_correction_does_not_touch_machine_links(test_env):
     assert row2["review_status"] == "approved", "sanity check: a present machine_ids really does re-approve"
 
 
+def test_machine_ids_add_remove_only_touches_the_specific_links_the_admin_checked(test_env):
+    """machine_ids_add/machine_ids_remove is the delta form admin.js actually
+    sends (one checkbox's own change event, not the whole picker's pre-checked
+    state): adding a brand-new link must not disturb an existing rejected
+    link that stayed checked only because it already existed and the admin
+    never touched its box, but explicitly re-adding THAT specific rejected
+    link's id must flip it to approved -- the admin deliberately checking it
+    is itself the human review, same as the legacy full-replace machine_ids
+    always meant. Also proves machine_ids and the delta fields are mutually
+    exclusive."""
+    from app.main import app as fastapi_app
+
+    local_client = TestClient(fastapi_app)
+    register_test_user(local_client, "admin-f20@example.com", role="administrator", admin_email="admin-f20@example.com")
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute(
+            "INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom'), (1, 'Trifecta')"
+        )
+        cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, manufacturer_id, doc_type, title, is_current_revision) "
+            "VALUES ('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
+            "'indexed', 1, 'service_repair', 'Old Title', true) RETURNING id"
+        )
+        doc_id = cur.fetchone()["id"]
+        conn.execute("INSERT INTO document_machines (document_id, machine_id) VALUES (%s, 1)", (doc_id,))
+
+    assert local_client.post(
+        f"/api/admin/documents/{doc_id}/machines/1/review", json={"decision": "rejected"}
+    ).status_code == 200
+
+    both = local_client.patch(
+        f"/api/admin/documents/{doc_id}",
+        json={"machine_ids": [1], "machine_ids_add": [2], "reason": "ambiguous, must be refused"},
+    )
+    assert both.status_code == 422
+
+    # Only machine 2's box was actually touched (checked, newly) -- machine
+    # 1's rejected link must come out exactly as it went in.
+    add_new = local_client.patch(
+        f"/api/admin/documents/{doc_id}",
+        json={"machine_ids_add": [2], "machine_ids_remove": [], "reason": "Adding a second machine association."},
+    )
+    assert add_new.status_code == 200
+    with get_conn() as conn:
+        rows = {
+            r["machine_id"]: r["review_status"]
+            for r in conn.execute(
+                "SELECT machine_id, review_status FROM document_machines WHERE document_id = %s", (doc_id,)
+            ).fetchall()
+        }
+    assert rows[1] == "rejected", "an untouched existing link must not be re-approved by an unrelated addition"
+    assert rows[2] == "approved", "a newly checked machine must be inserted pre-approved"
+
+    # Now the admin explicitly re-checks machine 1's own box.
+    reaffirm = local_client.patch(
+        f"/api/admin/documents/{doc_id}",
+        json={"machine_ids_add": [1], "machine_ids_remove": [], "reason": "Re-reviewed and confirmed correct."},
+    )
+    assert reaffirm.status_code == 200
+    with get_conn() as conn:
+        row1 = conn.execute(
+            "SELECT review_status FROM document_machines WHERE document_id = %s AND machine_id = 1", (doc_id,)
+        ).fetchone()
+    assert row1["review_status"] == "approved", "explicitly re-checking a rejected link's own box must approve it"
+
+    # Unchecking machine 2 removes its link entirely.
+    remove = local_client.patch(
+        f"/api/admin/documents/{doc_id}",
+        json={"machine_ids_add": [], "machine_ids_remove": [2], "reason": "Removing the second machine."},
+    )
+    assert remove.status_code == 200
+    with get_conn() as conn:
+        remaining = {
+            r["machine_id"] for r in conn.execute(
+                "SELECT machine_id FROM document_machines WHERE document_id = %s", (doc_id,)
+            ).fetchall()
+        }
+    assert remaining == {1}, "an explicitly unchecked link must be removed"
+
+
 def test_stale_corpus_status_accepts_a_real_psycopg_datetime(test_env, monkeypatch):
     """ingestion_runs.finished_at is a TIMESTAMPTZ column psycopg already
     returns as a real, aware datetime, not a string -- _corpus_status must

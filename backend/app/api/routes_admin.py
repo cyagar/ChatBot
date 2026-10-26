@@ -156,12 +156,27 @@ class MetadataCorrection(BaseModel):
     doc_type: str | None = None
     title: str | None = None
     revision: str | None = None
+    # Full-replace: deletes every existing link and recreates exactly this
+    # set, all approved -- the admin's deliberate complete reset of this
+    # document's machine associations.
     machine_ids: list[int] | None = None
+    # Delta: touches only the specific links the admin actually interacted
+    # with, leaving every other existing link's review_status/reviewer
+    # untouched -- what admin.js's per-checkbox machine picker sends, so a
+    # title/revision-only correction (or checking one unrelated new machine)
+    # can never silently re-approve a link the admin never looked at.
+    machine_ids_add: list[int] | None = None
+    machine_ids_remove: list[int] | None = None
     reason: str = Field(min_length=1, max_length=500)
 
 
 @router.patch("/documents/{document_id}", response_model=DocumentOut)
 def correct_metadata(document_id: int, payload: MetadataCorrection, admin: CurrentUser = Depends(require_admin)):
+    if payload.machine_ids is not None and (payload.machine_ids_add is not None or payload.machine_ids_remove is not None):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Use either machine_ids (full replace) or machine_ids_add/machine_ids_remove (delta), not both.",
+        )
     with get_conn() as conn:
         doc = conn.execute("SELECT * FROM documents WHERE id = %s", (document_id,)).fetchone()
         if not doc:
@@ -193,6 +208,11 @@ def correct_metadata(document_id: int, payload: MetadataCorrection, admin: Curre
                 conn.execute(f"UPDATE documents SET {field} = %s WHERE id = %s", (new_value, document_id))
 
         if payload.machine_ids is not None:
+            existing_links = {
+                r["machine_id"]: r["review_status"] for r in conn.execute(
+                    "SELECT machine_id, review_status FROM document_machines WHERE document_id = %s", (document_id,)
+                ).fetchall()
+            }
             # machine_ids must be validated before document_machines' INSERT
             # -- an admin typo/stale ID would otherwise hit the foreign key
             # and surface as an unhandled 500 instead of a clean 4xx naming
@@ -209,7 +229,7 @@ def correct_metadata(document_id: int, payload: MetadataCorrection, admin: Curre
                         status.HTTP_422_UNPROCESSABLE_ENTITY,
                         detail=f"Unknown machine_ids: {missing}",
                     )
-            _log("machine_links", None, payload.machine_ids)
+            _log("machine_links", existing_links, payload.machine_ids)
             # An admin setting links here IS the human review those links get
             # -- insert them pre-approved rather than 'pending', or this
             # endpoint would silently remove a document from retrieval every
@@ -225,6 +245,50 @@ def correct_metadata(document_id: int, payload: MetadataCorrection, admin: Curre
                     "VALUES (%s, %s, 1.0, 'approved', %s, now()) "
                     "ON CONFLICT (document_id, machine_id) DO NOTHING",
                     (document_id, mid, admin.id),
+                )
+
+        if payload.machine_ids_add is not None or payload.machine_ids_remove is not None:
+            add_ids = payload.machine_ids_add or []
+            remove_ids = payload.machine_ids_remove or []
+            if add_ids:
+                found = {
+                    r["id"] for r in conn.execute(
+                        "SELECT id FROM machines WHERE id = ANY(%s)", (add_ids,)
+                    ).fetchall()
+                }
+                missing = sorted(set(add_ids) - found)
+                if missing:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Unknown machine_ids: {missing}",
+                    )
+            existing_links = {
+                r["machine_id"]: r["review_status"] for r in conn.execute(
+                    "SELECT machine_id, review_status FROM document_machines WHERE document_id = %s", (document_id,)
+                ).fetchall()
+            }
+            _log(
+                "machine_links",
+                {mid: existing_links.get(mid) for mid in (*add_ids, *remove_ids)},
+                {"approved": add_ids, "removed": remove_ids},
+            )
+            for mid in remove_ids:
+                conn.execute(
+                    "DELETE FROM document_machines WHERE document_id = %s AND machine_id = %s",
+                    (document_id, mid),
+                )
+            for mid in add_ids:
+                # ON CONFLICT DO UPDATE (not DO NOTHING) -- re-checking a box
+                # that was already linked but pending/rejected must actually
+                # flip it to approved, which is the whole point of the admin
+                # explicitly re-checking it.
+                conn.execute(
+                    "INSERT INTO document_machines "
+                    "(document_id, machine_id, confidence, review_status, reviewed_by, reviewed_at) "
+                    "VALUES (%s, %s, 1.0, 'approved', %s, now()) "
+                    "ON CONFLICT (document_id, machine_id) DO UPDATE SET "
+                    "review_status = 'approved', reviewed_by = %s, reviewed_at = now(), confidence = 1.0",
+                    (document_id, mid, admin.id, admin.id),
                 )
 
         row = conn.execute(

@@ -51,4 +51,11 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 # app.main:asgi_app, not app.main:app -- it trusts X-Forwarded-For from
 # TRUSTED_PROXY_IPS (app/config.py) so per-client rate limiting sees the real
 # client address instead of the fronting proxy's.
-CMD ["uvicorn", "app.main:asgi_app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "650"]
+#
+# --no-access-log: uvicorn's own access log records the raw request target,
+# including query strings -- an invitation link's token and email arrive
+# that way (app/web/static/js/invite.js only scrubs them from the browser's
+# own history, not from any server log). correlation_id_middleware above is
+# the app's intentionally query-string-free request log; this stops uvicorn
+# from keeping a second, unsanitized one alongside it.
+CMD ["uvicorn", "app.main:asgi_app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "650", "--no-access-log"]

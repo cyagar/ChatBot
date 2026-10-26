@@ -671,6 +671,86 @@ def test_concurrent_registration_with_the_same_invite_token_only_succeeds_once(t
     assert count == 1, "the losing request must never create a second account"
 
 
+def test_a_revoke_committing_mid_registration_still_blocks_the_claim(test_env, monkeypatch):
+    """A registration already past its own validity SELECT (which saw
+    revoked_at IS NULL) must not still succeed if an administrator revokes
+    the same invite before the registration's claim UPDATE runs -- the
+    claim UPDATE itself must re-check revoked_at, not just rely on the
+    earlier SELECT having seen it unrevoked. psycopg.Connection can't be
+    monkeypatched directly (it's a C-backed type), so the connection
+    register() sees is wrapped in a thin Python proxy for the duration of
+    this test only, blocking right after its validity SELECT until the
+    admin's revoke has fully committed -- reproducing exactly the
+    interleaving this guards against."""
+    _register_admin()
+    invite = client.post("/api/admin/invitations", json={"email": "revokerace@example.com"}).json()
+    token = invite["token"]
+    invite_id = invite["id"]
+    client.post("/api/auth/logout")
+
+    from contextlib import contextmanager
+
+    import app.auth.routes as auth_routes_module
+    from app.db import get_conn as real_get_conn
+
+    # Must match register()'s SQL text exactly -- a mismatch here silently
+    # breaks this comparison (the barrier below never fires, so the
+    # registration and the revoke race with no synchronization at all
+    # instead of the deliberate interleaving this test depends on).
+    select_sql = "SELECT id, email, role, expires_at, used_at, revoked_at FROM invitations WHERE token_hash = %s"
+    read_done = threading.Event()
+    revoked = threading.Event()
+
+    class _InstrumentedConn:
+        def __init__(self, real_conn):
+            self._real_conn = real_conn
+
+        def execute(self, sql, params=()):
+            result = self._real_conn.execute(sql, params)
+            if sql == select_sql:
+                read_done.set()
+                revoked.wait(timeout=5)
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self._real_conn, name)
+
+    @contextmanager
+    def patched_get_conn():
+        with real_get_conn() as conn:
+            yield _InstrumentedConn(conn)
+
+    monkeypatch.setattr(auth_routes_module, "get_conn", patched_get_conn)
+
+    responses = {}
+
+    def do_register():
+        responses["register"] = client.post(
+            "/api/auth/register",
+            json={"email": "revokerace@example.com", "password": "password123", "invite_token": token},
+        )
+
+    t = threading.Thread(target=do_register)
+    t.start()
+    assert read_done.wait(timeout=5), "registration never reached its validity SELECT"
+
+    client.post("/api/auth/login", json={"email": "admin@example.com", "password": "password123"})
+    revoke_resp = client.post(f"/api/admin/invitations/{invite_id}/revoke")
+    assert revoke_resp.status_code == 200
+    revoked.set()
+
+    t.join(timeout=5)
+
+    assert responses["register"].status_code == 403
+    assert "revoked" in responses["register"].json()["detail"].lower()
+
+    with get_conn() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM users WHERE email = 'revokerace@example.com'"
+        ).fetchone()["n"]
+    assert count == 0, "a registration racing a concurrent revoke must never create an account"
+
+
 def test_admin_cannot_disable_own_account(test_env):
     _register_admin()
     with get_conn() as conn:

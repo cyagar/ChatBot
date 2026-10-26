@@ -1,7 +1,30 @@
 "use strict";
 
-const state = { tab: "documents", user: null, documents: [], showDeactivated: false, duplicates: [], runs: [], ingestionStatus: null, feedback: [], unanswered: [], queryResult: null, machines: [], allMachines: [], reviewQueue: [], invitations: [], lastInvite: null };
+const state = { tab: "documents", user: null, documents: [], showDeactivated: false, duplicates: [], runs: [], ingestionStatus: null, feedback: [], unanswered: [], queryResult: null, machines: [], allMachines: [], reviewQueue: [], invitations: [], lastInvite: null, users: [] };
 const root = document.getElementById("admin-app");
+
+// Clears every piece of one administrator's session-scoped data (including
+// state.lastInvite, which holds a just-issued raw invitation token) before
+// the next sign-in -- called on logout and on a 401 discovered mid-session,
+// so a shared/kiosk-style browser never leaves a signed-out admin's data (or
+// a live token) sitting in page memory for whoever signs in next.
+function resetAccountState() {
+  state.documents = [];
+  state.showDeactivated = false;
+  state.duplicates = [];
+  state.runs = [];
+  state.ingestionStatus = null;
+  state.feedback = [];
+  state.unanswered = [];
+  state.queryResult = null;
+  state.machines = [];
+  state.allMachines = [];
+  state.reviewQueue = [];
+  state.invitations = [];
+  state.lastInvite = null;
+  state.users = [];
+  state.tab = "documents";
+}
 
 async function api(path, options = {}) {
   const resp = await fetch(path, {
@@ -24,6 +47,7 @@ async function api(path, options = {}) {
     // expected-to-401-when-signed-out /api/auth/me probe.
     if (resp.status === 401 && state.user !== null) {
       state.user = null;
+      resetAccountState();
       renderLogin();
     }
     const err = new Error(correlationId ? `${detail} (ref: ${correlationId})` : detail);
@@ -89,7 +113,17 @@ async function boot() {
     renderLogin();
     return;
   }
-  await loadTab();
+  // Renders the shell (with whatever data state already holds, possibly
+  // none yet) before loadTab() runs, so the error banner element it relies
+  // on already exists in the DOM -- an initial-load failure (e.g. a network
+  // blip on the very first request) must land in that banner, not vanish as
+  // an unhandled rejection with the page stuck blank.
+  render();
+  try {
+    await loadTab();
+  } catch (err) {
+    showError(err.message || "Failed to load this tab. Please try again.");
+  }
   render();
 }
 
@@ -131,6 +165,7 @@ const TABS = [
   { id: "duplicates", label: "Duplicates" },
   { id: "ingestion", label: "Ingestion reports" },
   { id: "access", label: "Invitations" },
+  { id: "accounts", label: "Accounts" },
   { id: "query", label: "Query tester" },
   { id: "feedback", label: "Feedback & gaps" },
 ];
@@ -147,6 +182,7 @@ async function loadTab() {
     state.ingestionStatus = await api("/api/admin/ingestion/status");
   }
   if (state.tab === "access") state.invitations = await api("/api/admin/invitations");
+  if (state.tab === "accounts") state.users = await api("/api/admin/users");
   if (state.tab === "feedback") {
     state.feedback = await api("/api/admin/feedback");
     state.unanswered = await api("/api/admin/unanswered");
@@ -187,6 +223,7 @@ function render() {
   if (logoutBtn) logoutBtn.addEventListener("click", async () => {
     try { await api("/api/auth/logout", { method: "POST" }); } catch (_) {}
     state.user = null;
+    resetAccountState();
     await boot();
   });
   wireTabEvents();
@@ -198,6 +235,7 @@ function renderTab() {
   if (state.tab === "duplicates") return renderDuplicates();
   if (state.tab === "ingestion") return renderIngestion();
   if (state.tab === "access") return renderAccess();
+  if (state.tab === "accounts") return renderAccounts();
   if (state.tab === "query") return renderQuery();
   if (state.tab === "feedback") return renderFeedback();
   return "";
@@ -289,6 +327,38 @@ function renderAccess() {
   `;
 }
 
+// --- Accounts ---
+
+function renderAccounts() {
+  const activeCount = state.users.filter((u) => !u.is_disabled).length;
+  return `
+    <h1>Accounts</h1>
+    <p class="text-dim">${activeCount} active account(s) of ${state.users.length} total. Disabling an account signs it out of every device immediately and blocks any new sign-in; it does not delete anything.</p>
+    <table class="admin-table">
+      <thead><tr><th>Email</th><th>Role</th><th>Display name</th><th>Created</th><th>Last login</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        ${state.users.map((u) => `
+          <tr>
+            <td>${esc(u.email)}</td>
+            <td>${esc(u.role)}</td>
+            <td>${esc(u.display_name || "—")}</td>
+            <td>${esc(u.created_at)}</td>
+            <td>${esc(u.last_login_at || "—")}</td>
+            <td><span class="status-badge ${u.is_disabled ? "rejected" : "approved"}">${u.is_disabled ? "disabled" : "active"}</span></td>
+            <td>
+              ${u.id === state.user.id
+                ? `<span class="text-dim text-sm">This is you</span>`
+                : u.is_disabled
+                  ? `<button class="ghost enable-user-btn" data-id="${u.id}">Enable</button>`
+                  : `<button class="ghost disable-user-btn" data-id="${u.id}">Disable</button>`}
+            </td>
+          </tr>
+        `).join("") || `<tr><td colspan="7">No accounts yet.</td></tr>`}
+      </tbody>
+    </table>
+  `;
+}
+
 // --- Documents / metadata correction ---
 
 function renderDocuments() {
@@ -319,7 +389,7 @@ function renderDocuments() {
           </tr>
           <tr class="edit-row hidden" data-edit-for="${d.id}">
             <td colspan="9">
-              <form class="edit-form" data-id="${d.id}">
+              <form class="edit-form" data-id="${d.id}" data-original-machine-ids="${d.machine_ids.join(",")}">
                 <label>Manufacturer <input name="manufacturer_name" value="${escAttr(d.manufacturer || "")}" /></label>
                 <label>Doc type
                   <select name="doc_type">
@@ -331,10 +401,10 @@ function renderDocuments() {
                 <label>Revision <input name="revision" value="${escAttr(d.revision || "")}" /></label>
                 <label>Machine association(s) — retrieval only ever returns a document for a machine linked here
                   <!-- The review-status badge below makes a rejected link visible before an admin decides
-                       to touch it, and the "machine-picker-touched" flag set by the change listener further
-                       down gates whether machine_ids is sent in the PATCH payload at all -- otherwise a pure
-                       title/revision correction would silently re-approve a previously-rejected link, since
-                       every Save would send the full checked set regardless of whether the admin touched it. -->
+                       to touch it. Only a checkbox the admin actually clicks is sent to the backend (as an
+                       add/remove delta, wired in wireTabEvents) -- a box that stays checked because it
+                       reflects an existing (even rejected) link, untouched, never gets re-sent and so never
+                       gets re-approved by a correction that was really about something else entirely. -->
                   <input type="text" class="machine-filter" data-doc="${d.id}" placeholder="Filter machines…" />
                   <div class="machine-picker" data-doc="${d.id}">
                     ${state.allMachines.map((m) => {
@@ -572,6 +642,22 @@ function wireTabEvents() {
     });
   });
 
+  root.querySelectorAll(".disable-user-btn").forEach((btn) => {
+    guardedClick(btn, async () => {
+      if (!confirm("Disable this account? It will be signed out of every device immediately and blocked from signing in again until re-enabled.")) return;
+      await api(`/api/admin/users/${btn.dataset.id}/disable`, { method: "POST" });
+      state.users = await api("/api/admin/users");
+      render();
+    });
+  });
+  root.querySelectorAll(".enable-user-btn").forEach((btn) => {
+    guardedClick(btn, async () => {
+      await api(`/api/admin/users/${btn.dataset.id}/enable`, { method: "POST" });
+      state.users = await api("/api/admin/users");
+      render();
+    });
+  });
+
   root.querySelectorAll(".edit-doc-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const row = root.querySelector(`.edit-row[data-edit-for="${btn.dataset.id}"]`);
@@ -595,37 +681,56 @@ function wireTabEvents() {
     });
   });
   root.querySelector("#show-deactivated-toggle")?.addEventListener("change", async (e) => {
-    state.showDeactivated = e.target.checked;
-    state.documents = await api(`/api/admin/documents${state.showDeactivated ? "?include_deactivated=true" : ""}`);
-    render();
+    const checkbox = e.target;
+    const previous = state.showDeactivated;
+    checkbox.disabled = true;
+    try {
+      state.showDeactivated = checkbox.checked;
+      state.documents = await api(`/api/admin/documents${state.showDeactivated ? "?include_deactivated=true" : ""}`);
+      render();
+    } catch (err) {
+      state.showDeactivated = previous;
+      checkbox.checked = previous;
+      showError(err.message || "Something went wrong. Please try again.");
+    } finally {
+      if (checkbox.isConnected) checkbox.disabled = false;
+    }
   });
   root.querySelectorAll(".edit-form[data-id]").forEach((form) => {
-    // Only a genuine interaction with the machine picker marks it touched --
-    // programmatic pre-checking on render (see renderDocuments) never fires
-    // a "change" event, so this stays false for an edit that never went near
-    // the machine list at all.
+    // Tracked per checkbox, not as one form-wide flag -- so touching ONE
+    // machine (e.g. adding a new one) never implicates every other box that
+    // merely stayed checked because it reflects an existing (possibly
+    // rejected) link the admin never looked at this session.
     const picker = form.querySelector(".machine-picker");
-    picker?.addEventListener("change", () => { form.dataset.machinesTouched = "true"; }, { once: true });
+    const touchedIds = new Set();
+    picker?.querySelectorAll('input[name="machine_ids"]').forEach((cb) => {
+      cb.addEventListener("change", () => touchedIds.add(parseInt(cb.value, 10)));
+    });
 
     guardedSubmit(form, async () => {
       const fd = new FormData(form);
+      const originalIds = new Set(
+        (form.dataset.originalMachineIds || "").split(",").filter(Boolean).map((v) => parseInt(v, 10))
+      );
+      const add = [];
+      const remove = [];
+      touchedIds.forEach((id) => {
+        const nowChecked = picker.querySelector(`input[value="${id}"]`)?.checked ?? false;
+        const wasChecked = originalIds.has(id);
+        if (nowChecked && !wasChecked) add.push(id);
+        if (!nowChecked && wasChecked) remove.push(id);
+      });
       const payload = {
         manufacturer_name: fd.get("manufacturer_name") || null,
         doc_type: fd.get("doc_type") || null,
         title: fd.get("title") || null,
         revision: fd.get("revision") || null,
-        // machine_ids is omitted entirely unless the admin actually touched
-        // the picker this session -- sending it unconditionally would turn
-        // every metadata-only correction (title, revision, doc type) into
-        // an implicit re-approval of whatever happened to be checked,
-        // including previously-rejected links (the picker pre-checks every
-        // existing link, rejected ones included). The backend's PATCH
-        // handler treats a present machine_ids as "this IS the admin's
-        // deliberate human review" -- correct when the admin actually meant
-        // it, so this field must only be sent when they did.
-        machine_ids: form.dataset.machinesTouched === "true"
-          ? fd.getAll("machine_ids").map((v) => parseInt(v, 10))
-          : null,
+        // Both omitted entirely unless the admin actually touched at least
+        // one checkbox this session -- otherwise a pure title/revision/doc
+        // type correction would touch machine links at all, which it must
+        // never do.
+        machine_ids_add: touchedIds.size > 0 ? add : null,
+        machine_ids_remove: touchedIds.size > 0 ? remove : null,
         reason: fd.get("reason"),
       };
       await api(`/api/admin/documents/${form.dataset.id}`, { method: "PATCH", body: JSON.stringify(payload) });

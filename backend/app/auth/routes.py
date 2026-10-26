@@ -146,12 +146,29 @@ def register(payload: RegisterRequest, request: Request, response: Response):
                 detail="This invitation was issued for a different email address.",
             )
 
+        # Re-checks revoked_at (not just used_at) in the claim's own WHERE,
+        # not only in the plain SELECT above -- an administrator's revoke
+        # (routes_admin.py's revoke_invitation, same WHERE used_at IS NULL
+        # pattern) can still commit in the gap between that read and this
+        # UPDATE. Without re-checking it here, that race lets a registration
+        # the admin just revoked still go through: the read above saw
+        # revoked_at IS NULL, and a WHERE clause of used_at IS NULL alone
+        # would then happily claim it anyway.
         claim = conn.execute(
-            "UPDATE invitations SET used_at = now() WHERE id = %s AND used_at IS NULL",
+            "UPDATE invitations SET used_at = now() WHERE id = %s AND used_at IS NULL AND revoked_at IS NULL",
             (invite["id"],),
         )
         if claim.rowcount == 0:
-            # Lost the race to a concurrent request for this same token.
+            # Lost the race to a concurrent request for this same token --
+            # either another registration claimed it first, or an
+            # administrator revoked it in the gap between the read above and
+            # this claim. Re-read to report the specific, accurate reason
+            # rather than a generic one.
+            current = conn.execute(
+                "SELECT used_at, revoked_at FROM invitations WHERE id = %s", (invite["id"],)
+            ).fetchone()
+            if current is not None and current["revoked_at"] is not None:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, detail="This invitation has been revoked.")
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="This invitation has already been used.")
 
         existing = conn.execute("SELECT id FROM users WHERE email = %s", (email,)).fetchone()
