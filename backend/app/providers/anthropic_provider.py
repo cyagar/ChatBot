@@ -125,8 +125,11 @@ class AnthropicProvider(AIProvider):
                     "identifier, or wording is not actually present verbatim in the excerpt(s) "
                     "it cited. Reply again with ONLY valid JSON in the exact shape requested, "
                     "copying each claim, step and warning from its cited excerpt's own wording "
-                    "(dropping words only, keeping every negation, in the excerpt's order), or "
-                    "set is_no_answer to true if the excerpts don't support an answer." + detail
+                    "(dropping words only, keeping every negation, in the excerpt's order). If only "
+                    "ONE item was the problem, fix or split just that item -- a single bad item is "
+                    "not a reason to set is_no_answer on an otherwise-supported response. Only set "
+                    "is_no_answer to true if the excerpts genuinely give no real basis for an "
+                    "answer at all." + detail
                 ),
             },
         ]

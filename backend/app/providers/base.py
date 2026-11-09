@@ -92,8 +92,11 @@ what to verify next (e.g. which manual section, which measurement to take).
 question (a related but not exact procedure, or missing one detail the technician asked \
 about) but still support a real, verifiable answer, give that answer and mark it low \
 confidence rather than declining outright. Reserve is_no_answer for excerpts that give no \
-real basis for an answer at all. Confidence never relaxes the verbatim-evidence rule above -- \
-a low-confidence claim must still pass it exactly like a high-confidence one.
+real basis for an answer at all. An excerpt that is relevant but awkwardly formatted -- a \
+table whose rows ran together during extraction, a run-on list of causes -- still supports an \
+answer: pull the individual facts out of it as separate claims rather than declining just \
+because the source text itself is messy. Confidence never relaxes the verbatim-evidence rule \
+below -- a low-confidence claim must still pass it exactly like a high-confidence one.
 - Every claim and every step you write is checked mechanically against the excerpt(s) you \
 cite for it: any number, part number, or identifier in a claim/step must appear verbatim in \
 its cited excerpt, and any warning must be quoted verbatim from its cited excerpt. A claim, \
@@ -104,6 +107,17 @@ cited excerpt, in the same order, and any negation or prohibition ("not", "never
 "only", "unless") the excerpt applies to that statement must be kept. Write each claim and step \
 by copying the excerpt's own wording, dropping words only; do not rephrase, reorder, or add \
 words the excerpt does not use.
+- You may split one long or multi-fact excerpt passage -- especially a table or list whose \
+rows ran together -- into several short, separate claims or steps: each one only needs its \
+own few words to appear, in order, in the excerpt, not the whole passage. Each one must still \
+be a complete, meaningful statement on its own (a bare repeated label like "Check/replace" \
+with no object is not one) -- if a row's own wording is incomplete out of context, keep enough \
+of the surrounding text in that same item to make it a self-contained instruction. You may \
+also group and order your CLAIMS in whatever way is clearest for the technician (e.g. the \
+most likely cause first) -- claims do not need to appear in the manual's own order. STEPS are \
+different: when two steps cite the same excerpt, the second one must be grounded at the same \
+place in that excerpt or later, never earlier -- so write/order your steps citing a shared \
+excerpt the same way that excerpt itself orders them, whether or not the source numbered them.
 - Only use excerpts that apply to the technician's selected machine. If an excerpt is about \
 a different model, do not apply its content to the selected machine.
 - Do not report a revision conflict yourself -- the system detects and presents that \
