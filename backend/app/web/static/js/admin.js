@@ -256,6 +256,7 @@ function renderReviewQueue() {
           </div>
           <span class="status-badge ${d.review_status}">${esc(d.review_status)}</span>
         </div>
+        ${d.extraction_warnings ? `<div class="text-xs text-danger mt-sm">Quality warning: ${esc(d.extraction_warnings)}</div>` : ""}
         ${d.review_status !== "approved" ? `
           <div class="mt-sm">
             <button class="primary approve-doc-btn" data-doc="${d.id}">Approve document</button>
@@ -378,7 +379,7 @@ function renderDocuments() {
         ${state.documents.map((d) => `
           <tr${d.deactivated_at ? ' class="deactivated-row"' : ""}>
             <td>${esc(d.original_filename)}<br><span class="text-dim text-sm">${d.file_type} · ${d.page_count ?? "?"} pages${d.is_current_revision ? "" : " · SUPERSEDED"}${d.deactivated_at ? " · DEACTIVATED" : ""}</span></td>
-            <td><span class="status-badge ${d.status}">${d.status}</span>${d.status_reason ? `<div class="text-xs text-dim max-w-xs">${esc(d.status_reason)}</div>` : ""}</td>
+            <td><span class="status-badge ${d.status}">${d.status}</span>${d.status_reason ? `<div class="text-xs text-dim max-w-xs">${esc(d.status_reason)}</div>` : ""}${d.extraction_warnings ? `<div class="text-xs text-danger max-w-xs">Quality warning: ${esc(d.extraction_warnings)}</div>` : ""}</td>
             <td><span class="status-badge ${d.review_status}">${esc(d.review_status)}</span></td>
             <td>${esc(d.manufacturer || "—")}</td>
             <td>${esc(d.doc_type || "—")}</td>
@@ -390,6 +391,9 @@ function renderDocuments() {
               ${d.deactivated_at
                 ? `<button class="ghost reactivate-btn" data-id="${d.id}">Reactivate</button>`
                 : `<button class="ghost deactivate-btn" data-id="${d.id}">Deactivate</button>`}
+              ${!d.deactivated_at && d.needs_reprocessing
+                ? `<button class="ghost reprocess-doc-btn" data-id="${d.id}">Reprocess</button>`
+                : ""}
             </td>
           </tr>
           <tr class="edit-row hidden" data-edit-for="${d.id}">
@@ -675,6 +679,15 @@ function wireTabEvents() {
       await api(`/api/admin/documents/${btn.dataset.id}/deactivate`, { method: "POST" });
       state.documents = await api(`/api/admin/documents${state.showDeactivated ? "?include_deactivated=true" : ""}`);
       render();
+    });
+  });
+  root.querySelectorAll(".reprocess-doc-btn").forEach((btn) => {
+    guardedClick(btn, async () => {
+      if (!confirm("Re-extract and re-chunk this manual's stored file under the current pipeline version? "
+        + "The result is a new pending document awaiting review in the review queue -- this manual keeps "
+        + "serving technicians unchanged until that new version is approved.")) return;
+      await api(`/api/admin/documents/${btn.dataset.id}/reprocess`, { method: "POST" });
+      alert("Reprocess started in the background. Check the Ingestion tab's run list, then the review queue once it finishes.");
     });
   });
   root.querySelectorAll(".reactivate-btn").forEach((btn) => {

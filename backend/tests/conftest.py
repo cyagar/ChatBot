@@ -78,6 +78,21 @@ def _refuse_if_production_database(url: str, var_name: str) -> None:
         )
 
 
+def _require_safe_test_database_url(url: str, var_name: str) -> None:
+    """Both URL-specific safety checks together -- the primitive every
+    fixture or script that will run migrations and/or an unconditional
+    TRUNCATE/DROP against a configured database must call for EVERY
+    connection string it uses, so a caller outside test_env's own fixture
+    body (e.g. test_migrations.py's fresh_unmigrated_db, which runs
+    DROP SCHEMA ... CASCADE on its own, separately-sourced DSN) gets the
+    exact same protection test_env gives its own DATABASE_URL/
+    DATABASE_URL_UNPOOLED, not a weaker ad-hoc subset of it. Does not include
+    _require_destructive_test_opt_in(), which takes no URL and is called
+    once per fixture, not once per connection string."""
+    _refuse_known_production_host(url, var_name)
+    _refuse_if_production_database(url, var_name)
+
+
 @pytest.fixture
 def test_env(tmp_path, monkeypatch):
     """Isolated settings + a migrated Postgres test-branch DB per test. Uses
@@ -97,8 +112,7 @@ def test_env(tmp_path, monkeypatch):
         value = test_db_vars.get(key)
         if not value:
             raise RuntimeError(f"{TEST_ENV_FILE} is missing {key}.")
-        _refuse_known_production_host(value, key)
-        _refuse_if_production_database(value, key)
+        _require_safe_test_database_url(value, key)
         monkeypatch.setenv(key, value)
 
     storage_dir = tmp_path / "storage"

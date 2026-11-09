@@ -53,6 +53,35 @@ def test_recent_successful_run_is_not_stale(test_env):
     assert body["is_stale"] is False, "1 hour ago must be well under the default 48h SLA"
 
 
+def test_a_reprocess_run_does_not_count_as_the_corpus_sync(test_env):
+    """A reprocess (app.ingestion.pipeline.reprocess_document) only
+    re-extracts ONE already-indexed document -- it never re-lists the
+    source or reconciles the rest of the corpus. If it counted as a
+    success here, an admin reprocessing one stale-version document would
+    silently reset the staleness clock for the whole corpus, even though
+    nothing else in it was touched."""
+    long_ago = (datetime.now(timezone.utc) - timedelta(hours=72)).strftime("%Y-%m-%d %H:%M:%S")
+    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        _insert_run(
+            conn, status="completed", trigger="scheduled",
+            started_at=long_ago, finished_at=long_ago,
+        )
+        _insert_run(
+            conn, status="completed", trigger="reprocess",
+            started_at=one_hour_ago, finished_at=one_hour_ago,
+        )
+    _register_admin()
+
+    resp = client.get("/api/admin/ingestion/status")
+    body = resp.json()
+    assert body["last_success_trigger"] == "scheduled", (
+        "the recent reprocess run must be ignored for last-success purposes -- "
+        f"got {body['last_success_trigger']!r}"
+    )
+    assert body["is_stale"] is True, "72h ago is past the default 48h SLA regardless of the reprocess run"
+
+
 def test_old_failed_run_only_does_not_count_as_success(test_env):
     with get_conn() as conn:
         _insert_run(

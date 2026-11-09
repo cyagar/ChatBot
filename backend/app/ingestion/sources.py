@@ -47,11 +47,21 @@ class SkippedFile:
     intentional, by-design skip (a subfolder, a shortcut, a Workspace-native
     file with no binary, an oversized file, a permissions gap) that isn't
     evidence of anything broken. Only the former should make a run's overall
-    health reflect a problem -- see pipeline.py's had_error handling."""
+    health reflect a problem -- see pipeline.py's had_error handling.
+
+    source_ref, when known, is what lets pipeline.py tell "this file is
+    confirmed still present at the source but excluded this run for a known
+    reason" apart from "this source_ref did not appear in the listing at
+    all" (missing_from_source) -- a file that merely failed to download, lost
+    download permission, or now exceeds the size cap must never be reported
+    as possibly deleted/renamed/moved just because list_files() couldn't
+    include it. None for a skip that has no source_ref to give (there is no
+    item at all to blame it on)."""
 
     filename: str
     reason: str
     is_error: bool = False
+    source_ref: str | None = None
 
 
 class DocumentSource(abc.ABC):
@@ -317,17 +327,19 @@ class GoogleDriveSource(DocumentSource):
                 # Subfolders and shortcuts get their own explicit, actionable
                 # reasons rather than being lumped into the generic
                 # Workspace-export message below.
+                item_ref = f"{self.source_system}:{file_id}"
+
                 if mime_type == self._FOLDER_MIME:
                     logger.info("Skipping Drive item %s (%r): subfolders are not scanned.", file_id, name)
                     self._pending_skips.append(SkippedFile(
                         name, "Subfolder -- nested folders are not scanned. Move manuals into "
-                        "the top-level shared folder."))
+                        "the top-level shared folder.", source_ref=item_ref))
                     continue
                 if mime_type == self._SHORTCUT_MIME:
                     logger.info("Skipping Drive item %s (%r): shortcuts are not followed.", file_id, name)
                     self._pending_skips.append(SkippedFile(
                         name, "Shortcut -- shortcuts are not followed. Share or move the actual "
-                        "file directly into this folder."))
+                        "file directly into this folder.", source_ref=item_ref))
                     continue
                 if mime_type.startswith(self._WORKSPACE_MIME_PREFIX):
                     logger.info("Skipping Drive file %s (%r): Google Workspace files have no "
@@ -335,14 +347,14 @@ class GoogleDriveSource(DocumentSource):
                     self._pending_skips.append(SkippedFile(
                         name, "Google Workspace document (Docs/Sheets/Slides/Forms) -- these have "
                         "no downloadable binary and are not exported. Download it as PDF/DOCX/XLSX "
-                        "from Drive and place that exported file in this folder instead."))
+                        "from Drive and place that exported file in this folder instead.", source_ref=item_ref))
                     continue
                 if f.get("capabilities", {}).get("canDownload") is False:
                     logger.warning("Skipping Drive file %s (%r): service account lacks download "
                                     "permission.", file_id, name)
                     self._pending_skips.append(SkippedFile(
                         name, "The service account does not have permission to download this file.",
-                        is_error=True))
+                        is_error=True, source_ref=item_ref))
                     continue
 
                 md5 = f.get("md5Checksum")
@@ -356,7 +368,7 @@ class GoogleDriveSource(DocumentSource):
                     self._pending_skips.append(SkippedFile(
                         name, f"File is {reported_size / (1024 * 1024):.1f} MB, exceeding the "
                         f"{self.max_file_size_bytes // (1024 * 1024)} MB per-file limit.",
-                        is_error=True))
+                        is_error=True, source_ref=item_ref))
                     continue
 
                 cache_path = self._cache_path(file_id, name)
@@ -387,7 +399,8 @@ class GoogleDriveSource(DocumentSource):
                                         expected_md5=md5, max_bytes=self.max_file_size_bytes)
                     except Exception as e:
                         logger.warning("Skipping Drive file %s (%r): download failed: %s", file_id, name, e)
-                        self._pending_skips.append(SkippedFile(name, f"Download failed: {e}", is_error=True))
+                        self._pending_skips.append(SkippedFile(
+                            name, f"Download failed: {e}", is_error=True, source_ref=item_ref))
                         continue
                     # A rename changes the cache filename (it embeds the name);
                     # drop any other cached copy left behind under this file ID

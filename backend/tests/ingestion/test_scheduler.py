@@ -163,3 +163,24 @@ def test_first_wait_is_short_when_the_last_sync_is_older_than_the_interval(test_
             "INSERT INTO ingestion_runs (status, finished_at) VALUES ('completed', now() - interval '20 hours')"
         )
     assert scheduler._seconds_until_next_sync(360) == scheduler.FIRST_SYNC_MIN_DELAY_SECONDS
+
+
+def test_a_recent_reprocess_run_does_not_push_out_a_stale_corpus_catch_up_sync(test_env):
+    """A reprocess only re-extracts one already-indexed document -- it must
+    not count as a fresh full sync here, or an admin reprocessing one stale
+    document would suppress the catch-up sync an actually-stale corpus
+    still needs."""
+    from app.db import get_conn
+
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO ingestion_runs (status, trigger, finished_at) "
+            "VALUES ('completed', 'manual', now() - interval '20 hours')"
+        )
+        conn.execute(
+            "INSERT INTO ingestion_runs (status, trigger, finished_at) "
+            "VALUES ('completed', 'reprocess', now() - interval '5 minutes')"
+        )
+    assert scheduler._seconds_until_next_sync(360) == scheduler.FIRST_SYNC_MIN_DELAY_SECONDS, (
+        "the recent reprocess run must be ignored -- the real last sync was 20h ago, past the interval"
+    )

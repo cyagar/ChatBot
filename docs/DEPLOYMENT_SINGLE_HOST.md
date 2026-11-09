@@ -39,6 +39,11 @@ git archive --format=tar.gz -o /tmp/backend.tar.gz HEAD:backend
 gcloud compute scp /tmp/backend.tar.gz <host>:/tmp/ --zone=<zone>
 gcloud compute scp docker-compose.yml docker-compose.prod.yml <host>:/opt/ChatBot/ --zone=<zone>
 gcloud compute scp -r deploy <host>:/opt/ChatBot/ --zone=<zone>
+# There is no .git checkout on the host (see above), so this is the only
+# record of which commit is actually running there -- deploy/backup.sh reads
+# it into each backup's manifest.
+git rev-parse HEAD > /tmp/VERSION
+gcloud compute scp /tmp/VERSION <host>:/opt/ChatBot/ --zone=<zone>
 
 # On the host:
 sudo mkdir -p /opt/ChatBot/backend
@@ -95,6 +100,8 @@ Migrations are applied automatically at startup under a database lock.
 # From a local checkout, at the commit/tag to deploy:
 git archive --format=tar.gz -o /tmp/backend.tar.gz HEAD:backend
 gcloud compute scp /tmp/backend.tar.gz <host>:/tmp/ --zone=<zone>
+git rev-parse HEAD > /tmp/VERSION
+gcloud compute scp /tmp/VERSION <host>:/opt/ChatBot/ --zone=<zone>
 
 # On the host:
 sudo tar -xzf /tmp/backend.tar.gz -C /opt/ChatBot/backend
@@ -142,23 +149,46 @@ point-in-time recovery or a branch restore.
 
 ## Backups
 
-`deploy/backup.sh` writes a database dump and a tarball of `data/object_storage`
-and keeps the newest 14 of each. Schedule it nightly and copy the output off the
-host:
+`deploy/backup.sh` writes a database dump and a tarball of `data/object_storage`,
+plus a `.sha256` sidecar for each (`sha256sum -c`-ready) and a
+`manifest-<stamp>.json` recording both checksums and the git commit the
+backup was taken at (read from the `VERSION` file the deploy procedure above
+writes to the host -- there is no `.git` checkout there to ask), and keeps
+the newest 14 of each. The dump and tarball are both written to a temp name
+and only renamed into their final `db-<stamp>.dump` / `object-storage-<stamp>.tgz`
+name once their own command exits 0, so an interrupted run (killed process,
+full disk) never leaves a truncated file at a name retention's rotation
+would otherwise treat as a complete backup. Schedule it nightly and copy the
+output off the host:
 
 ```cron
 15 2 * * * cd /opt/ChatBot && BACKUP_DIR=/var/backups/tma ./deploy/backup.sh >> /var/log/tma-backup.log 2>&1
 ```
 
+The database dump and the object-storage tarball are two separate
+point-in-time snapshots, not one atomic one -- see the consistency-skew
+comment at the top of `backup.sh` for exactly what that can and cannot cause.
+
 Neon also provides point-in-time recovery; confirm the retention window on the
 current plan and record it in `OWNER_DECISION_GATE.md`. A backup is not proven
-until restored: restore the newest dump into a scratch Neon branch
-(`pg_restore --no-owner -d <scratch url> db-*.dump`), unpack the object storage
-tarball into an empty directory, start the app against them with a different
-`.env`, confirm `/readyz` returns 200 (proving at least one restored document
-is still approved, current and machine-linked -- a restore that silently lost
-review state would otherwise look successful right up to that check), and
-record the elapsed time in the release record.
+until restored:
+
+1. Before restoring, verify the backup is actually intact: from inside
+   `$BACKUP_DIR`, run `sha256sum -c db-<stamp>.dump.sha256` and
+   `sha256sum -c object-storage-<stamp>.tgz.sha256` for the stamp you're
+   restoring. A checksum mismatch means something corrupted the file after
+   backup.sh wrote it (copying it off-host, storage media) -- restoring from
+   it anyway would silently fail later in a way that looks like missing
+   data, not a bad backup.
+2. Restore the newest dump into a scratch Neon branch
+   (`pg_restore --no-owner -d <scratch url> db-*.dump`) and unpack the object
+   storage tarball into an empty directory.
+3. Start the app against them with a different `.env`, confirm `/readyz`
+   returns 200 (proving at least one restored document is still approved,
+   current and machine-linked -- a restore that silently lost review state
+   would otherwise look successful right up to that check).
+4. Record the elapsed time, the manifest's git commit, and the checksum
+   verification result in the release record.
 
 The Drive cache (`data/gdrive_cache`) is not a source of record.
 

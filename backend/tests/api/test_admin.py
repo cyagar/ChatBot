@@ -77,6 +77,31 @@ def test_document_at_a_stale_pipeline_version_needs_reprocessing(test_env):
     assert doc["needs_reprocessing"] is True
 
 
+def test_reprocess_refuses_when_a_pending_reprocessed_copy_already_exists(test_env):
+    """Reprocessing a document that already has a pending replacement at the
+    current pipeline version (from an earlier Reprocess click not yet
+    reviewed) must be refused -- otherwise every repeat click before that
+    review happens inserts another duplicate pending document, each with
+    its own chunks/embeddings, piling up redundant review-queue entries for
+    the same content."""
+    with get_conn() as conn:
+        doc_id = _seed_document(conn)
+        conn.execute("UPDATE documents SET review_status = 'approved' WHERE id = %s", (doc_id,))
+        already_pending_cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status, extraction_version, chunking_version) "
+            "VALUES ('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
+            "'indexed', 'pending', %s, %s) RETURNING id",
+            (CURRENT_EXTRACTION_VERSION, CURRENT_CHUNKING_VERSION),
+        )
+        already_pending_id = already_pending_cur.fetchone()["id"]
+    _register_admin()
+
+    resp = client.post(f"/api/admin/documents/{doc_id}/reprocess")
+    assert resp.status_code == 409
+    assert str(already_pending_id) in resp.json()["detail"]
+
+
 def test_metadata_correction_updates_and_logs_audit_trail(test_env):
     with get_conn() as conn:
         doc_id = _seed_document(conn)

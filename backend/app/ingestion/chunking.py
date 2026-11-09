@@ -21,7 +21,7 @@ MIN_CHARS = 150
 # size caps, table handling). documents.chunking_version records which
 # version actually produced a document's current chunks -- see extractors.py's
 # CURRENT_EXTRACTION_VERSION for the matching mechanism on the extraction side.
-CURRENT_CHUNKING_VERSION = 3
+CURRENT_CHUNKING_VERSION = 4
 
 # An embedding model typically truncates its input, so a chunk that grows too
 # large has rows past the truncation point invisible to semantic search even
@@ -90,7 +90,8 @@ def _chunk_page_text(page_number: int, text: str, headings: list[tuple[str, int]
             current_heading = heading_lookup[norm]
             continue
 
-        line_type = _classify_line(stripped)
+        raw_line_type = _classify_line(stripped)
+        is_fresh_marker = raw_line_type in ("warning", "procedure")
         # _classify_line only recognizes the FIRST line of a warning or
         # numbered step -- "WARNING: ..." or "1. ..." -- by its leading
         # marker. Every line after it (the actual warning body, or a step's
@@ -99,10 +100,37 @@ def _chunk_page_text(page_number: int, text: str, headings: list[tuple[str, int]
         # warning's own content from its "WARNING" label into a separate
         # chunk one line later. A "text" line inside an open warning/procedure
         # buffer is kept as part of it instead of ending the block.
-        if buffer_type in ("warning", "procedure") and line_type == "text":
+        if buffer_type in ("warning", "procedure") and raw_line_type == "text":
             line_type = buffer_type
-        elif buffer and buffer_type != line_type:
+        else:
+            line_type = raw_line_type
+
+        if buffer and buffer_type != line_type:
             flush()
+        elif (
+            buffer_type == line_type and buffer_type in ("warning", "procedure") and buffer
+            and sum(len(ln) for ln in buffer) > MAX_TABLE_CHUNK_CHARS
+        ):
+            # Neither a fresh marker of the SAME kind (a second "WARNING:
+            # ..." line, the next numbered step) NOR a plain continuation
+            # line trips the type-change flush above -- both still classify
+            # as this same buffer_type -- so either an indefinitely long run
+            # of steps/warnings, or a single step/warning with a long
+            # continuation, would otherwise accumulate into one unboundedly
+            # large chunk (the same embedding-truncation risk
+            # MAX_TABLE_CHUNK_CHARS already guards against for tables).
+            # Flushed once oversized, regardless of which line type
+            # triggered it.
+            prev_type = buffer_type
+            flush()
+            if not is_fresh_marker:
+                # A continuation-triggered split (unlike a fresh marker,
+                # which is already self-explanatory on its own) would
+                # otherwise start the new chunk mid-sentence with no label
+                # at all -- stamped so it stays self-contained even
+                # retrieved on its own, mirroring how _split_table_rows
+                # repeats the header in every table window.
+                buffer.append(f"({prev_type}, continued)")
         buffer_type = line_type
         buffer.append(stripped)
 

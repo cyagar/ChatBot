@@ -33,6 +33,7 @@ import secrets
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -61,6 +62,16 @@ _CHUNK_TYPE_GROUPS = {
 }
 
 
+def _normalize_dsn(url: str) -> tuple:
+    """Host/port/path compared case-insensitively on the host (DNS names
+    aren't case-sensitive) and with no trailing slash -- a raw string
+    == would miss two DSNs that are the SAME production database typed with
+    a different host case or a trailing slash, and wrongly let this script
+    run against it."""
+    parsed = urlparse(url)
+    return (parsed.scheme, (parsed.hostname or "").lower(), parsed.port, parsed.path.rstrip("/"))
+
+
 def _refuse_unless_disposable_clone() -> tuple[str, str]:
     """Returns (database_url, database_url_unpooled) for the eval clone, or
     raises. Two failure modes, both loud: the vars are simply unset (the
@@ -80,7 +91,8 @@ def _refuse_unless_disposable_clone() -> tuple[str, str]:
         prod_vars = dotenv_values(PROD_ENV_FILE)
         for name, value in (("EVAL_DATABASE_URL", url), ("EVAL_DATABASE_URL_UNPOOLED", url_unpooled)):
             for prod_key in ("DATABASE_URL", "DATABASE_URL_UNPOOLED"):
-                if value == prod_vars.get(prod_key):
+                prod_value = prod_vars.get(prod_key)
+                if prod_value and _normalize_dsn(value) == _normalize_dsn(prod_value):
                     raise RuntimeError(
                         f"Refusing to run: {name} is IDENTICAL to backend/.env's production "
                         f"{prod_key}. This script registers an eval user and writes eval "
@@ -94,6 +106,14 @@ _eval_db_url, _eval_db_url_unpooled = _refuse_unless_disposable_clone()
 os.environ["DATABASE_URL"] = _eval_db_url
 os.environ["DATABASE_URL_UNPOOLED"] = _eval_db_url_unpooled
 os.environ.setdefault("SECRET_KEY", secrets.token_urlsafe(32))
+# The disposable clone's backend/.env (if any) is a clone of production's,
+# so APP_ENV there reads 'production' -- which makes the login cookie
+# Secure (app/auth/routes.py). TestClient talks to http://testserver, not
+# https, so a Secure cookie is silently never replayed on the next request:
+# every call after login would look logged-out, with nothing here checking
+# for it. Forced unconditionally (not setdefault), since the whole point is
+# to override whatever the cloned .env says.
+os.environ["APP_ENV"] = "development"
 
 from app.config import get_settings  # noqa: E402
 
@@ -161,10 +181,18 @@ def _chunk_types_for(chunk_ids: list[int]) -> dict[int, str]:
 
 def run_case(case: dict) -> dict:
     machine_id = resolve_machine_id(case.get("machine"))
-    conv = client.post("/api/conversations", json={"machine_id": machine_id}).json()
+    conv_resp = client.post("/api/conversations", json={"machine_id": machine_id})
+    if conv_resp.status_code != 200:
+        raise RuntimeError(f"POST /api/conversations failed: {conv_resp.status_code} {conv_resp.text}")
+    conv = conv_resp.json()
     resp = client.post(
         f"/api/conversations/{conv['id']}/messages", json={"content": case["question"]}
     )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"POST .../messages failed for case {case['id']!r}: {resp.status_code} {resp.text} -- "
+            "a gateway/provider error must never be silently read as any kind of answer outcome."
+        )
     body = resp.json()
 
     result = {"id": case["id"], "category": case["category"], "question": case["question"], "ok": True, "notes": []}
@@ -176,9 +204,27 @@ def run_case(case: dict) -> dict:
         return result
 
     if case.get("expect_no_answer"):
-        result["ok"] = bool(body.get("is_no_answer"))
+        # answer_status=='completed' is required alongside is_no_answer: a
+        # real provider outage or persistence failure (answer_status ==
+        # 'failed') must never read as "the system correctly abstained" just
+        # because it also produced no citations.
+        result["ok"] = bool(body.get("is_no_answer")) and body.get("answer_status") == "completed"
         if not result["ok"]:
-            result["notes"].append("expected an honest no-answer, got a confident-looking answer instead")
+            if body.get("answer_status") != "completed":
+                result["notes"].append(
+                    f"expected an honest no-answer, but answer_status was {body.get('answer_status')!r} "
+                    "(a system failure, not an honest abstention)"
+                )
+            else:
+                result["notes"].append("expected an honest no-answer, got a confident-looking answer instead")
+        return result
+
+    if body.get("answer_status") != "completed":
+        result["ok"] = False
+        result["notes"].append(
+            f"answer_status was {body.get('answer_status')!r}, not 'completed' -- a system "
+            "failure, not a content mismatch, must never be scored as a retrieval/citation miss"
+        )
         return result
 
     citations = body.get("citations", [])
@@ -264,9 +310,18 @@ def run_source_withdrawal_check() -> dict:
         conn.execute("UPDATE documents SET deactivated_at = now() WHERE id = ANY(%s)", (doc_ids,))
 
     after = run_case(case)
-    still_cited = any(case["expected_filename_contains"].lower() in f.lower() for f in after.get("cited_filenames", []))
+    # An empty cited_filenames list is ambiguous on its own -- it's what a
+    # genuine "no longer cited" response looks like, but it's ALSO exactly
+    # what run_case's own answer_status!='completed' short-circuit above
+    # returns (no 'cited_filenames' key at all) on a provider/system error.
+    # The latter must never pass this check: an outage is not proof the
+    # withdrawn source was actually excluded from retrieval.
+    if "cited_filenames" not in after:
+        return {"id": "source-withdrawal-check", "category": "source_withdrawal", "ok": False,
+                 "notes": [f"re-run after withdrawal did not complete normally: {after.get('notes')}"]}
+    still_cited = any(case["expected_filename_contains"].lower() in f.lower() for f in after["cited_filenames"])
     ok = not still_cited
-    notes = [] if ok else [f"withdrawn document's content is STILL being cited: {after.get('cited_filenames')}"]
+    notes = [] if ok else [f"withdrawn document's content is STILL being cited: {after['cited_filenames']}"]
     return {"id": "source-withdrawal-check", "category": "source_withdrawal", "ok": ok, "notes": notes}
 
 
@@ -302,6 +357,7 @@ def main() -> int:
     citation_rate = citation_hits / len(citation_cases) if citation_cases else 1.0
     cross_model_cases = [r for r in results if "cross_model_clean" in r]
     cross_model_clean = sum(1 for r in cross_model_cases if r["cross_model_clean"])
+    cross_model_leaks = len(cross_model_cases) - cross_model_clean
 
     lines = []
     lines.append("# Retrieval & Citation Evaluation Report")
@@ -359,6 +415,13 @@ def main() -> int:
             f"retrieval {100*retrieval_rate:.0f}%/{100*MIN_RETRIEVAL_HIT_RATE:.0f}%, "
             f"citation {100*citation_rate:.0f}%/{100*MIN_CITATION_SUPPORT_RATE:.0f}%) -- exiting nonzero."
         )
+        return 1
+    # Cross-model leakage is a zero-tolerance gate, not part of the 80%
+    # aggregate thresholds above -- a technician shown one citation from the
+    # wrong machine's manual is a real safety issue regardless of how well
+    # every OTHER case scored, so even a single leak fails the whole run.
+    if cross_model_leaks > 0:
+        print(f"\n{cross_model_leaks} cross-model leak(s) detected -- exiting nonzero regardless of pass rate.")
         return 1
     return 0
 

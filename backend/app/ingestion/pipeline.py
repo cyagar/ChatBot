@@ -246,19 +246,31 @@ def _ingest_all_locked(
 
     try:
         files = source.list_files()
+        skipped_files = source.pop_skipped()
 
-        # An active document whose source_ref no longer appears in this
-        # listing is reported, never auto-deactivated -- a missing Drive file
-        # could mean it was deleted, renamed, or moved out of the shared
-        # folder, and only a human can tell which; see
-        # docs/DRIVE_RECONCILIATION_RUNBOOK.md for how an administrator acts
-        # on this.
-        seen_refs = {sf.source_ref for sf in files}
+        # An active document whose source_ref no longer appears ANYWHERE this
+        # run noticed -- not just among the files actually returned, but also
+        # among the ones explicitly skipped (see SkippedFile.source_ref) -- is
+        # reported, never auto-deactivated: a missing Drive file could mean it
+        # was deleted, renamed, or moved out of the shared folder, and only a
+        # human can tell which; see docs/DRIVE_RECONCILIATION_RUNBOOK.md for
+        # how an administrator acts on this.
+        #
+        # A source_ref that WAS seen this run, just excluded as a skip (a
+        # download failure, a lost permission, now over the size cap), must
+        # never be reported here too: the file is confirmed still present at
+        # the source, so "possibly deleted, renamed, or moved" would be
+        # actively misleading about a document that merely failed to fetch
+        # this one run. That skip already gets its own distinct event below,
+        # with the real reason attached.
+        observed_refs = {sf.source_ref for sf in files} | {
+            s.source_ref for s in skipped_files if s.source_ref is not None
+        }
         with get_conn() as conn:
             missing = conn.execute(
                 "SELECT id, original_filename, source_ref FROM documents "
                 "WHERE source_system = %s AND deactivated_at IS NULL AND source_ref != ALL(%s)",
-                (source.source_system, list(seen_refs)),
+                (source.source_system, list(observed_refs)),
             ).fetchall()
         for m in missing:
             detail = (
@@ -272,7 +284,7 @@ def _ingest_all_locked(
         # Items the source noticed but couldn't/wouldn't include get the same
         # visibility as every other outcome -- an ingestion_events row and a
         # FileOutcome -- instead of only ever reaching a server log.
-        for skipped in source.pop_skipped():
+        for skipped in skipped_files:
             # A genuine failure reported via pop_skipped() (e.g. a download
             # that errored out) must be visually distinguishable from an
             # intentional skip (subfolder, shortcut, oversized file) AND must
@@ -327,9 +339,18 @@ def _ingest_all_locked(
         raise
 
     # A run in which nothing succeeded is a failure, not a partial success: it
-    # must not count as a fresh sync.
+    # must not count as a fresh sync. "needs_reprocessing" belongs alongside
+    # "skipped_unchanged" here -- it's the exact same "this run correctly
+    # accounted for an unchanged, already-indexed document" outcome, just
+    # with a stale pipeline version noted on top. Leaving it out would mean
+    # that the instant a chunking/extraction version bump ships, every
+    # existing document's outcome flips from skipped_unchanged to
+    # needs_reprocessing, and any OTHER, unrelated single-file error in that
+    # same run (a transient download failure, one oversized file) would then
+    # make the whole run "failed" -- stale-corpus alerting instead of the
+    # correct "completed_with_errors".
     any_success = any(
-        o.status in ("indexed", "partial", "duplicate", "skipped_unchanged", "unsupported")
+        o.status in ("indexed", "partial", "duplicate", "skipped_unchanged", "unsupported", "needs_reprocessing")
         for o in report.outcomes
     )
     if had_error and not any_success:
@@ -399,12 +420,23 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
     superseded_candidate_id: int | None = None
     with get_conn() as conn:
         existing = conn.execute(
-            "SELECT id, status, sha256, extraction_version, chunking_version FROM documents "
-            "WHERE source_ref = %s AND deactivated_at IS NULL ORDER BY ingested_at DESC, id DESC LIMIT 1",
+            "SELECT id, status, sha256, original_filename, extraction_version, chunking_version "
+            "FROM documents WHERE source_ref = %s AND deactivated_at IS NULL "
+            "ORDER BY ingested_at DESC, id DESC LIMIT 1",
             (sf.source_ref,),
         ).fetchone()
 
         if existing and existing["sha256"] == sf.sha256:
+            # Same bytes at the same source_ref, but the source now reports a
+            # different name (a plain rename at the source, not new content)
+            # -- the stored row's original_filename would otherwise go stale
+            # forever, since every branch below treats unchanged bytes as
+            # nothing further to do.
+            if existing["original_filename"] != sf.filename:
+                conn.execute(
+                    "UPDATE documents SET original_filename = %s WHERE id = %s",
+                    (sf.filename, existing["id"]),
+                )
             stale_pipeline_version = (
                 existing["status"] in ("indexed", "partial")
                 and (existing["extraction_version"] != CURRENT_EXTRACTION_VERSION
@@ -590,13 +622,15 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
         cur = conn.execute(
             "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
             "file_type, sha256, byte_size, page_count, manufacturer_id, doc_type, title, revision, "
-            "doc_number, status, status_reason, extraction_version, chunking_version, ingested_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) "
+            "doc_number, status, status_reason, extraction_warnings, extraction_version, "
+            "chunking_version, ingested_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) "
             "RETURNING id",
             (sf.filename, storage_name, source.source_system, sf.source_ref, file_type,
              sf.sha256, sf.byte_size, extracted.page_count, manu_id, meta.doc_type,
              meta.title, meta.revision, meta.doc_number, status,
              " | ".join(status_reason_parts) if status_reason_parts else None,
+             " | ".join(extracted.warnings) if extracted.warnings else None,
              CURRENT_EXTRACTION_VERSION, CURRENT_CHUNKING_VERSION),
         )
         doc_id = cur.fetchone()["id"]
@@ -647,6 +681,211 @@ def _ingest_one(run_id: int, source: DocumentSource, sf) -> FileOutcome:
         page_count=extracted.page_count,
         manufacturer=meta.manufacturer,
         doc_type=meta.doc_type,
+        machines=[m.model_name for m in meta.machine_matches],
+    )
+
+
+def reprocess_document(document_id: int, run_id: int | None = None) -> FileOutcome:
+    """Explicitly re-extracts/re-chunks an already-indexed document's stored
+    bytes under the CURRENT pipeline version, without waiting for its bytes
+    to change. ingest_all()'s normal skip-if-unchanged check only ever
+    REPORTS a stale pipeline version via the 'needs_reprocessing' outcome
+    (see _ingest_one above) -- it never acts on it, so a document ingested
+    before a chunking/extraction fix shipped would otherwise carry the old,
+    buggy content forever.
+
+    The result lands as a new document row at the SAME source_ref, reviewed
+    and cut over through the exact same approval path as any other
+    replacement (routes_admin.review_document) -- the currently-approved
+    document, and every citation already pointing at its chunks, keeps
+    serving untouched until a human approves the reprocessed version. Reads
+    from the locally stored copy (settings.local_storage_dir_resolved /
+    storage_path), not the original source: the bytes are provably unchanged
+    (same sha256 as the active document), so there is nothing to refetch,
+    and the usual exact-duplicate check in _ingest_one (which would otherwise
+    see this as a byte-identical duplicate of itself) does not apply here --
+    this function is the one place that insertion is deliberately bypassed.
+
+    Held under the same pair of locks as a full ingest_all() run (process
+    lock + the cross-process advisory lock), so a reprocess can never
+    interleave with a concurrent full run touching the same tables.
+
+    run_id: mirrors ingest_all()'s own parameter -- an admin's "Reprocess"
+    click returns 202 before this function executes (it runs as a FastAPI
+    BackgroundTask), so routes_admin.py's trigger_reprocess creates the
+    ingestion_runs row synchronously, inside the request handler, and passes
+    its id through here, for the same reason trigger_reindex does: if the
+    process restarted in that gap, an admin told a reprocess had started
+    would otherwise see no evidence one ever was. A caller with no such race
+    to guard against (tests, a direct script) can omit it."""
+    if not _INGEST_LOCK.acquire(blocking=False):
+        _record_lock_failure(run_id, "reprocess", "Could not start: another ingestion run was already in progress.")
+        raise RuntimeError(
+            "An ingestion run is already in progress. Wait for it to finish before reprocessing."
+        )
+    try:
+        db_lock_conn = _try_acquire_db_lock()
+        if db_lock_conn is None:
+            _record_lock_failure(
+                run_id, "reprocess",
+                "Could not start: another ingestion run was already in progress on a different worker.",
+            )
+            raise RuntimeError(
+                "An ingestion run is already in progress on a different worker. "
+                "Wait for it to finish before reprocessing."
+            )
+        try:
+            return _reprocess_locked(document_id, run_id)
+        finally:
+            _release_db_lock(db_lock_conn)
+    finally:
+        _INGEST_LOCK.release()
+
+
+def _reprocess_locked(document_id: int, run_id: int | None) -> FileOutcome:
+    settings = get_settings()
+    with get_conn() as conn:
+        doc = conn.execute(
+            "SELECT id, original_filename, storage_path, source_system, source_ref, sha256, byte_size "
+            "FROM documents WHERE id = %s AND deactivated_at IS NULL AND status IN ('indexed', 'partial')",
+            (document_id,),
+        ).fetchone()
+    if doc is None:
+        _record_lock_failure(run_id, "reprocess", f"Document {document_id} is not an active, indexed/partial document.")
+        raise ValueError(f"Document {document_id} is not an active, indexed/partial document.")
+
+    local_path = settings.local_storage_dir_resolved / doc["storage_path"]
+    if not local_path.exists():
+        _record_lock_failure(run_id, "reprocess", f"Document {document_id}'s stored file is missing at {local_path}.")
+        raise FileNotFoundError(
+            f"Document {document_id}'s stored file is missing at {local_path} -- cannot reprocess."
+        )
+
+    if run_id is None:
+        with get_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO ingestion_runs (status, trigger) VALUES ('running', 'reprocess') RETURNING id"
+            )
+            run_id = cur.fetchone()["id"]
+
+    try:
+        outcome = _do_reprocess(run_id, doc, local_path)
+        # A handled validation failure (_do_reprocess returning
+        # status='failed'/'unsupported' rather than raising) is still a
+        # failed run, not a completed one -- same rule _ingest_all_locked
+        # applies to a full run, just for the one document this run covers.
+        final_status = "failed" if outcome.status in ("failed", "unsupported") else "completed"
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE ingestion_runs SET status=%s, finished_at=now() WHERE id = %s", (final_status, run_id)
+            )
+        return outcome
+    except Exception as e:
+        logger.exception("Reprocess failed for document %s", document_id)
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE ingestion_runs SET status='failed', finished_at=now() WHERE id = %s", (run_id,)
+            )
+            _record_event(conn, run_id, doc["original_filename"], "failed",
+                           f"Reprocess error: {e}", document_id)
+        raise
+
+
+def _do_reprocess(run_id: int, doc, local_path: Path) -> FileOutcome:
+    file_type, extracted, mismatch_note = extract(local_path, ocr_available=_ocr_available())
+
+    if extracted.status in ("unsupported", "failed"):
+        reason = (f"Reprocess of document {doc['id']} failed validation and did not replace it: "
+                   f"{extracted.reason}")
+        with get_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+                "file_type, sha256, byte_size, page_count, status, status_reason, ingested_at, "
+                "deactivated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now()) "
+                "RETURNING id",
+                (doc["original_filename"], doc["storage_path"], doc["source_system"], doc["source_ref"],
+                 file_type, doc["sha256"], doc["byte_size"], extracted.page_count or None,
+                 extracted.status, reason),
+            )
+            new_id = cur.fetchone()["id"]
+            _record_event(conn, run_id, doc["original_filename"], extracted.status, reason, new_id)
+        return FileOutcome(doc["original_filename"], extracted.status, reason, new_id,
+                           page_count=extracted.page_count or None)
+
+    meta = extract_metadata(doc["original_filename"], extracted)
+    chunks = chunk_document(extracted)
+
+    if not chunks:
+        reason = f"Reprocess of document {doc['id']} produced no usable chunks and did not replace it."
+        with get_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+                "file_type, sha256, byte_size, page_count, status, status_reason, ingested_at, "
+                "deactivated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'failed', %s, now(), now()) "
+                "RETURNING id",
+                (doc["original_filename"], doc["storage_path"], doc["source_system"], doc["source_ref"],
+                 file_type, doc["sha256"], doc["byte_size"], extracted.page_count, reason),
+            )
+            new_id = cur.fetchone()["id"]
+            _record_event(conn, run_id, doc["original_filename"], "failed", reason, new_id)
+        return FileOutcome(doc["original_filename"], "failed", reason, new_id)
+
+    status = "indexed" if extracted.status == "ok" else "partial"
+    status_reason_parts = []
+    if extracted.reason:
+        status_reason_parts.append(extracted.reason)
+    if mismatch_note:
+        status_reason_parts.append(mismatch_note)
+    if meta.notes:
+        status_reason_parts.extend(meta.notes)
+    status_reason_parts.append(
+        f"Reprocessed from document {doc['id']} under pipeline v{CURRENT_EXTRACTION_VERSION}/"
+        f"v{CURRENT_CHUNKING_VERSION}; pending review before it replaces the active document."
+    )
+
+    with get_conn() as conn:
+        manu_id = _get_or_create_manufacturer(conn, meta.manufacturer)
+        cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, page_count, manufacturer_id, doc_type, title, revision, "
+            "doc_number, status, status_reason, extraction_warnings, extraction_version, "
+            "chunking_version, ingested_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) "
+            "RETURNING id",
+            (doc["original_filename"], doc["storage_path"], doc["source_system"], doc["source_ref"],
+             file_type, doc["sha256"], doc["byte_size"], extracted.page_count, manu_id, meta.doc_type,
+             meta.title, meta.revision, meta.doc_number, status,
+             " | ".join(status_reason_parts),
+             " | ".join(extracted.warnings) if extracted.warnings else None,
+             CURRENT_EXTRACTION_VERSION, CURRENT_CHUNKING_VERSION),
+        )
+        new_id = cur.fetchone()["id"]
+
+        for match in meta.machine_matches:
+            machine_id = _get_or_create_machine(conn, match)
+            conn.execute(
+                "INSERT INTO document_machines (document_id, machine_id, confidence) "
+                "VALUES (%s, %s, %s) ON CONFLICT (document_id, machine_id) DO NOTHING",
+                (new_id, machine_id, match.confidence),
+            )
+
+        for ordinal, ch in enumerate(chunks):
+            conn.execute(
+                "INSERT INTO chunks (document_id, page_number, section_heading, chunk_type, "
+                "content, char_count, ordinal) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (new_id, ch.page_number, ch.section_heading, ch.chunk_type,
+                 ch.content, len(ch.content), ordinal),
+            )
+
+        detail = " | ".join(status_reason_parts)
+        _record_event(conn, run_id, doc["original_filename"], status, detail, new_id)
+
+    _embed_pending_chunks()
+
+    return FileOutcome(
+        filename=doc["original_filename"], status=status, detail=" | ".join(status_reason_parts),
+        document_id=new_id, chunk_count=len(chunks), page_count=extracted.page_count,
+        manufacturer=meta.manufacturer, doc_type=meta.doc_type,
         machines=[m.model_name for m in meta.machine_matches],
     )
 

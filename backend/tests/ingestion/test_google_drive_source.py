@@ -233,6 +233,48 @@ def test_undownloadable_files_are_skipped(tmp_path):
     assert len(skips) == 1 and skips[0].is_error, "a manual the service account cannot read is a missing manual"
 
 
+def test_every_skip_carries_the_source_ref_of_the_item_it_was_about(tmp_path):
+    """pipeline.py's missing_from_source reconciliation relies on
+    SkippedFile.source_ref to tell "confirmed still present, just excluded
+    this run" apart from "not seen at all" -- a skip with no source_ref
+    would be silently treated as the latter, wrongly reporting a document
+    that merely failed to download as possibly deleted/renamed/moved."""
+    pages = [{"files": [
+        {"id": "doc1", "name": "Untitled document", "mimeType": "application/vnd.google-apps.document"},
+        {"id": "folder1", "name": "Old Manuals", "mimeType": "application/vnd.google-apps.folder"},
+        {"id": "shortcut1", "name": "Link", "mimeType": "application/vnd.google-apps.shortcut"},
+        {"id": "locked1", "name": "restricted.pdf", "size": "3", "mimeType": "application/pdf",
+         "md5Checksum": "c1", "capabilities": {"canDownload": False}},
+        {"id": "huge1", "name": "huge.pdf", "size": str(5 * 1024 * 1024), "mimeType": "application/pdf",
+         "md5Checksum": "c2"},
+    ]}]
+    source, _, _ = _make_source(tmp_path, pages, {}, max_file_size_bytes=1024 * 1024)
+
+    source.list_files()
+    skips = {s.filename: s.source_ref for s in source.pop_skipped()}
+
+    assert skips == {
+        "Untitled document": "google_drive:doc1",
+        "Old Manuals": "google_drive:folder1",
+        "Link": "google_drive:shortcut1",
+        "restricted.pdf": "google_drive:locked1",
+        "huge.pdf": "google_drive:huge1",
+    }
+
+
+def test_a_failed_download_still_carries_its_source_ref(tmp_path):
+    page = {"files": [{"id": "f1", "name": "broken.pdf", "size": "3",
+                        "mimeType": "application/pdf", "md5Checksum": "c1"}]}
+    source, service, _ = _make_source(tmp_path, [page], {})  # no "f1" entry -> get_media download raises
+
+    source.list_files()
+    skips = source.pop_skipped()
+
+    assert len(skips) == 1
+    assert skips[0].is_error
+    assert skips[0].source_ref == "google_drive:f1"
+
+
 def test_fetch_before_any_listing_raises(tmp_path):
     source, _, _ = _make_source(tmp_path, [{"files": []}], {})
     try:

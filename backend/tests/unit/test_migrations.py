@@ -22,7 +22,7 @@ from dotenv import dotenv_values
 
 from app import db as db_module
 from app.db import get_conn, run_migrations, split_sql_statements
-from tests.conftest import TEST_ENV_FILE
+from tests.conftest import TEST_ENV_FILE, _require_destructive_test_opt_in, _require_safe_test_database_url
 
 _REAL_MIGRATION_PATHS = sorted(db_module.MIGRATIONS_DIR.glob("*.sql"))
 
@@ -227,6 +227,7 @@ def fresh_unmigrated_db(monkeypatch):
     fixture) -- test_env's own TRUNCATE/run_migrations setup targets
     `public` and would be pointless work here; this fixture never touches
     `public` at all."""
+    _require_destructive_test_opt_in()
     if not TEST_ENV_FILE.is_file():
         raise RuntimeError(
             f"{TEST_ENV_FILE} is missing. Tests must not fall back to "
@@ -234,6 +235,11 @@ def fresh_unmigrated_db(monkeypatch):
             "test_env fixture for how to set up the dedicated Neon test branch."
         )
     base_unpooled = dotenv_values(TEST_ENV_FILE)["DATABASE_URL_UNPOOLED"]
+    # This fixture runs its own DROP SCHEMA ... CASCADE below, straight
+    # against this DSN -- it must get the exact same production-host/
+    # production-value refusal test_env gives DATABASE_URL_UNPOOLED, not a
+    # weaker check that only verified the env file exists.
+    _require_safe_test_database_url(base_unpooled, "DATABASE_URL_UNPOOLED")
     schema = "migration_sweep_test"
     sep = "&" if "?" in base_unpooled else "?"
     scoped_dsn = f"{base_unpooled}{sep}options=-c%20search_path%3D{schema}"

@@ -76,6 +76,70 @@ def test_a_procedure_steps_continuation_lines_stay_with_that_step():
     assert "Make sure the breaker is fully off" in procedure_records[0].content
 
 
+def test_a_long_run_of_numbered_steps_is_bounded_not_one_giant_chunk():
+    """Consecutive numbered steps never trigger the ordinary type-change
+    flush (both classify as 'procedure'), so a long procedure would
+    otherwise accumulate into a single unboundedly large chunk -- the same
+    embedding-truncation risk MAX_TABLE_CHUNK_CHARS already guards against
+    for tables."""
+    steps = "\n".join(
+        f"{i}. Step number {i} with enough body text to add up in size over many steps."
+        for i in range(1, 40)
+    )
+    doc = _doc(steps)
+    records = chunk_document(doc)
+    procedure_records = [r for r in records if r.chunk_type == "procedure"]
+
+    assert len(procedure_records) > 1, "a long run of steps must be split into bounded chunks"
+    for rec in procedure_records:
+        assert len(rec.content) <= 1800 + 200
+
+    # No step dropped, and no step split mid-content.
+    combined = "\n".join(r.content for r in procedure_records)
+    for i in range(1, 40):
+        assert f"{i}. Step number {i}" in combined
+
+
+def test_a_long_run_of_warnings_is_bounded_not_one_giant_chunk():
+    warnings = "\n".join(
+        f"WARNING: Hazard number {i} with enough description text to add up in size."
+        for i in range(1, 40)
+    )
+    doc = _doc(warnings)
+    records = chunk_document(doc)
+    warning_records = [r for r in records if r.chunk_type == "warning"]
+
+    assert len(warning_records) > 1, "a long run of warnings must be split into bounded chunks"
+    for rec in warning_records:
+        assert len(rec.content) <= 1800 + 200
+
+    combined = "\n".join(r.content for r in warning_records)
+    for i in range(1, 40):
+        assert f"Hazard number {i}" in combined
+
+
+def test_a_single_warning_with_a_very_long_continuation_is_bounded():
+    """A plain continuation line never trips the ordinary type-change flush
+    either (it's downgraded to the SAME buffer_type so the warning's label
+    stays attached to its body) -- so one warning with enough continuation
+    text is just as unbounded as a long run of separate warnings, unless the
+    budget check also covers a continuation line, not only a fresh marker."""
+    body_lines = "\n".join(f"Continued hazard detail line {i} with enough text to add up." for i in range(1, 60))
+    text = f"WARNING: Hazard overview.\n{body_lines}"
+    doc = _doc(text)
+    records = chunk_document(doc)
+    warning_records = [r for r in records if r.chunk_type == "warning"]
+
+    assert len(warning_records) > 1, "one oversized warning's continuation must be split, not left unbounded"
+    for rec in warning_records:
+        assert len(rec.content) <= 1800 + 200
+    # Every piece after the first stays self-contained -- stamped so a
+    # reader (or the embedding model) sees this is a warning's continuation,
+    # not unlabeled body text.
+    assert "WARNING: Hazard overview." in warning_records[0].content
+    assert any("continued" in r.content for r in warning_records[1:])
+
+
 def test_table_under_error_code_heading_is_classified_error_code():
     table = ExtractedTable(page_number=1, rows=[["Code", "Meaning"], ["E1", "Thermistor open"], ["E2", "Thermistor shorted"]])
     doc = _doc("Fault Codes\nSee table below.", headings=[("Fault Codes", 0)], tables=[table])

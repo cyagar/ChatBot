@@ -393,6 +393,83 @@ def test_source_level_skips_are_recorded_as_visible_ingestion_events(test_env, m
     assert event["document_id"] is None, "a skip never produced a document row"
 
 
+def test_a_skip_with_a_known_source_ref_is_not_also_reported_missing_from_source(test_env, make_pdf, manuals_dir):
+    """A file that merely failed to download, lost permission, or now
+    exceeds the size cap is confirmed still present at the source -- it must
+    get its own 'skipped' event (see tests above) and must NEVER also be
+    reported 'missing_from_source', which would wrongly suggest the active
+    document behind it was deleted, renamed, or moved."""
+    from app.ingestion.sources import SkippedFile
+
+    pdf = make_pdf(["Content about the fryer oil filtration schedule."], name="fryer.pdf")
+    shutil.copy(pdf, manuals_dir / pdf.name)
+    first = ingest_all(source=FakeDirectorySource(manuals_dir), embed=False)
+    assert first.counts() == {"indexed": 1}
+    source_ref = f"test_directory:{pdf.name}"
+
+    (manuals_dir / pdf.name).unlink()  # list_files() won't return it this run either
+
+    class SourceWithKnownSkip(FakeDirectorySource):
+        def pop_skipped(self):
+            return [SkippedFile(pdf.name, "Download failed: connection reset", is_error=True,
+                                 source_ref=source_ref)]
+
+    second = ingest_all(source=SourceWithKnownSkip(manuals_dir), embed=False)
+    assert second.counts() == {"skipped": 1}, (
+        "a source_ref the run DID see (via a skip) must not also be reported missing_from_source"
+    )
+
+    with get_conn() as conn:
+        missing_events = conn.execute(
+            "SELECT COUNT(*) c FROM ingestion_events WHERE run_id = %s AND event = 'missing_from_source'",
+            (second.run_id,),
+        ).fetchone()["c"]
+    assert missing_events == 0
+
+
+def test_a_rename_with_unchanged_bytes_updates_the_stored_filename(test_env, make_pdf, manuals_dir):
+    """Content unchanged at the same source_ref but under a new name is a
+    plain rename at the source, not a content change -- the stored row's
+    original_filename must track it rather than going stale forever, since
+    every unchanged-bytes branch otherwise leaves the document row untouched."""
+    pdf = make_pdf(["Content about the ice machine condenser cleaning schedule."], name="old_name.pdf")
+    shutil.copy(pdf, manuals_dir / pdf.name)
+    source = FakeDirectorySource(manuals_dir)
+    ingest_all(source=source, embed=False)
+
+    (manuals_dir / "old_name.pdf").rename(manuals_dir / "new_name.pdf")
+    # FakeDirectorySource's own source_ref is the relative path, so renaming
+    # the file on disk would change source_ref too in that fake -- this
+    # instead exercises GoogleDriveSource's real contract (source_ref is the
+    # stable Drive file ID, unaffected by a rename) via a source that reports
+    # the SAME source_ref under the new name, exactly like the real source
+    # would for a plain rename.
+    from app.ingestion.sources import SourceFile
+
+    class RenamedSameRefSource(FakeDirectorySource):
+        def list_files(self):
+            files = [f for f in super().list_files() if f.filename != "new_name.pdf"]
+            new_path = manuals_dir / "new_name.pdf"
+            files.append(SourceFile(
+                source_ref="test_directory:old_name.pdf",  # unchanged -- same stable id at the source
+                filename="new_name.pdf",
+                local_path=new_path,
+                byte_size=new_path.stat().st_size,
+                sha256=__import__("hashlib").sha256(new_path.read_bytes()).hexdigest(),
+            ))
+            return files
+
+    second = ingest_all(source=RenamedSameRefSource(manuals_dir), embed=False)
+    assert second.counts() == {"skipped_unchanged": 1}
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT original_filename FROM documents WHERE source_ref = 'test_directory:old_name.pdf' "
+            "AND deactivated_at IS NULL"
+        ).fetchone()
+    assert row["original_filename"] == "new_name.pdf"
+
+
 def test_unsupported_file_retried_after_capability_change_updates_in_place(test_env, manuals_dir):
     """Simulates a file that is unsupported on first pass (e.g. no OCR) and
     becomes indexable later without any bytes changing (e.g. OCR configured) —
@@ -418,6 +495,85 @@ def test_unsupported_file_retried_after_capability_change_updates_in_place(test_
         total_rows = conn.execute("SELECT COUNT(*) c FROM documents").fetchone()["c"]
     assert rows == 1
     assert total_rows == 1, "an unchanged outcome must update the row in place, not churn new rows every run"
+
+
+def test_a_warning_on_an_otherwise_ok_extraction_is_persisted_distinctly_from_status_reason(
+    test_env, make_pdf, manuals_dir
+):
+    """extract_pdf can append a warning (e.g. a per-page table-extraction
+    failure) while still returning status='ok'/reason=None -- status_reason,
+    built from `reason` alone, never carried it anywhere an admin could see
+    it. documents.extraction_warnings is the distinct place it must land
+    instead."""
+    import app.ingestion.pipeline as pipeline_module
+    from app.ingestion.extracted import ExtractedDocument, ExtractedPage
+
+    pdf = make_pdf(["Content about the espresso group head gasket."], name="espresso.pdf")
+    shutil.copy(pdf, manuals_dir / pdf.name)
+
+    original_extract = pipeline_module.extract
+
+    def _extract_with_warning(path, ocr_available=False):
+        file_type, doc, note = original_extract(path, ocr_available=ocr_available)
+        doc.warnings.append("Table extraction failed on page 1: simulated pdfplumber error")
+        return file_type, doc, note
+
+    pipeline_module.extract = _extract_with_warning
+    try:
+        report = ingest_all(source=FakeDirectorySource(manuals_dir), embed=False)
+    finally:
+        pipeline_module.extract = original_extract
+
+    assert report.counts() == {"indexed": 1}
+    doc_id = report.outcomes[0].document_id
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status, status_reason, extraction_warnings FROM documents WHERE id = %s", (doc_id,)
+        ).fetchone()
+    assert row["status"] == "indexed"
+    assert "Table extraction failed" not in (row["status_reason"] or ""), (
+        "the warning must not be folded into status_reason"
+    )
+    assert "Table extraction failed on page 1" in row["extraction_warnings"]
+
+
+def test_a_needs_reprocessing_outcome_alongside_an_unrelated_skip_is_completed_with_errors_not_failed(
+    test_env, make_pdf, manuals_dir, monkeypatch
+):
+    """needs_reprocessing (an unchanged, already-indexed document whose
+    pipeline version is stale) must count as a success for any_success's
+    purposes, same as skipped_unchanged -- otherwise, the moment a chunking/
+    extraction version bump ships, every previously-indexed document's
+    outcome flips from skipped_unchanged to needs_reprocessing, and the next
+    ordinary single-file download/skip error in that same run would then
+    make the WHOLE run 'failed' instead of 'completed_with_errors'."""
+    import app.ingestion.pipeline as pipeline_module
+    from app.ingestion.sources import SkippedFile
+
+    pdf = make_pdf(["Content about the walk-in cooler thermostat."], name="cooler.pdf")
+    shutil.copy(pdf, manuals_dir / pdf.name)
+    first = ingest_all(source=FakeDirectorySource(manuals_dir), embed=False)
+    assert first.counts() == {"indexed": 1}
+
+    # _ingest_one compares against pipeline.py's own imported name, not
+    # chunking.py's -- that's the binding that actually needs to be stale
+    # for this test's "unchanged bytes, old pipeline version" scenario.
+    monkeypatch.setattr(pipeline_module, "CURRENT_CHUNKING_VERSION", pipeline_module.CURRENT_CHUNKING_VERSION + 1)
+
+    class SourceWithAnUnrelatedSkip(FakeDirectorySource):
+        def pop_skipped(self):
+            return [SkippedFile("other_manual.pdf", "Download failed: connection reset", is_error=True)]
+
+    second = ingest_all(source=SourceWithAnUnrelatedSkip(manuals_dir), embed=False)
+    assert second.counts() == {"needs_reprocessing": 1, "skipped": 1}
+
+    with get_conn() as conn:
+        run = conn.execute("SELECT status FROM ingestion_runs WHERE id = %s", (second.run_id,)).fetchone()
+    assert run["status"] == "completed_with_errors", (
+        f"expected completed_with_errors (the corpus's one real document is fine, just stale-version), "
+        f"got {run['status']!r}"
+    )
 
 
 def test_an_all_failed_run_is_marked_failed_not_completed(test_env, manuals_dir):

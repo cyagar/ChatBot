@@ -49,9 +49,14 @@ def _corpus_status(settings) -> tuple[str, str]:
         return "ok", ""
     try:
         with get_conn() as conn:
+            # trigger != 'reprocess' -- a reprocess only ever re-extracts ONE
+            # already-indexed document (app.ingestion.pipeline.
+            # reprocess_document); it never re-lists the source or
+            # reconciles the rest of the corpus, so it must never reset this
+            # freshness clock the way a real 'manual'/'scheduled' sync does.
             last_success = conn.execute(
                 "SELECT finished_at FROM ingestion_runs "
-                "WHERE status IN ('completed', 'completed_with_errors') "
+                "WHERE status IN ('completed', 'completed_with_errors') AND trigger != 'reprocess' "
                 "ORDER BY finished_at DESC LIMIT 1"
             ).fetchone()
         if last_success is None:

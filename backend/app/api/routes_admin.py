@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.db import get_conn
 from app.ingestion.chunking import CURRENT_CHUNKING_VERSION
 from app.ingestion.extractors import CURRENT_EXTRACTION_VERSION
-from app.ingestion.pipeline import _INGEST_LOCK, ingest_all
+from app.ingestion.pipeline import _INGEST_LOCK, ingest_all, reprocess_document
 from app.ingestion.scheduler import is_enabled as scheduler_is_enabled
 from app.retrieval.embeddings import embedding_fingerprint
 from app.retrieval.search import hybrid_search
@@ -31,6 +31,11 @@ class DocumentOut(BaseModel):
     file_type: str
     status: str
     status_reason: str | None
+    # Distinct from status_reason, which is reserved for the document's own
+    # ok/partial/failed/unsupported classification -- a quality warning (a
+    # page's table extraction failing, say) on an otherwise fully "ok"
+    # document has nowhere else in this response to surface.
+    extraction_warnings: str | None
     manufacturer: str | None
     doc_type: str | None
     title: str | None
@@ -70,6 +75,7 @@ def _row_to_document(conn, row) -> DocumentOut:
     return DocumentOut(
         id=row["id"], original_filename=row["original_filename"], file_type=row["file_type"],
         status=row["status"], status_reason=row["status_reason"],
+        extraction_warnings=row["extraction_warnings"],
         manufacturer=row["manufacturer"], doc_type=row["doc_type"], title=row["title"],
         revision=row["revision"], doc_number=row["doc_number"], page_count=row["page_count"],
         is_current_revision=bool(row["is_current_revision"]),
@@ -454,6 +460,7 @@ class ReviewQueueDocumentOut(BaseModel):
     title: str | None
     status: str
     review_status: str
+    extraction_warnings: str | None
     ingested_at: datetime | None
     links: list[PendingLinkOut]
 
@@ -480,7 +487,7 @@ def review_queue(admin: CurrentUser = Depends(require_admin)):
     with get_conn() as conn:
         docs = conn.execute(
             "SELECT DISTINCT d.id, d.original_filename, d.doc_type, mf.name AS manufacturer, "
-            "d.title, d.status, d.review_status, d.ingested_at "
+            "d.title, d.status, d.review_status, d.extraction_warnings, d.ingested_at "
             "FROM documents d "
             "LEFT JOIN manufacturers mf ON mf.id = d.manufacturer_id "
             "LEFT JOIN document_machines dm ON dm.document_id = d.id "
@@ -502,7 +509,8 @@ def review_queue(admin: CurrentUser = Depends(require_admin)):
             out.append(ReviewQueueDocumentOut(
                 id=d["id"], original_filename=d["original_filename"], doc_type=d["doc_type"],
                 manufacturer=d["manufacturer"], title=d["title"], status=d["status"],
-                review_status=d["review_status"], ingested_at=d["ingested_at"],
+                review_status=d["review_status"], extraction_warnings=d["extraction_warnings"],
+                ingested_at=d["ingested_at"],
                 links=[PendingLinkOut(machine_id=link["machine_id"], model_name=link["model_name"],
                                        manufacturer=link["manufacturer"], confidence=link["confidence"],
                                        review_status=link["review_status"]) for link in links],
@@ -824,6 +832,53 @@ def trigger_reindex(background_tasks: BackgroundTasks, admin: CurrentUser = Depe
     return {"ok": True, "detail": "Re-index started in the background.", "run_id": run_id}
 
 
+@router.post("/documents/{document_id}/reprocess", status_code=status.HTTP_202_ACCEPTED)
+def trigger_reprocess(document_id: int, background_tasks: BackgroundTasks,
+                       admin: CurrentUser = Depends(require_admin)):
+    """Re-extracts/re-chunks one document's stored bytes under the current
+    pipeline version (see DocumentOut.needs_reprocessing) without waiting for
+    a full re-index to notice unchanged bytes at a stale version -- see
+    pipeline.reprocess_document's own docstring for why this is otherwise
+    never actioned. Same synchronous-row-then-background-task shape as
+    trigger_reindex above, for the same restart-safety reason."""
+    if _INGEST_LOCK.locked():
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="An ingestion run is already in progress.")
+    with get_conn() as conn:
+        doc = conn.execute(
+            "SELECT id, source_ref FROM documents WHERE id = %s AND deactivated_at IS NULL "
+            "AND status IN ('indexed', 'partial')",
+            (document_id,),
+        ).fetchone()
+        if doc is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                 detail="Document not found, deactivated, or not indexed/partial.")
+        # Each needs_reprocessing document keeps showing the Reprocess button
+        # until a human approves its replacement (the normal cutover point,
+        # routes_admin.review_document) -- without this check, clicking it
+        # twice before that review happens would insert a SECOND pending
+        # document (with its own chunks/embeddings) at the same source_ref,
+        # piling up duplicate review-queue entries for the same content.
+        already_pending = conn.execute(
+            "SELECT id FROM documents WHERE source_ref = %s AND id != %s AND deactivated_at IS NULL "
+            "AND review_status = 'pending' AND status IN ('indexed', 'partial') "
+            "AND extraction_version = %s AND chunking_version = %s LIMIT 1",
+            (doc["source_ref"], document_id, CURRENT_EXTRACTION_VERSION, CURRENT_CHUNKING_VERSION),
+        ).fetchone()
+        if already_pending is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"Document {already_pending['id']} is already a pending reprocessed replacement "
+                       "at the current pipeline version for this manual -- review it instead of "
+                       "reprocessing again.",
+            )
+        cur = conn.execute(
+            "INSERT INTO ingestion_runs (status, trigger) VALUES ('running', 'reprocess') RETURNING id"
+        )
+        run_id = cur.fetchone()["id"]
+    background_tasks.add_task(reprocess_document, document_id, run_id=run_id)
+    return {"ok": True, "detail": "Reprocess started in the background.", "run_id": run_id}
+
+
 @router.get("/ingestion/runs")
 def list_ingestion_runs(admin: CurrentUser = Depends(require_admin), limit: int = Query(default=10, ge=1, le=200)):
     with get_conn() as conn:
@@ -855,9 +910,13 @@ def get_ingestion_status(admin: CurrentUser = Depends(require_admin)):
         # reconciled -- individual file failures don't mean the sync itself
         # failed. Only a run that never finished (status='failed', e.g. an
         # auth/quota error before any file was even seen) is not a success.
+        # trigger != 'reprocess': a reprocess only re-extracts ONE
+        # already-indexed document, never re-lists the source or
+        # reconciles the rest of the corpus -- it must not reset this
+        # freshness clock the way a real 'manual'/'scheduled' sync does.
         last_success = conn.execute(
             "SELECT id, finished_at, trigger, status FROM ingestion_runs "
-            "WHERE status IN ('completed', 'completed_with_errors') "
+            "WHERE status IN ('completed', 'completed_with_errors') AND trigger != 'reprocess' "
             "ORDER BY finished_at DESC LIMIT 1"
         ).fetchone()
         last_attempt = conn.execute(

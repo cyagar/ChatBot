@@ -34,9 +34,14 @@ def _seconds_until_next_sync(interval_minutes: int) -> float:
     waiting a full interval; a fresh corpus waits out the rest of its interval."""
     try:
         with get_conn() as conn:
+            # trigger != 'reprocess': a reprocess only re-extracts ONE
+            # already-indexed document, never re-lists the source -- it
+            # must not push the next scheduled full sync further out, or an
+            # admin reprocessing one stale document would silently suppress
+            # the catch-up sync an actually-stale corpus needs.
             row = conn.execute(
                 "SELECT EXTRACT(EPOCH FROM (now() - max(finished_at))) AS age FROM ingestion_runs "
-                "WHERE status IN ('completed', 'completed_with_errors')"
+                "WHERE status IN ('completed', 'completed_with_errors') AND trigger != 'reprocess'"
             ).fetchone()
     except Exception:
         return interval_minutes * 60

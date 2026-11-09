@@ -37,13 +37,20 @@ class _SeedCredentials(BaseModel):
     password: str = Field(min_length=8, max_length=72)  # bcrypt's hard limit is 72 bytes
 
 
-def seed_dev_technician(email: str, password: str, display_name: str | None = None) -> tuple[int, bool]:
-    """Returns (user_id, created) -- created is False when an existing row was updated instead."""
+def _require_development_env() -> None:
     settings = get_settings()
     if settings.app_env != "development":
         raise RuntimeError(
             f"Refusing to seed a demo account outside development (APP_ENV={settings.app_env!r})."
         )
+
+
+def seed_dev_technician(email: str, password: str, display_name: str | None = None) -> tuple[int, bool]:
+    """Returns (user_id, created) -- created is False when an existing row was updated instead.
+    Also re-checked by main() below, BEFORE run_migrations() runs -- checking only here would be
+    too late for that call path: run_migrations() would already have applied migrations to
+    whatever database is configured before this function ever got a chance to refuse anything."""
+    _require_development_env()
     creds = _SeedCredentials(email=email, password=password)
     password_hash = hash_password(creds.password)
 
@@ -70,6 +77,12 @@ def main():
     args = parser.parse_args()
 
     password = args.password or getpass.getpass("Demo technician password: ")
+
+    try:
+        _require_development_env()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
 
     run_migrations()
     try:
