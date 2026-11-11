@@ -259,6 +259,17 @@
             ],
             "title": "Doc Type"
           },
+          "extraction_warnings": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extraction Warnings"
+          },
           "file_type": {
             "title": "File Type",
             "type": "string"
@@ -393,6 +404,7 @@
           "file_type",
           "status",
           "status_reason",
+          "extraction_warnings",
           "manufacturer",
           "doc_type",
           "title",
@@ -789,6 +801,34 @@
             ],
             "title": "Machine Ids"
           },
+          "machine_ids_add": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Ids Add"
+          },
+          "machine_ids_remove": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine Ids Remove"
+          },
           "manufacturer_name": {
             "anyOf": [
               {
@@ -959,6 +999,17 @@
             ],
             "title": "Doc Type"
           },
+          "extraction_warnings": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extraction Warnings"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
@@ -1024,6 +1075,7 @@
           "title",
           "status",
           "review_status",
+          "extraction_warnings",
           "ingested_at",
           "links"
         ],
@@ -1717,6 +1769,63 @@
           }
         },
         "summary": "Reactivate Document",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/admin/documents/{document_id}/reprocess": {
+      "post": {
+        "description": "Re-extracts/re-chunks one document's stored bytes under the current\npipeline version (see DocumentOut.needs_reprocessing) without waiting for\na full re-index to notice unchanged bytes at a stale version -- see\npipeline.reprocess_document's own docstring for why this is otherwise\nnever actioned. Same synchronous-row-then-background-task shape as\ntrigger_reindex above, for the same restart-safety reason.",
+        "operationId": "trigger_reprocess_api_admin_documents__document_id__reprocess_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "tma_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tma Session"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trigger Reprocess",
         "tags": [
           "admin"
         ]
@@ -2520,8 +2629,8 @@
     },
     "/api/admin/unanswered": {
       "get": {
-        "description": "Questions the system explicitly could not answer (is_no_answer=1 on the\nassistant's reply), most recent first \u2014 surfaces gaps in manual coverage.",
-        "operationId": "frequently_unanswered_api_admin_unanswered_get",
+        "description": "Questions the system explicitly could not answer (is_no_answer=1 on the\nassistant's reply), most recent first \u2014 surfaces gaps in manual coverage.\nNot an aggregation: this is a recency-ordered list, not grouped or\ncounted by question, so it does not identify which gaps recur most.",
+        "operationId": "recent_unanswered_questions_api_admin_unanswered_get",
         "parameters": [
           {
             "in": "query",
@@ -2572,7 +2681,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Frequently Unanswered",
+        "summary": "Recent Unanswered Questions",
         "tags": [
           "admin"
         ]

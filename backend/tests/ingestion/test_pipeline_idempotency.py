@@ -506,7 +506,6 @@ def test_a_warning_on_an_otherwise_ok_extraction_is_persisted_distinctly_from_st
     it. documents.extraction_warnings is the distinct place it must land
     instead."""
     import app.ingestion.pipeline as pipeline_module
-    from app.ingestion.extracted import ExtractedDocument, ExtractedPage
 
     pdf = make_pdf(["Content about the espresso group head gasket."], name="espresso.pdf")
     shutil.copy(pdf, manuals_dir / pdf.name)
