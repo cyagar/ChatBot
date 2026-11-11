@@ -35,7 +35,7 @@ rapidfuzz==3.14.5
 numpy==2.5.2
 
 # --- Local embeddings (no external AI provider required) ---
-sentence-transformers==6.0.0
+sentence-transformers==6.1.0
 torch==2.13.0
 
 # --- Templating ---
