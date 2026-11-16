@@ -398,6 +398,39 @@ def test_admin_endpoint_allowed_for_administrator(test_env):
     assert resp.status_code == 200
 
 
+@pytest.mark.parametrize("rating, substantive, expected_status", [
+    ("missing_answer", False, 201),  # the only rating a no-answer row accepts
+    ("missing_answer", True, 422),   # -- and the only row that rating accepts
+    ("helpful", False, 422),
+])
+def test_feedback_rating_is_paired_with_whether_the_row_is_a_no_answer(test_env, rating, substantive, expected_status):
+    """rating="missing_answer" presupposes no answer was given, and the
+    other three ratings all presuppose one was -- pairing either with the
+    wrong kind of row would silently pollute feedback metrics with ratings
+    that don't mean what they look like (see submit_feedback)."""
+    if substantive:
+        _seed_answerable_machine()
+        _register(f"feedback-pair-{rating}-{substantive}@example.com")
+        conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+        msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": _ANSWERABLE_QUESTION}).json()
+        assert msg["is_no_answer"] is False, msg
+    else:
+        # A machine with no document linked at all -- see
+        # test_question_on_machine_with_no_manuals_is_honest_no_answer --
+        # reliably produces a no-answer row, unlike machine_id=None, which
+        # triggers a clarifying machine-selection question instead.
+        with get_conn() as conn:
+            conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+            conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+        _register(f"feedback-pair-{rating}-{substantive}@example.com")
+        conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+        msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "What does error E4 mean?"}).json()
+        assert msg["is_no_answer"] is True, msg
+
+    resp = client.post(f"/api/messages/{msg['id']}/feedback", json={"rating": rating})
+    assert resp.status_code == expected_status, resp.text
+
+
 def test_feedback_rejects_invalid_rating(test_env):
     _register("tech6@example.com")
     conv = client.post("/api/conversations", json={"machine_id": None}).json()

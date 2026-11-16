@@ -1035,6 +1035,33 @@ def _seed_p1_02_answerable_machine():
         )
 
 
+def test_admin_unanswered_listing_includes_reason_machine_and_top_candidates(test_env):
+    """GET /api/admin/unanswered must give an admin enough to diagnose a gap
+    without opening the conversation: the machine-readable reason, the
+    selected machine, and the best-ranked retrieved candidates (even
+    uncited ones) so they can judge whether the right page was even
+    close."""
+    _seed_p1_02_answerable_machine()
+    register_test_user(client, "tech-p120@example.com", admin_email="admin-p120@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(
+        f"/api/conversations/{conv['id']}/messages",
+        json={"content": "what is the thermistor circuit resistance spec"},
+    ).json()
+    assert msg["is_no_answer"] is True, msg
+
+    register_test_user(client, "admin-p120@example.com", role="administrator", admin_email="admin-p120@example.com")
+    resp = client.get("/api/admin/unanswered")
+    assert resp.status_code == 200, resp.text
+    row = next(r for r in resp.json() if r["message_id"] == msg["id"])
+
+    assert row["reason"], f"expected a machine-readable reason, got {row}"
+    assert row["machine_label"] == "Bunn-O-Matic Corporation Axiom"
+    assert row["top_candidates"], f"expected at least one retrieved candidate (the seeded chunk shares " \
+        f"'thermistor' with the question), got {row}"
+    assert row["top_candidates"][0]["filename"] == "axiom.pdf"
+
+
 def test_admin_feedback_listing_includes_machine_label_message_id_and_citations(test_env):
     """An admin triaging an "incorrect" report needs machine, model, and
     citation context, and a way to jump to the specific answer, not just
