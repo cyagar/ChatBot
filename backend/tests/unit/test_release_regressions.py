@@ -831,6 +831,11 @@ def test_a_zombie_attempts_late_write_never_overwrites_the_reclaiming_attempts_a
             return GeneratedAnswer(answer=self.text, citations=[], provider=self.name, is_no_answer=True)
 
     monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: [])
+    # Not what this test is about -- without it, the empty hybrid_search
+    # result above is indistinguishable from a genuine no-eligible-manual
+    # machine (no document is seeded for machine_id=1 here), which would
+    # short-circuit before _FixedAnswerProvider is ever called.
+    monkeypatch.setattr(routes_chat, "has_eligible_manual", lambda *a, **k: True)
 
     # B's attempt actually completes and writes the real answer.
     monkeypatch.setattr(routes_chat, "get_provider", lambda: _FixedAnswerProvider("B's real answer"))

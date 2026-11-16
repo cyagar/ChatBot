@@ -1116,14 +1116,49 @@ def recent_unanswered_questions(admin: CurrentUser = Depends(require_admin), lim
     """Questions the system explicitly could not answer (is_no_answer=1 on the
     assistant's reply), most recent first — surfaces gaps in manual coverage.
     Not an aggregation: this is a recency-ordered list, not grouped or
-    counted by question, so it does not identify which gaps recur most."""
+    counted by question, so it does not identify which gaps recur most.
+
+    Includes the machine-readable reason (see app.providers.base's REASON_*
+    constants) so an admin can tell a genuine coverage gap apart from a
+    temporary service failure without opening each conversation, the
+    selected machine, and the best-ranked retrieved candidates (even ones
+    never cited) so they can judge whether the right page was even close.
+    message_id is the correlation id for cross-referencing a /feedback
+    report. Never includes the model's own output -- only what it was
+    retrieved against."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT prev.content AS question, m.created_at, m.conversation_id "
+            "SELECT m.id AS message_id, prev.content AS question, m.created_at, m.conversation_id, "
+            "m.answer_reason AS reason, mf.name AS manufacturer, mach.model_name "
             "FROM messages m "
             "JOIN messages prev ON prev.id = m.reply_to_message_id "
+            "JOIN conversations c ON c.id = m.conversation_id "
+            "LEFT JOIN machines mach ON mach.id = COALESCE(m.machine_id, c.machine_id) "
+            "LEFT JOIN manufacturers mf ON mf.id = mach.manufacturer_id "
             "WHERE m.role = 'assistant' AND m.is_no_answer = true "
             "ORDER BY m.created_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
-    return [dict(r) for r in rows]
+        message_ids = [r["message_id"] for r in rows]
+        candidates_by_message: dict[int, list[dict]] = {mid: [] for mid in message_ids}
+        if message_ids:
+            candidate_rows = conn.execute(
+                "SELECT ms.message_id, ms.rank, d.original_filename, c.page_number FROM message_sources ms "
+                "JOIN chunks c ON c.id = ms.chunk_id JOIN documents d ON d.id = c.document_id "
+                "WHERE ms.message_id = ANY(%s) AND ms.rank < 3 "
+                "ORDER BY ms.message_id, ms.rank",
+                (message_ids,),
+            ).fetchall()
+            for cr in candidate_rows:
+                candidates_by_message[cr["message_id"]].append({
+                    "filename": cr["original_filename"], "page_number": cr["page_number"], "rank": cr["rank"],
+                })
+    return [
+        {
+            "message_id": r["message_id"], "question": r["question"], "created_at": r["created_at"],
+            "conversation_id": r["conversation_id"], "reason": r["reason"],
+            "machine_label": f"{r['manufacturer']} {r['model_name']}" if r["manufacturer"] else None,
+            "top_candidates": candidates_by_message.get(r["message_id"], []),
+        }
+        for r in rows
+    ]

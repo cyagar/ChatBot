@@ -311,7 +311,29 @@ def test_question_on_machine_with_no_manuals_is_honest_no_answer(test_env):
     assert resp.status_code == 200
     body = resp.json()
     assert body["is_no_answer"] is True
-    assert "verify" in body["content"].lower() or "not" in body["content"].lower()
+    assert "no approved manual" in body["content"].lower()
+    # Distinguished from a machine WITH an eligible manual where nothing
+    # matched the query (see test_a_question_with_no_matching_content_is_
+    # reason_insufficient_evidence below) -- this machine has no approved
+    # document at all.
+    assert body["reason"] == "no_eligible_manual"
+
+
+def test_a_question_with_no_matching_content_is_reason_insufficient_evidence(test_env):
+    """Distinct from the no-eligible-manual case above: this machine DOES
+    have an approved, indexed manual -- retrieval simply found nothing
+    relevant to this specific, unrelated question."""
+    _seed_answerable_machine()
+    _register("tech4b@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    resp = client.post(
+        f"/api/conversations/{conv['id']}/messages",
+        json={"content": "what is the recommended humidity range for storing coffee beans"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_no_answer"] is True
+    assert body["reason"] == "insufficient_evidence"
 
 
 def test_empty_question_rejected(test_env):

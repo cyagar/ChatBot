@@ -14,6 +14,8 @@ from app.providers.base import (
     AIProvider,
     GeneratedAnswer,
     ProviderError,
+    REASON_INSUFFICIENT_EVIDENCE,
+    REASON_VALIDATION_REJECTED,
     SYSTEM_PROMPT,
     UNVERIFIED_ANSWER,
     build_context_block,
@@ -87,9 +89,14 @@ class AnthropicProvider(AIProvider):
 
     def generate(self, question, machine_label, passages, history=None) -> GeneratedAnswer:
         if not passages:
+            # The caller (routes_chat) already distinguishes "no eligible
+            # manual at all" from "manuals exist but nothing matched this
+            # query" before ever calling generate() -- empty `passages`
+            # reaching here is always the latter.
             return GeneratedAnswer(
                 answer="No relevant manual passages were found for this question.",
                 is_no_answer=True,
+                reason=REASON_INSUFFICIENT_EVIDENCE,
                 provider=self.name,
             )
 
@@ -149,7 +156,9 @@ class AnthropicProvider(AIProvider):
                 "(set LOG_REJECTED_MODEL_OUTPUT=true to log the responses)",
                 self.name, len(raw_text), len(raw_text_2),
             )
-        return GeneratedAnswer(answer=UNVERIFIED_ANSWER, is_no_answer=True, provider=self.name)
+        return GeneratedAnswer(
+            answer=UNVERIFIED_ANSWER, is_no_answer=True, reason=REASON_VALIDATION_REJECTED, provider=self.name
+        )
 
     def _call(self, messages: list[dict]) -> str:
         try:

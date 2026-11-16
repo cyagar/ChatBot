@@ -23,11 +23,17 @@ from app.api.pagination import (
 )
 from app.auth.deps import CurrentUser, get_current_user
 from app.db import get_conn
-from app.providers.base import GeneratedAnswer, HistoryTurn, ProviderError
+from app.providers.base import (
+    GeneratedAnswer,
+    HistoryTurn,
+    ProviderError,
+    REASON_NO_ELIGIBLE_MANUAL,
+    REASON_SERVICE_UNAVAILABLE,
+)
 from app.providers.factory import get_provider
 from app.rate_limit import default_limit_string, limiter
 from app.retrieval.query_resolution import resolve_follow_up_query
-from app.retrieval.search import hybrid_search
+from app.retrieval.search import has_eligible_manual, hybrid_search
 
 router = APIRouter(prefix="/api", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -85,6 +91,7 @@ class MessageOut(BaseModel):
     content: str
     is_clarifying_question: bool
     is_no_answer: bool
+    reason: str | None = None  # see app.providers.base's REASON_* constants
     answer_status: str = "completed"  # pending | completed | failed | retrying
     citations: list[CitationOut] = []
     safety_warnings: list[str] = []
@@ -512,29 +519,46 @@ def _generate_and_persist_answer(
             answer="I couldn't search the manuals right now due to a temporary technical "
             "problem. Please try again in a moment, or contact an administrator if this "
             "keeps happening.",
-            is_no_answer=True, provider="none",
+            is_no_answer=True, reason=REASON_SERVICE_UNAVAILABLE, provider="none",
         )
     else:
-        provider = get_provider()
-        answer_status = "completed"
-        try:
-            result = provider.generate(question, machine_label, passages, history=history)
-        except ProviderError as e:
-            logger.warning("Provider call failed for conversation %s: %s", conversation_id, e)
-            answer_status = "failed"
+        if not passages and not has_eligible_manual(machine_id):
+            # Distinguished from a provider's own "nothing matched this
+            # query" (REASON_INSUFFICIENT_EVIDENCE) BEFORE any provider is
+            # even called -- a provider has no visibility into whether a
+            # machine has eligible manuals at all, only into what it was
+            # handed.
+            answer_status = "completed"
             result = GeneratedAnswer(
-                answer=f"I couldn't reach the AI provider ({e}). Please try again in a moment.",
-                is_no_answer=True, provider=getattr(provider, "name", "unknown"),
+                answer="No approved manual is indexed for this machine yet. Double-check the exact "
+                "model and serial number on the machine's data plate -- it may be indexed under a "
+                "different model name. If it still isn't found, an administrator can confirm "
+                "whether a manual is pending review or needs to be added.",
+                is_no_answer=True, reason=REASON_NO_ELIGIBLE_MANUAL, provider="none",
             )
-        except Exception:
-            # Never leak internals -- but do log server-side so an
-            # admin can actually diagnose what happened.
-            logger.exception("Unexpected error generating an answer for conversation %s", conversation_id)
-            answer_status = "failed"
-            result = GeneratedAnswer(
-                answer="Something went wrong while generating an answer. Please try again.",
-                is_no_answer=True, provider=getattr(provider, "name", "unknown"),
-            )
+        else:
+            provider = get_provider()
+            answer_status = "completed"
+            try:
+                result = provider.generate(question, machine_label, passages, history=history)
+            except ProviderError as e:
+                logger.warning("Provider call failed for conversation %s: %s", conversation_id, e)
+                answer_status = "failed"
+                result = GeneratedAnswer(
+                    answer=f"I couldn't reach the AI provider ({e}). Please try again in a moment.",
+                    is_no_answer=True, reason=REASON_SERVICE_UNAVAILABLE,
+                    provider=getattr(provider, "name", "unknown"),
+                )
+            except Exception:
+                # Never leak internals -- but do log server-side so an
+                # admin can actually diagnose what happened.
+                logger.exception("Unexpected error generating an answer for conversation %s", conversation_id)
+                answer_status = "failed"
+                result = GeneratedAnswer(
+                    answer="Something went wrong while generating an answer. Please try again.",
+                    is_no_answer=True, reason=REASON_SERVICE_UNAVAILABLE,
+                    provider=getattr(provider, "name", "unknown"),
+                )
 
     # Order-preservingly deduplicate citations before BOTH the response and
     # persistence. The built-in providers already dedupe, but a
@@ -585,11 +609,11 @@ def _generate_and_persist_answer(
             # the rest of this transaction, or attempt_id was never given.
             conn.execute("DELETE FROM message_sources WHERE message_id = %s", (retry_message_id,))
             conn.execute(
-                "UPDATE messages SET content = %s, is_no_answer = %s, machine_id = %s, "
+                "UPDATE messages SET content = %s, is_no_answer = %s, answer_reason = %s, machine_id = %s, "
                 "safety_warnings = %s, conflict_note = %s, provider = %s, answer_status = %s, "
                 "retry_count = retry_count + 1 WHERE id = %s",
                 (
-                    result.answer, result.is_no_answer, machine_id,
+                    result.answer, result.is_no_answer, result.reason, machine_id,
                     json.dumps(result.safety_warnings) if result.safety_warnings else None,
                     result.conflict_note, result.provider, answer_status, retry_message_id,
                 ),
@@ -597,11 +621,11 @@ def _generate_and_persist_answer(
             msg_id = retry_message_id
         elif fence_ok:
             cur = conn.execute(
-                "INSERT INTO messages (conversation_id, role, content, is_no_answer, machine_id, "
+                "INSERT INTO messages (conversation_id, role, content, is_no_answer, answer_reason, machine_id, "
                 "safety_warnings, conflict_note, provider, answer_status, reply_to_message_id) "
-                "VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                "VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (
-                    conversation_id, result.answer, result.is_no_answer, machine_id,
+                    conversation_id, result.answer, result.is_no_answer, result.reason, machine_id,
                     json.dumps(result.safety_warnings) if result.safety_warnings else None,
                     result.conflict_note, result.provider, answer_status, user_message_id,
                 ),
@@ -928,6 +952,7 @@ def _hydrate_messages(conn, rows, user_id: int) -> list[MessageOut]:
             id=row["id"], role=row["role"], content=row["content"],
             is_clarifying_question=bool(row["is_clarifying_question"]),
             is_no_answer=bool(row["is_no_answer"]),
+            reason=row["answer_reason"] if "answer_reason" in row else None,
             answer_status=row["answer_status"] if "answer_status" in row else "completed",
             citations=citations,
             safety_warnings=safety_warnings,
@@ -949,7 +974,7 @@ def _hydrate_message(conn, row, user_id: int) -> MessageOut:
 
 
 _MESSAGE_COLUMNS = (
-    "id, role, content, is_clarifying_question, is_no_answer, safety_warnings, conflict_note, "
+    "id, role, content, is_clarifying_question, is_no_answer, answer_reason, safety_warnings, conflict_note, "
     "answer_status, clarifying_options, retry_count, created_at, reply_to_message_id, idempotency_key, "
     "machine_id"
 )
@@ -1300,7 +1325,10 @@ def retry_answer(
         # askable while a retry is in flight either.
         attempt_id = _claim_conversation_processing(conn, conversation_id)
         if not attempt_id:
-            conn.execute("UPDATE messages SET answer_status = 'failed' WHERE id = %s", (message_id,))
+            conn.execute(
+                "UPDATE messages SET answer_status = 'failed', answer_reason = %s WHERE id = %s",
+                (REASON_SERVICE_UNAVAILABLE, message_id),
+            )
             raise ApiError(
                 status.HTTP_409_CONFLICT,
                 "Another question is still being answered in this conversation. "
@@ -1331,7 +1359,10 @@ def retry_answer(
             # has a preceding user question and a resolved machine at
             # generation time), but a stuck claim would make every future
             # retry attempt 409 with "already in progress" permanently.
-            conn.execute("UPDATE messages SET answer_status = 'failed' WHERE id = %s", (message_id,))
+            conn.execute(
+                "UPDATE messages SET answer_status = 'failed', answer_reason = %s WHERE id = %s",
+                (REASON_SERVICE_UNAVAILABLE, message_id),
+            )
             # Same-connection release, fenced on attempt_id -- see the
             # matching comment in ask_question's clarifying-question branch.
             conn.execute(
@@ -1353,27 +1384,39 @@ def retry_answer(
 
 
 class FeedbackRequest(BaseModel):
-    rating: str = Field(pattern="^(helpful|incorrect|missing_info)$")
+    rating: str = Field(pattern="^(helpful|incorrect|missing_info|missing_answer)$")
     comment: str | None = Field(default=None, max_length=1000)
 
 
 _ELIGIBLE_FOR_FEEDBACK_SQL = (
-    "SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+    "SELECT m.id, m.is_no_answer FROM messages m JOIN conversations c ON c.id = m.conversation_id "
     "WHERE m.id = %s AND c.user_id = %s AND m.role = 'assistant' "
-    "AND m.answer_status = 'completed' AND m.is_clarifying_question = false AND m.is_no_answer = false"
+    "AND m.answer_status = 'completed' AND m.is_clarifying_question = false"
 )
 
 
 @router.post("/messages/{message_id}/feedback", status_code=status.HTTP_201_CREATED)
 def submit_feedback(message_id: int, payload: FeedbackRequest, user: CurrentUser = Depends(get_current_user)):
-    """Feedback is only valid against a completed, substantive assistant
-    answer -- the user's own question, a clarifying prompt, a
-    failed/retrying answer, or a no-answer response is not a real "was this
-    answer helpful" target."""
+    """Feedback is only valid against a completed, non-clarifying assistant
+    turn -- the user's own question, a clarifying prompt, or a
+    failed/retrying answer is not a real feedback target. A no-answer
+    response IS eligible too (a technician reporting that the manual
+    actually contains the answer the app failed to surface is useful
+    feedback), but only with rating="missing_answer" -- the other three
+    ratings all presuppose an answer was actually given, and pairing a
+    substantive-answer rating with a no-answer row would silently pollute
+    feedback metrics with ratings that don't mean what they look like."""
     with get_conn() as conn:
         msg = conn.execute(_ELIGIBLE_FOR_FEEDBACK_SQL, (message_id, user.id)).fetchone()
         if not msg:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Message not found.")
+        is_no_answer = bool(msg["is_no_answer"])
+        if is_no_answer != (payload.rating == "missing_answer"):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail='rating="missing_answer" is only valid on a no-answer response, and only a '
+                'no-answer response accepts it.',
+            )
         conn.execute(
             "INSERT INTO feedback (message_id, user_id, rating, comment) VALUES (%s, %s, %s, %s)",
             (message_id, user.id, payload.rating, payload.comment),

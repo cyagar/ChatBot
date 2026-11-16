@@ -26,11 +26,27 @@ class Citation:
     excerpt: str
 
 
+# Why is_no_answer is set -- distinct machine-readable causes so Android can
+# show a next action that fits what happened, and admin diagnosis doesn't
+# have to guess, instead of one generic heading for every cause. NULL
+# (reason=None) on a substantive completed answer. REASON_MODEL_ABSTAINED is
+# kept distinct from REASON_INSUFFICIENT_EVIDENCE: the first is the model's
+# own explicit "is_no_answer" in its JSON response; the second is a
+# provider's own heuristic giving up (e.g. ExtractiveProvider's relevance
+# gate) with no model judgment involved at all.
+REASON_NO_ELIGIBLE_MANUAL = "no_eligible_manual"
+REASON_INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+REASON_MODEL_ABSTAINED = "model_abstained"
+REASON_VALIDATION_REJECTED = "validation_rejected"
+REASON_SERVICE_UNAVAILABLE = "service_unavailable"
+
+
 @dataclass
 class GeneratedAnswer:
     answer: str
     citations: list[Citation] = field(default_factory=list)
     is_no_answer: bool = False
+    reason: str | None = None
     is_clarifying_question: bool = False
     conflict_note: str | None = None
     safety_warnings: list[str] = field(default_factory=list)
@@ -1144,6 +1160,7 @@ def parse_and_validate(
         return GeneratedAnswer(
             answer=NO_ANSWER_TEXT,
             is_no_answer=True,
+            reason=REASON_MODEL_ABSTAINED,
             provider=provider_name,
         )
 

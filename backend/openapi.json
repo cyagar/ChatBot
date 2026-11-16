@@ -464,7 +464,7 @@
             "title": "Comment"
           },
           "rating": {
-            "pattern": "^(helpful|incorrect|missing_info)$",
+            "pattern": "^(helpful|incorrect|missing_info|missing_answer)$",
             "title": "Rating",
             "type": "string"
           }
@@ -733,6 +733,17 @@
             "default": false,
             "title": "Is Saved",
             "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "reply_to_message_id": {
             "anyOf": [
@@ -2629,7 +2640,7 @@
     },
     "/api/admin/unanswered": {
       "get": {
-        "description": "Questions the system explicitly could not answer (is_no_answer=1 on the\nassistant's reply), most recent first \u2014 surfaces gaps in manual coverage.\nNot an aggregation: this is a recency-ordered list, not grouped or\ncounted by question, so it does not identify which gaps recur most.",
+        "description": "Questions the system explicitly could not answer (is_no_answer=1 on the\nassistant's reply), most recent first \u2014 surfaces gaps in manual coverage.\nNot an aggregation: this is a recency-ordered list, not grouped or\ncounted by question, so it does not identify which gaps recur most.\n\nIncludes the machine-readable reason (see app.providers.base's REASON_*\nconstants) so an admin can tell a genuine coverage gap apart from a\ntemporary service failure without opening each conversation, the\nselected machine, and the best-ranked retrieved candidates (even ones\nnever cited) so they can judge whether the right page was even close.\nmessage_id is the correlation id for cross-referencing a /feedback\nreport. Never includes the model's own output -- only what it was\nretrieved against.",
         "operationId": "recent_unanswered_questions_api_admin_unanswered_get",
         "parameters": [
           {
@@ -4059,7 +4070,7 @@
     },
     "/api/messages/{message_id}/feedback": {
       "post": {
-        "description": "Feedback is only valid against a completed, substantive assistant\nanswer -- the user's own question, a clarifying prompt, a\nfailed/retrying answer, or a no-answer response is not a real \"was this\nanswer helpful\" target.",
+        "description": "Feedback is only valid against a completed, non-clarifying assistant\nturn -- the user's own question, a clarifying prompt, or a\nfailed/retrying answer is not a real feedback target. A no-answer\nresponse IS eligible too (a technician reporting that the manual\nactually contains the answer the app failed to surface is useful\nfeedback), but only with rating=\"missing_answer\" -- the other three\nratings all presuppose an answer was actually given, and pairing a\nsubstantive-answer rating with a no-answer row would silently pollute\nfeedback metrics with ratings that don't mean what they look like.",
         "operationId": "submit_feedback_api_messages__message_id__feedback_post",
         "parameters": [
           {

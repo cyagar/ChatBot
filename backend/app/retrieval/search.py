@@ -71,6 +71,26 @@ def _machine_filter_sql(machine_id: int | None) -> tuple[str, list]:
     )
 
 
+def has_eligible_manual(machine_id: int | None) -> bool:
+    """Whether ANY document exists that retrieval could possibly surface for
+    this machine -- an empty hybrid_search result can mean either "no
+    eligible manual at all" (a real coverage gap) or "manuals exist but
+    nothing matched this specific query"; the caller needs to tell those
+    apart to report the right reason (see routes_chat.py). Uses the same
+    approved/current/not-deactivated eligibility _machine_filter_sql and
+    _hydrate already enforce for retrieval itself, deliberately NOT
+    requiring a chunk to exist yet (an approved document still being
+    indexed is still "eligible", just not searchable this instant)."""
+    filter_sql, params = _machine_filter_sql(machine_id)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM documents d WHERE d.deactivated_at IS NULL AND d.review_status = 'approved' "
+            "AND d.is_current_revision = true" + filter_sql + " LIMIT 1",
+            params,
+        ).fetchone()
+    return row is not None
+
+
 def _revision_filter_sql(include_superseded: bool) -> str:
     """Superseded revisions are EXCLUDED from retrieval by default, not merely
     rank-penalized.

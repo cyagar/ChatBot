@@ -72,6 +72,7 @@ def test_retry_regenerates_a_failed_answer_in_place(test_env, monkeypatch):
     conv = client.post("/api/conversations", json={"machine_id": 1}).json()
     ask = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "Why is it not heating?"})
     assert ask.json()["answer_status"] == "failed"
+    assert ask.json()["reason"] == "service_unavailable"
     failed_id = ask.json()["id"]
     original_content = ask.json()["content"]
 
@@ -84,12 +85,62 @@ def test_retry_regenerates_a_failed_answer_in_place(test_env, monkeypatch):
     assert body["answer_status"] != "failed"
     assert body["content"] != original_content, "the retried answer must actually be regenerated, not just re-labeled"
     assert body["retry_count"] == 1
+    # The retried answer must get ITS OWN reason reflecting what actually
+    # happened this time, never the stale "service_unavailable" left over
+    # from the first (failed) attempt -- this fixture's retry still comes
+    # back as a no-answer (no embeddings are seeded, so the extractive
+    # provider's relevance gate has nothing to clear it), just a different,
+    # currently-accurate reason.
+    assert body["reason"] != "service_unavailable"
 
     messages = client.get(f"/api/conversations/{conv['id']}/messages").json()
     assert len(messages) == 2, "exactly the original user question and one assistant message -- no duplicate turns"
     assert messages[0]["role"] == "user"
     assert messages[0]["content"] == "Why is it not heating?"
     assert messages[1]["id"] == failed_id
+
+
+def test_retry_that_actually_succeeds_clears_the_prior_failure_reason(test_env, monkeypatch):
+    """Distinct from the test above: that fixture's retry still comes back
+    as a (differently-reasoned) no-answer, since nothing there guarantees
+    extractive's relevance gate clears. This one uses an error-code
+    question (see app/providers/extractive.py's _code_token_rescue) to
+    guarantee a genuinely substantive completed answer on retry, proving
+    reason clears all the way to None, not just to some other value."""
+    with get_conn() as conn:
+        _seed_machine(conn)
+        cur = conn.execute(
+            "INSERT INTO documents (original_filename, storage_path, source_system, source_ref, "
+            "file_type, sha256, byte_size, status, review_status) VALUES "
+            "('axiom.pdf', 'axiom.pdf', 'local_directory', 'axiom.pdf', 'pdf', 'hash1', 100, "
+            "'indexed', 'approved') RETURNING id"
+        )
+        doc_id = cur.fetchone()["id"]
+        conn.execute(
+            "INSERT INTO document_machines (document_id, machine_id, review_status) VALUES (%s, 1, 'approved')",
+            (doc_id,),
+        )
+        conn.execute(
+            "INSERT INTO chunks (document_id, page_number, chunk_type, content, char_count, ordinal) "
+            "VALUES (%s, 4, 'text', 'ERROR CODE E9: indicates a tank heater fault. Check the thermistor "
+            "circuit.', 90, 0)",
+            (doc_id,),
+        )
+    state = _make_failing_then_recovering_search(monkeypatch)
+
+    _register("retry-clears-reason@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    ask = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "what does error E9 mean"})
+    assert ask.json()["answer_status"] == "failed"
+    assert ask.json()["reason"] == "service_unavailable"
+    failed_id = ask.json()["id"]
+
+    state["should_fail"] = False
+    retried = client.post(f"/api/conversations/{conv['id']}/messages/{failed_id}/retry")
+    assert retried.status_code == 200
+    body = retried.json()
+    assert body["is_no_answer"] is False, "this fixture must produce a genuinely substantive answer"
+    assert body["reason"] is None
 
 
 def test_retry_rejects_a_completed_answer(test_env, monkeypatch):

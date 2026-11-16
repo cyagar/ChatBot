@@ -574,10 +574,25 @@ function renderFeedback() {
     </table>
     <h2 class="h2-inline mt-xl">Recent unanswered questions</h2>
     <table class="admin-table">
-      <thead><tr><th>When</th><th>Question</th></tr></thead>
+      <!-- reason distinguishes a genuine coverage gap from a temporary
+           service failure without opening each conversation. top_candidates
+           is every retrieved passage's rank, even uncited ones, so an admin
+           can judge whether the right page was even close. -->
+      <thead><tr><th>When</th><th>Machine</th><th>Question</th><th>Reason</th><th>Top candidates</th><th>IDs</th></tr></thead>
       <tbody>${state.unanswered.map((u) => `
-        <tr><td>${esc(u.created_at)}</td><td>${esc(u.question || "—")}</td></tr>
-      `).join("") || `<tr><td colspan="2">No unanswered questions logged.</td></tr>`}</tbody>
+        <tr>
+          <td>${esc(u.created_at)}</td>
+          <td>${esc(u.machine_label || "—")}</td>
+          <td>${esc(u.question || "—")}</td>
+          <td>${esc(u.reason || "—")}</td>
+          <td class="text-dim text-sm">${
+            u.top_candidates && u.top_candidates.length
+              ? u.top_candidates.map((c) => `${esc(c.filename)}${c.page_number ? ", p." + c.page_number : ""} (#${c.rank + 1})`).join("; ")
+              : "—"
+          }</td>
+          <td class="text-dim text-sm">msg ${u.message_id} · conv ${u.conversation_id}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="6">No unanswered questions logged.</td></tr>`}</tbody>
     </table>
   `;
 }

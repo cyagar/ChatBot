@@ -12,7 +12,13 @@ from __future__ import annotations
 
 import re
 
-from app.providers.base import AIProvider, Citation, GeneratedAnswer, detect_conflict
+from app.providers.base import (
+    AIProvider,
+    Citation,
+    GeneratedAnswer,
+    REASON_INSUFFICIENT_EVIDENCE,
+    detect_conflict,
+)
 
 WARNING_RE = re.compile(r"^(WARNING|CAUTION|DANGER|NOTICE|IMPORTANT)\b.*", re.IGNORECASE | re.MULTILINE)
 
@@ -102,6 +108,10 @@ class ExtractiveProvider(AIProvider):
         # question's retrieved passages verbatim, so there is no synthesis step
         # that could use prior turns even if they were provided.
         if not passages:
+            # routes_chat already distinguishes "no eligible manual at all"
+            # from this (manuals exist but nothing matched this query)
+            # before calling generate() -- see anthropic_provider's
+            # matching comment.
             return GeneratedAnswer(
                 answer=(
                     "I could not find anything in the indexed manuals that answers this "
@@ -114,6 +124,7 @@ class ExtractiveProvider(AIProvider):
                     "3. If the manual exists but is a scanned copy, its text may not be searchable yet."
                 ),
                 is_no_answer=True,
+                reason=REASON_INSUFFICIENT_EVIDENCE,
                 provider=self.name,
             )
 
@@ -154,6 +165,7 @@ class ExtractiveProvider(AIProvider):
                 ),
                 citations=self._citations(passages[:3]),
                 is_no_answer=True,
+                reason=REASON_INSUFFICIENT_EVIDENCE,
                 provider=self.name,
             )
 
