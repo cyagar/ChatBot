@@ -1060,6 +1060,51 @@ def test_admin_unanswered_listing_includes_reason_machine_and_top_candidates(tes
     assert row["top_candidates"], f"expected at least one retrieved candidate (the seeded chunk shares " \
         f"'thermistor' with the question), got {row}"
     assert row["top_candidates"][0]["filename"] == "axiom.pdf"
+    # local_extractive never attempts a repair retry -- it has no such concept.
+    assert row["repair_rejection"] is None
+
+
+def test_a_persisted_repair_rejection_is_surfaced_on_both_admin_endpoints(monkeypatch, test_env):
+    """repair_rejection is written by routes_chat's INSERT/UPDATE straight
+    from whatever the provider returns -- this is the one test that
+    actually runs that column through a real INSERT with a non-NULL value,
+    which also catches a typo in the CHECK constraint's allowed values."""
+    import app.api.routes_chat as routes_chat
+    from app.providers.base import AIProvider, GeneratedAnswer, REASON_MODEL_ABSTAINED
+
+    class _IsolationGateProvider(AIProvider):
+        name = "test_isolation_gate"
+
+        def generate(self, question, machine_label, passages, history=None):
+            return GeneratedAnswer(
+                answer="I couldn't find a reliable answer.", citations=[], provider=self.name,
+                is_no_answer=True, reason=REASON_MODEL_ABSTAINED, repair_rejection="isolation_gate",
+            )
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Axiom')")
+    register_test_user(client, "tech-repair-rej@example.com", admin_email="admin-repair-rej@example.com")
+    monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: [])
+    # Not what this test is about -- without it, the empty hybrid_search
+    # result above is indistinguishable from a genuine no-eligible-manual
+    # machine (no document is actually seeded for machine_id=1 here), which
+    # would short-circuit before _IsolationGateProvider is ever called.
+    monkeypatch.setattr(routes_chat, "has_eligible_manual", lambda *a, **k: True)
+    monkeypatch.setattr(routes_chat, "get_provider", lambda: _IsolationGateProvider())
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    msg = client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "How do I replace it?"}).json()
+    assert msg["is_no_answer"] is True, msg
+    feedback_resp = client.post(f"/api/messages/{msg['id']}/feedback", json={"rating": "missing_answer"})
+    assert feedback_resp.status_code == 201, feedback_resp.text
+
+    register_test_user(
+        client, "admin-repair-rej@example.com", role="administrator", admin_email="admin-repair-rej@example.com",
+    )
+    unanswered = next(r for r in client.get("/api/admin/unanswered").json() if r["message_id"] == msg["id"])
+    assert unanswered["repair_rejection"] == "isolation_gate"
+    feedback = next(r for r in client.get("/api/admin/feedback").json() if r["message_id"] == msg["id"])
+    assert feedback["repair_rejection"] == "isolation_gate"
 
 
 def test_admin_feedback_listing_includes_machine_label_message_id_and_citations(test_env):

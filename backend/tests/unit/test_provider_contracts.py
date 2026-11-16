@@ -156,6 +156,85 @@ def test_anthropic_recovers_on_the_repair_retry(anthropic_provider, monkeypatch)
     result = anthropic_provider.generate("Why?", "Axiom", [_passage()])
     assert result.is_no_answer is False
     assert "81-118-31" in result.answer
+    assert result.repair_rejection == "schema", "a repair ran, and the first attempt was unparseable JSON"
+
+
+def test_anthropic_a_first_attempt_that_succeeds_outright_records_no_repair(anthropic_provider, monkeypatch):
+    monkeypatch.setattr(
+        anthropic_provider._client.messages, "create", lambda **k: _AnthropicResponse(_valid_json_response())
+    )
+    result = anthropic_provider.generate("Why?", "Axiom", [_passage()])
+    assert result.is_no_answer is False
+    assert result.repair_rejection is None, "the first attempt succeeded outright -- no repair ever ran"
+
+
+def test_anthropic_repair_prompt_names_the_ordering_violation(anthropic_provider, monkeypatch):
+    """When the first response is rejected for ordering, not wording, the
+    repair prompt must say so and name the offending item -- re-sending the
+    generic "copy excerpt wording" instruction alone does nothing to fix a
+    reversed step."""
+    passage = _passage(content="1. Disconnect power. 2. Remove the cover. 3. Replace part 81-118-31.")
+    first = json.dumps({
+        "is_no_answer": False,
+        "claims": [],
+        "steps": [
+            {"text": "Remove the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Disconnect power.", "cited_excerpt_numbers": [1]},
+        ],
+        "warnings": [],
+    })
+    responses = [_AnthropicResponse(first), _AnthropicResponse(_valid_json_response())]
+    captured: list[dict] = []
+
+    def create(**kwargs):
+        captured.append(kwargs)
+        return responses.pop(0)
+
+    monkeypatch.setattr(anthropic_provider._client.messages, "create", create)
+    result = anthropic_provider.generate("How do I replace the part?", "Axiom", [passage])
+
+    assert result.is_no_answer is False
+    assert result.repair_rejection == "ordering"
+    # The LAST message in the repair request is the newly-appended repair
+    # instruction -- checking the whole `messages` list would also match
+    # the original user message (whose excerpt contains "Disconnect
+    # power.") and the generic instruction's own "...in the excerpt's
+    # order" phrasing, passing even if the ordering-specific branch in
+    # _repair_guidance were never reached.
+    repair_instruction = captured[1]["messages"][-1]["content"]
+    assert "Disconnect power." in repair_instruction
+    assert "grounds EARLIER" in repair_instruction
+
+
+def test_anthropic_abstaining_after_a_repair_still_records_why_the_repair_ran(anthropic_provider, monkeypatch):
+    """Distinct from an outright abstention: this model's FIRST response was
+    rejected (ordering), and its SECOND (repair) response abstains instead
+    of fixing it. reason must reflect the model's own final abstention, but
+    repair_rejection must still record that a repair happened and why --
+    otherwise this looks identical, in the reason field alone, to a model
+    that abstained on the very first attempt and never needed a repair."""
+    passage = _passage(content="1. Disconnect power. 2. Remove the cover. 3. Replace part 81-118-31.")
+    first = json.dumps({
+        "is_no_answer": False,
+        "claims": [],
+        "steps": [
+            {"text": "Remove the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Disconnect power.", "cited_excerpt_numbers": [1]},
+        ],
+        "warnings": [],
+    })
+    second = json.dumps({
+        "is_no_answer": True, "no_answer_explanation": "Not confident enough.",
+        "claims": [], "steps": [], "warnings": [],
+    })
+    responses = [_AnthropicResponse(first), _AnthropicResponse(second)]
+    monkeypatch.setattr(anthropic_provider._client.messages, "create", lambda **k: responses.pop(0))
+
+    result = anthropic_provider.generate("How do I replace the part?", "Axiom", [passage])
+    assert result.is_no_answer is True
+    assert result.answer == NO_ANSWER_TEXT
+    assert result.reason == "model_abstained"
+    assert result.repair_rejection == "ordering"
 
 
 def test_anthropic_no_answer_explanation_mentioning_the_machine_name_is_not_rejected(

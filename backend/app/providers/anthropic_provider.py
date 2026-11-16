@@ -16,12 +16,15 @@ from app.providers.base import (
     ProviderError,
     REASON_INSUFFICIENT_EVIDENCE,
     REASON_VALIDATION_REJECTED,
+    REJECTION_GROUNDING,
+    REJECTION_ISOLATION_GATE,
+    REJECTION_ORDERING,
     SYSTEM_PROMPT,
     UNVERIFIED_ANSWER,
     build_context_block,
     build_history_messages,
     failing_items,
-    parse_and_validate,
+    validate_with_report,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +64,49 @@ _JSON_SHAPE_INSTRUCTION = (
     "completely answer it. Do not include a conflict_note field -- revision conflicts are "
     "detected separately from excerpt metadata."
 )
+
+
+def _repair_guidance(report, failed_grounding_items: list[str]) -> str:
+    """Extra sentence(s) appended to the generic repair instruction below,
+    specific to WHY the first attempt was rejected -- an ordering or
+    isolation-gate violation isn't a wording problem, and telling the model
+    to "copy excerpt wording" again does nothing to fix it. Additive, not
+    either/or: validate_with_report stops at the first failure it finds, but
+    a response can have more than one thing wrong with it (e.g. a reversed
+    step AND a separately ungrounded one) -- failing_items re-scans the
+    whole response and lists every grounding problem it finds, not just the
+    one that happened to trip validate_with_report first."""
+    parts: list[str] = []
+    if report.kind == REJECTION_ORDERING:
+        parts.append(
+            ' One of your steps, or a claim describing a hazard-isolation action, is out of '
+            f'order: "{report.item_text[:200]}" grounds EARLIER in its cited excerpt than '
+            "another item citing that same excerpt text already reached. List steps (and any "
+            "such claim) in the same order the excerpt itself states them, even if the source "
+            "numbered them differently or not at all."
+        )
+    elif report.kind == REJECTION_ISOLATION_GATE:
+        parts.append(
+            f' Your claim "{report.item_text[:200]}" describes an action from after a '
+            "hazard-isolation step (disconnecting or cutting power, unplugging, locking out) "
+            "that you listed in STEPS. A claim is not allowed to display an action ahead of "
+            "the isolation step it should follow -- either move it into STEPS in the correct "
+            "order, or drop it from your response entirely."
+        )
+    if failed_grounding_items:
+        parts.append(
+            " These items were not found in the excerpt numbers you cited for them, or combined "
+            "an identifier (an error code, part number, or similar) with wording from a "
+            "DIFFERENT row of the same table -- each claim/step must come from one row: "
+            + " | ".join(f'"{text[:160]}"' for text in failed_grounding_items[:6]) + "."
+        )
+    elif report.kind == REJECTION_GROUNDING and report.item_text:
+        parts.append(
+            f' "{report.item_text[:200]}" was not found verbatim in the excerpt number(s) you '
+            "cited for it, or combined an identifier with wording from a different row of the "
+            "same table."
+        )
+    return "".join(parts)
 
 
 class AnthropicProvider(AIProvider):
@@ -109,7 +155,7 @@ class AnthropicProvider(AIProvider):
         messages = build_history_messages(history) + [{"role": "user", "content": user_message}]
 
         raw_text = self._call(messages)
-        result = parse_and_validate(raw_text, passages, self.name, machine_label)
+        result, report = validate_with_report(raw_text, passages, self.name, machine_label)
         if result is not None:
             return result
 
@@ -117,11 +163,7 @@ class AnthropicProvider(AIProvider):
         # output instead of silently trusting a malformed/unsupported response.
         # Never widen citations on a parse failure.
         failed = failing_items(raw_text, passages, machine_label)
-        detail = (
-            " These items were not found in the excerpt numbers you cited for them: "
-            + " | ".join(f'"{text[:160]}"' for text in failed[:6]) + "."
-            if failed else ""
-        )
+        detail = _repair_guidance(report, failed)
         repair_messages = messages + [
             {"role": "assistant", "content": raw_text},
             {
@@ -141,8 +183,13 @@ class AnthropicProvider(AIProvider):
             },
         ]
         raw_text_2 = self._call(repair_messages)
-        result = parse_and_validate(raw_text_2, passages, self.name, machine_label)
+        # The repair's OWN rejection kind (if it also fails) is not reported
+        # here -- repair_rejection records that a repair ran and why the
+        # FIRST attempt needed one, for admin diagnosis; it is not a log of
+        # every attempt's own outcome.
+        result, _ = validate_with_report(raw_text_2, passages, self.name, machine_label)
         if result is not None:
+            result.repair_rejection = report.kind
             return result
 
         if self._log_rejected_output:
@@ -157,7 +204,8 @@ class AnthropicProvider(AIProvider):
                 self.name, len(raw_text), len(raw_text_2),
             )
         return GeneratedAnswer(
-            answer=UNVERIFIED_ANSWER, is_no_answer=True, reason=REASON_VALIDATION_REJECTED, provider=self.name
+            answer=UNVERIFIED_ANSWER, is_no_answer=True, reason=REASON_VALIDATION_REJECTED,
+            repair_rejection=report.kind, provider=self.name,
         )
 
     def _call(self, messages: list[dict]) -> str:

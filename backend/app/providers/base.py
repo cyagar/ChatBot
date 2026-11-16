@@ -47,6 +47,15 @@ class GeneratedAnswer:
     citations: list[Citation] = field(default_factory=list)
     is_no_answer: bool = False
     reason: str | None = None
+    # Set by a provider that attempts a repair retry (see
+    # anthropic_provider.generate) to the FIRST attempt's rejection kind
+    # (one of the REJECTION_* constants below) whenever a repair attempt
+    # ran, regardless of whether that repair succeeded, abstained, or also
+    # failed -- never set when the first attempt passed outright. Admin-only
+    # (not exposed on MessageOut): tells apart a model that abstained
+    # outright from one that only abstained after its first answer was
+    # rejected, which `reason` alone cannot (both read model_abstained).
+    repair_rejection: str | None = None
     is_clarifying_question: bool = False
     conflict_note: str | None = None
     safety_warnings: list[str] = field(default_factory=list)
@@ -1110,17 +1119,41 @@ def failing_items(raw_text: str, passages: list, machine_label: str | None = Non
     return failing
 
 
-def parse_and_validate(
+# Why validate_with_report rejected a response, for the repair prompt (see
+# anthropic_provider.generate) to give guidance specific to what actually
+# went wrong, and for admin diagnosis of whether a repair attempt ran at
+# all. "schema": malformed JSON, wrong shape, or no claim/step at all --
+# nothing to point at. "grounding": a specific claim/step/warning's wording
+# isn't in its cited excerpt. "ordering": a specific claim/step grounds
+# earlier in its excerpt than an earlier item already reached. "isolation_
+# gate": a specific claim describes an action positioned after a real
+# hazard-isolation step without restating it.
+REJECTION_SCHEMA = "schema"
+REJECTION_GROUNDING = "grounding"
+REJECTION_ORDERING = "ordering"
+REJECTION_ISOLATION_GATE = "isolation_gate"
+
+
+@dataclass
+class RejectionReport:
+    kind: str
+    item_text: str | None = None
+
+
+def validate_with_report(
     raw_text: str, passages: list, provider_name: str, machine_label: str | None = None
-) -> GeneratedAnswer | None:
-    """Strictly validate a provider's JSON response. Returns None if the
-    response is malformed, cites a nonexistent excerpt, or contains a
-    claim/step/warning that fails its checks against the excerpt(s) it cites:
-    numbers and identifiers must appear verbatim, warnings must be quoted, and
-    claims and steps must pass the wording check in _claim_grounded, and any
-    failure rejects the whole response -- nothing is silently dropped. The caller
-    then retries with a repair prompt or falls back to an explicit "could not
-    verify" result. The displayed `answer` is assembled here from the checked
+) -> tuple[GeneratedAnswer | None, RejectionReport | None]:
+    """Strictly validate a provider's JSON response. Returns (None, a
+    RejectionReport) if the response is malformed, cites a nonexistent
+    excerpt, or contains a claim/step/warning that fails its checks against
+    the excerpt(s) it cites: numbers and identifiers must appear verbatim,
+    warnings must be quoted, and claims and steps must pass the wording
+    check in _claim_grounded, and any failure rejects the whole response --
+    nothing is silently dropped. The caller then retries with a repair
+    prompt (informed by the RejectionReport) or falls back to an explicit
+    "could not verify" result. On success, returns (the GeneratedAnswer,
+    None). parse_and_validate is a thin wrapper over this for callers that
+    only need the answer. The displayed `answer` is assembled here from the checked
     claims and steps, never taken as free prose from the model, and a
     no-answer response displays NO_ANSWER_TEXT instead of the model's text.
     Each claim/step line carries inline [n] markers keyed to its position in
@@ -1139,20 +1172,20 @@ def parse_and_validate(
     try:
         match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         if not match:
-            return None
+            return None, RejectionReport(REJECTION_SCHEMA)
         data = json.loads(match.group(0))
     except Exception:
-        return None
+        return None, RejectionReport(REJECTION_SCHEMA)
 
     if not isinstance(data, dict):
-        return None
+        return None, RejectionReport(REJECTION_SCHEMA)
 
     # bool("false") and bool(1) are both True in Python -- a provider
     # returning the JSON string "false" or the number 1 for this field must
     # be rejected as malformed, not silently coerced into true.
     is_no_answer = data.get("is_no_answer", False)
     if not isinstance(is_no_answer, bool):
-        return None
+        return None, RejectionReport(REJECTION_SCHEMA)
 
     if is_no_answer:
         # The model's own explanation is never displayed: free prose has no
@@ -1162,7 +1195,7 @@ def parse_and_validate(
             is_no_answer=True,
             reason=REASON_MODEL_ABSTAINED,
             provider=provider_name,
-        )
+        ), None
 
     # Absent is "high confidence" (see this function's own docstring); any
     # other value must be one of the two the contract actually defines, not
@@ -1171,21 +1204,21 @@ def parse_and_validate(
     # function's caller-visible behavior (the low-confidence caveat) depends on.
     confidence = data.get("confidence")
     if confidence is not None and confidence not in ("low", "high"):
-        return None
+        return None, RejectionReport(REJECTION_SCHEMA)
 
     claims = _parse_items(data.get("claims"), passages)
     steps = _parse_items(data.get("steps"), passages)
     warnings_raw = data.get("warnings")
     if claims is None or steps is None or not isinstance(warnings_raw, list):
-        return None
+        return None, RejectionReport(REJECTION_SCHEMA)
     warnings = _parse_items(warnings_raw, passages)
     if warnings is None:
-        return None
+        return None, RejectionReport(REJECTION_SCHEMA)
 
     # An answer that isn't flagged as "no answer" must actually have
     # something backing it -- at least one material claim or step.
     if not claims and not steps:
-        return None
+        return None, RejectionReport(REJECTION_SCHEMA)
 
     # A number/identifier the excerpt lacks, or a claim/step whose wording is
     # not grounded in one place in the excerpt, rejects the WHOLE response --
@@ -1259,12 +1292,12 @@ def parse_and_validate(
     for item in steps:
         cited = _cited_content(item, passages)
         if not _claim_supported(item.text, cited, machine_label):
-            return None
+            return None, RejectionReport(REJECTION_GROUNDING, item.text)
         clause_positions = _claim_grounded(item.text, item.excerpt_numbers, passages, machine_label)
         if clause_positions is None:
-            return None
+            return None, RejectionReport(REJECTION_GROUNDING, item.text)
         if not _check_order(clause_positions, last_position_by_content_steps, True):
-            return None
+            return None, RejectionReport(REJECTION_ORDERING, item.text)
         is_isolation_step = _claim_is_isolation_action(item.text)
         for _flat_index, end_pos, excerpt_number, local_index in clause_positions:
             content_key = _normalize_ws(passages[excerpt_number - 1].content)
@@ -1286,13 +1319,13 @@ def parse_and_validate(
     for item in claims:
         cited = _cited_content(item, passages)
         if not _claim_supported(item.text, cited, machine_label):
-            return None
+            return None, RejectionReport(REJECTION_GROUNDING, item.text)
         clause_positions = _claim_grounded(item.text, item.excerpt_numbers, passages, machine_label)
         if clause_positions is None:
-            return None
+            return None, RejectionReport(REJECTION_GROUNDING, item.text)
         enforce = _claim_is_isolation_action(item.text)
         if not _check_order(clause_positions, last_position_by_content_claims, enforce):
-            return None
+            return None, RejectionReport(REJECTION_ORDERING, item.text)
         if _claim_is_action(item.text):
             for _flat_index, end_pos, excerpt_number, local_index in clause_positions:
                 content_key = _normalize_ws(passages[excerpt_number - 1].content)
@@ -1302,11 +1335,11 @@ def parse_and_validate(
                 if (local_index, end_pos) > isolation_position and local_index not in step_sentences_by_content.get(
                     content_key, set()
                 ):
-                    return None
+                    return None, RejectionReport(REJECTION_ISOLATION_GATE, item.text)
 
     for item in warnings:
         if not _warning_supported(item.text, _cited_content(item, passages)):
-            return None
+            return None, RejectionReport(REJECTION_GROUNDING, item.text)
 
     # citations is built before the answer text so each claim/step line can
     # carry an inline [n] marker keyed to that same list's (1-based) order --
@@ -1389,7 +1422,16 @@ def parse_and_validate(
         conflict_note=conflict_note,
         safety_warnings=safety_warnings,
         provider=provider_name,
-    )
+    ), None
+
+
+def parse_and_validate(
+    raw_text: str, passages: list, provider_name: str, machine_label: str | None = None
+) -> GeneratedAnswer | None:
+    """Thin wrapper over validate_with_report for callers that only need
+    the answer, not why a rejection happened."""
+    result, _ = validate_with_report(raw_text, passages, provider_name, machine_label)
+    return result
 
 
 UNVERIFIED_ANSWER = (

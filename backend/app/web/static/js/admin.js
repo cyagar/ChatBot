@@ -568,23 +568,27 @@ function renderFeedback() {
           <td>${esc(f.comment || "—")}</td>
           <td class="max-w-sm">${esc((f.answer_content || "").slice(0, 200))}${(f.answer_content || "").length > 200 ? "…" : ""}</td>
           <td>${f.citations && f.citations.length ? f.citations.map((c) => esc(c)).join(", ") : "—"}</td>
-          <td class="text-dim text-sm">msg ${f.message_id} · conv ${f.conversation_id}${f.provider ? " · " + esc(f.provider) : ""}</td>
+          <td class="text-dim text-sm">msg ${f.message_id} · conv ${f.conversation_id}${f.provider ? " · " + esc(f.provider) : ""}${f.repair_rejection ? " · repaired after " + esc(f.repair_rejection) : ""}</td>
         </tr>
       `).join("") || `<tr><td colspan="8">No feedback yet.</td></tr>`}</tbody>
     </table>
     <h2 class="h2-inline mt-xl">Recent unanswered questions</h2>
     <table class="admin-table">
       <!-- reason distinguishes a genuine coverage gap from a temporary
-           service failure without opening each conversation. top_candidates
-           is every retrieved passage's rank, even uncited ones, so an admin
-           can judge whether the right page was even close. -->
-      <thead><tr><th>When</th><th>Machine</th><th>Question</th><th>Reason</th><th>Top candidates</th><th>IDs</th></tr></thead>
+           service failure without opening each conversation. repair_rejection
+           is NULL when the first model response succeeded outright, otherwise
+           why it didn't and needed a repair retry, regardless of how the
+           repair itself then turned out. top_candidates is every retrieved
+           passage's rank, even uncited ones, so an admin can judge whether
+           the right page was even close. -->
+      <thead><tr><th>When</th><th>Machine</th><th>Question</th><th>Reason</th><th>Repair retried for</th><th>Top candidates</th><th>IDs</th></tr></thead>
       <tbody>${state.unanswered.map((u) => `
         <tr>
           <td>${esc(u.created_at)}</td>
           <td>${esc(u.machine_label || "—")}</td>
           <td>${esc(u.question || "—")}</td>
           <td>${esc(u.reason || "—")}</td>
+          <td>${esc(u.repair_rejection || "—")}</td>
           <td class="text-dim text-sm">${
             u.top_candidates && u.top_candidates.length
               ? u.top_candidates.map((c) => `${esc(c.filename)}${c.page_number ? ", p." + c.page_number : ""} (#${c.rank + 1})`).join("; ")
@@ -592,7 +596,7 @@ function renderFeedback() {
           }</td>
           <td class="text-dim text-sm">msg ${u.message_id} · conv ${u.conversation_id}</td>
         </tr>
-      `).join("") || `<tr><td colspan="6">No unanswered questions logged.</td></tr>`}</tbody>
+      `).join("") || `<tr><td colspan="7">No unanswered questions logged.</td></tr>`}</tbody>
     </table>
   `;
 }

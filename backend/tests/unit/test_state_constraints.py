@@ -77,6 +77,16 @@ def test_unknown_answer_reason_is_rejected(test_env):
     )
 
 
+def test_unknown_repair_rejection_is_rejected(test_env):
+    with get_conn() as conn:
+        conn.execute("INSERT INTO users (email, password_hash, role) VALUES ('x@example.com', 'h', 'technician')")
+        conn.execute("INSERT INTO conversations (user_id) VALUES (1)")
+    _expect_rejected(
+        "INSERT INTO messages (conversation_id, role, content, repair_rejection) "
+        "VALUES (1, 'assistant', 'x', 'bad_vibes')"
+    )
+
+
 def test_unknown_feedback_rating_is_rejected(test_env):
     with get_conn() as conn:
         user_id = conn.execute(

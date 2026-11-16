@@ -609,11 +609,12 @@ def _generate_and_persist_answer(
             # the rest of this transaction, or attempt_id was never given.
             conn.execute("DELETE FROM message_sources WHERE message_id = %s", (retry_message_id,))
             conn.execute(
-                "UPDATE messages SET content = %s, is_no_answer = %s, answer_reason = %s, machine_id = %s, "
+                "UPDATE messages SET content = %s, is_no_answer = %s, answer_reason = %s, "
+                "repair_rejection = %s, machine_id = %s, "
                 "safety_warnings = %s, conflict_note = %s, provider = %s, answer_status = %s, "
                 "retry_count = retry_count + 1 WHERE id = %s",
                 (
-                    result.answer, result.is_no_answer, result.reason, machine_id,
+                    result.answer, result.is_no_answer, result.reason, result.repair_rejection, machine_id,
                     json.dumps(result.safety_warnings) if result.safety_warnings else None,
                     result.conflict_note, result.provider, answer_status, retry_message_id,
                 ),
@@ -621,11 +622,13 @@ def _generate_and_persist_answer(
             msg_id = retry_message_id
         elif fence_ok:
             cur = conn.execute(
-                "INSERT INTO messages (conversation_id, role, content, is_no_answer, answer_reason, machine_id, "
+                "INSERT INTO messages (conversation_id, role, content, is_no_answer, answer_reason, "
+                "repair_rejection, machine_id, "
                 "safety_warnings, conflict_note, provider, answer_status, reply_to_message_id) "
-                "VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                "VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (
-                    conversation_id, result.answer, result.is_no_answer, result.reason, machine_id,
+                    conversation_id, result.answer, result.is_no_answer, result.reason, result.repair_rejection,
+                    machine_id,
                     json.dumps(result.safety_warnings) if result.safety_warnings else None,
                     result.conflict_note, result.provider, answer_status, user_message_id,
                 ),
@@ -1326,7 +1329,8 @@ def retry_answer(
         attempt_id = _claim_conversation_processing(conn, conversation_id)
         if not attempt_id:
             conn.execute(
-                "UPDATE messages SET answer_status = 'failed', answer_reason = %s WHERE id = %s",
+                "UPDATE messages SET answer_status = 'failed', answer_reason = %s, "
+                "repair_rejection = NULL WHERE id = %s",
                 (REASON_SERVICE_UNAVAILABLE, message_id),
             )
             raise ApiError(
@@ -1360,7 +1364,8 @@ def retry_answer(
             # generation time), but a stuck claim would make every future
             # retry attempt 409 with "already in progress" permanently.
             conn.execute(
-                "UPDATE messages SET answer_status = 'failed', answer_reason = %s WHERE id = %s",
+                "UPDATE messages SET answer_status = 'failed', answer_reason = %s, "
+                "repair_rejection = NULL WHERE id = %s",
                 (REASON_SERVICE_UNAVAILABLE, message_id),
             )
             # Same-connection release, fenced on attempt_id -- see the

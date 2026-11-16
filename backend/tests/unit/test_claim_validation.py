@@ -19,7 +19,15 @@ import json
 
 import pytest
 
-from app.providers.base import NO_ANSWER_TEXT, parse_and_validate
+from app.providers.base import (
+    NO_ANSWER_TEXT,
+    REJECTION_GROUNDING,
+    REJECTION_ISOLATION_GATE,
+    REJECTION_ORDERING,
+    REJECTION_SCHEMA,
+    parse_and_validate,
+    validate_with_report,
+)
 from app.retrieval.search import RetrievedChunk
 
 
@@ -1239,3 +1247,79 @@ def test_a_before_qualifier_on_a_single_action_is_not_a_false_positive():
         "Disconnect power.",
         "Before service, disconnect power.",
     ) is not None
+
+
+def test_validate_with_report_classifies_malformed_json_as_schema():
+    result, report = validate_with_report("not json at all", [_passage(1, 1, "Disconnect power.")], "test")
+    assert result is None
+    assert report.kind == REJECTION_SCHEMA
+    assert report.item_text is None
+
+
+def test_validate_with_report_classifies_a_fabricated_number_as_grounding():
+    passages = [_passage(1, 1, "Replace the inlet fitting, part number 81-118-31, during service.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Replace the inlet fitting, part number 99-000-00.", "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    result, report = validate_with_report(raw, passages, "test")
+    assert result is None
+    assert report.kind == REJECTION_GROUNDING
+    assert report.item_text == "Replace the inlet fitting, part number 99-000-00."
+
+
+def test_validate_with_report_classifies_a_reversed_step_as_ordering():
+    passages = [_passage(1, 1, "1. Disconnect power. 2. Remove the cover.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [],
+        "steps": [
+            {"text": "Remove the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Disconnect power.", "cited_excerpt_numbers": [1]},
+        ],
+        "warnings": [],
+    })
+    result, report = validate_with_report(raw, passages, "test")
+    assert result is None
+    assert report.kind == REJECTION_ORDERING
+    assert report.item_text == "Disconnect power.", "the offending (regressing) item, not the one it regressed behind"
+
+
+def test_validate_with_report_classifies_a_split_label_bypass_as_isolation_gate():
+    passages = [_passage(1, 1, "Disconnect power. Remove the cover.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Remove the cover.", "cited_excerpt_numbers": [1]}],
+        "steps": [{"text": "Disconnect power.", "cited_excerpt_numbers": [1]}],
+        "warnings": [],
+    })
+    result, report = validate_with_report(raw, passages, "test")
+    assert result is None
+    assert report.kind == REJECTION_ISOLATION_GATE
+    assert report.item_text == "Remove the cover."
+
+
+def test_validate_with_report_returns_no_report_on_success():
+    passages = [_passage(1, 1, "Disconnect power.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Disconnect power.", "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    result, report = validate_with_report(raw, passages, "test")
+    assert result is not None
+    assert report is None
+
+
+def test_parse_and_validate_matches_validate_with_reports_result():
+    """parse_and_validate is a thin wrapper -- pins that it returns exactly
+    the same answer validate_with_report does, dropping only the report."""
+    passages = [_passage(1, 1, "Disconnect power.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Disconnect power.", "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    result, _ = validate_with_report(raw, passages, "test")
+    assert parse_and_validate(raw, passages, "test") == result

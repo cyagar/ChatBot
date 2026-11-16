@@ -1078,7 +1078,7 @@ def list_feedback(admin: CurrentUser = Depends(require_admin), limit: int = Quer
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT f.id, f.message_id, f.rating, f.comment, f.created_at, u.email AS user_email, "
-            "m.content AS answer_content, m.conversation_id, m.provider, "
+            "m.content AS answer_content, m.conversation_id, m.provider, m.repair_rejection, "
             "mf.name AS manufacturer, mach.model_name "
             "FROM feedback f "
             "JOIN users u ON u.id = f.user_id "
@@ -1124,12 +1124,15 @@ def recent_unanswered_questions(admin: CurrentUser = Depends(require_admin), lim
     selected machine, and the best-ranked retrieved candidates (even ones
     never cited) so they can judge whether the right page was even close.
     message_id is the correlation id for cross-referencing a /feedback
-    report. Never includes the model's own output -- only what it was
-    retrieved against."""
+    report. Also includes repair_rejection (see app.providers.base's
+    REJECTION_* constants): NULL if the first attempt succeeded outright,
+    otherwise why it didn't and needed a repair retry, regardless of
+    whether that repair then succeeded, abstained, or also failed. Never
+    includes the model's own output -- only what it was retrieved against."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT m.id AS message_id, prev.content AS question, m.created_at, m.conversation_id, "
-            "m.answer_reason AS reason, mf.name AS manufacturer, mach.model_name "
+            "m.answer_reason AS reason, m.repair_rejection, mf.name AS manufacturer, mach.model_name "
             "FROM messages m "
             "JOIN messages prev ON prev.id = m.reply_to_message_id "
             "JOIN conversations c ON c.id = m.conversation_id "
@@ -1157,6 +1160,7 @@ def recent_unanswered_questions(admin: CurrentUser = Depends(require_admin), lim
         {
             "message_id": r["message_id"], "question": r["question"], "created_at": r["created_at"],
             "conversation_id": r["conversation_id"], "reason": r["reason"],
+            "repair_rejection": r["repair_rejection"],
             "machine_label": f"{r['manufacturer']} {r['model_name']}" if r["manufacturer"] else None,
             "top_candidates": candidates_by_message.get(r["message_id"], []),
         }
