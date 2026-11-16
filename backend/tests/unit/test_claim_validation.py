@@ -643,12 +643,11 @@ def test_a_reversed_isolation_step_cannot_dodge_ordering_by_calling_it_a_claim()
 
 
 def test_a_standalone_isolation_prerequisite_claim_with_a_full_separate_steps_list_still_passes():
-    """Stating a prerequisite as its own claim while the full remaining
-    procedure is given correctly in STEPS is the exact pattern the system
-    prompt tells the model to use -- no step here restates "Disconnect
-    power.", and none needs to: nothing in STEPS comes from before it in
-    the manual, so there is no later action hiding behind an unlisted
-    isolation step."""
+    """No step here restates "Disconnect power.", and none needs to:
+    nothing in STEPS comes from before it in the manual, so there is no
+    later action hiding behind an unlisted isolation step -- the
+    restatement check only applies to an action claim grounded AFTER the
+    earliest isolation step, which this claim is not."""
     passages = [_passage(1, 1, "Disconnect power. Remove the cover. Replace the part. Reinstall the cover.")]
     raw = json.dumps({
         "is_no_answer": False,
@@ -664,13 +663,12 @@ def test_a_standalone_isolation_prerequisite_claim_with_a_full_separate_steps_li
 
 
 def test_an_action_claim_after_an_unlisted_isolation_step_is_rejected():
-    """Claims display ABOVE the steps list. A claim describing an action
-    from AFTER the manual's own isolation step, with that isolation step
-    appearing only as a different item's claim (never in STEPS at all),
-    would display the later action before the isolation step a technician
-    reading top-to-bottom needs first -- the same hazard as a reversed
-    isolation step, just split across CLAIMS and STEPS instead of within
-    one of them."""
+    """Claims display ABOVE the steps list. A claim describing the action
+    from right after the manual's isolation step, with the step itself
+    only in STEPS (never restated in CLAIMS), would still display before
+    "1. Disconnect power." to a technician reading top-to-bottom -- the
+    same hazard as a reversed isolation step, just split across CLAIMS and
+    STEPS instead of within one of them."""
     passages = [_passage(1, 1, "Disconnect power. Remove the cover.")]
     raw = json.dumps({
         "is_no_answer": False,
@@ -679,6 +677,65 @@ def test_an_action_claim_after_an_unlisted_isolation_step_is_rejected():
         "warnings": [],
     })
     assert parse_and_validate(raw, passages, "test") is None
+
+
+def test_an_action_claim_between_two_isolation_steps_is_still_caught():
+    """The isolation-step gate above must use the EARLIEST isolation step
+    in the excerpt, not the latest -- claims display above the whole steps
+    list starting from step one, so a claim grounded after only the FIRST
+    isolation point is already displaying out of order, even if a second,
+    later isolation step (disconnecting a wiring harness, say) exists
+    further down the same procedure."""
+    passages = [_passage(1, 1, (
+        "Disconnect power. Remove the cover. Disconnect the wiring harness. Replace the board."
+    ))]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Remove the cover.", "cited_excerpt_numbers": [1]}],
+        "steps": [
+            {"text": "Disconnect power.", "cited_excerpt_numbers": [1]},
+            {"text": "Disconnect the wiring harness.", "cited_excerpt_numbers": [1]},
+            {"text": "Replace the board.", "cited_excerpt_numbers": [1]},
+        ],
+        "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
+
+
+def test_disconnecting_a_component_that_is_not_the_hazard_is_not_an_isolation_step():
+    """"Disconnect" alone does not make a claim a hazard-isolation action --
+    only disconnecting power/electrical supply does. Two alternative
+    remedies that each disconnect a different COMPONENT (not power), from
+    different table rows, must still be freely orderable by relevance like
+    any other remedy claim."""
+    passages = [_passage(1, 1, (
+        "E4 Thermistor open Disconnect the thermistor leads and check resistance.\n"
+        "E5 Inlet clogged Disconnect the inlet hose and flush it."
+    ))]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [
+            {"text": "Disconnect the inlet hose and flush it.", "cited_excerpt_numbers": [1]},
+            {"text": "Disconnect the thermistor leads and check resistance.", "cited_excerpt_numbers": [1]},
+        ],
+        "steps": [], "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is not None
+
+
+def test_a_timing_fact_after_an_isolation_step_is_not_mistaken_for_an_out_of_order_action():
+    """_claim_is_action's broad verb set also matches an ordinary fact
+    about an action's duration or result ("Drain time is..."), not an
+    instruction to perform one -- a copula elsewhere in the clause ("is")
+    marks it as a fact, exempting it from the isolation-ordering gate."""
+    passages = [_passage(1, 1, "Disconnect power. Drain time is approximately 5 minutes. Remove the cover.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Drain time is approximately 5 minutes.", "cited_excerpt_numbers": [1]}],
+        "steps": [{"text": "Disconnect power.", "cited_excerpt_numbers": [1]}],
+        "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is not None
 
 
 def test_a_trimmed_restatement_of_a_step_still_counts_as_the_same_sentence():

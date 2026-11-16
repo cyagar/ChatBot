@@ -493,20 +493,20 @@ _CRITICAL_STEMS = frozenset(_stem(w) for w in (
     "must may should shall always operate run activate deactivate"
 ).split())
 
-# A clause opening with one of these (as a single word, or as the two-word
-# phrase on its right) is unambiguously a hazard-isolation action -- cutting
-# power or otherwise making the machine safe to open up -- never an
-# alternative remedy or a restated fact. Deliberately narrow: a broader set
-# built from all of _CRITICAL_STEMS also matches an ordinary noun-first
-# fact ("Fill timeout indicates low water pressure.") and an alternative
-# remedy from a different table row ("Replace the drain pump."), neither of
-# which has a real position to be "out of order" relative to each other --
-# the system prompt explicitly lets the model order those by relevance
-# (e.g. most-likely-cause first), and ordering them anyway produced false
+# A clause opening with one of these two-word phrases, or with "unplug" as a
+# single word, is unambiguously a hazard-isolation action -- cutting power
+# or otherwise making the machine safe to open up -- never an alternative
+# remedy or a restated fact. Deliberately narrow: a broader set built from
+# all of _CRITICAL_STEMS also matches an ordinary noun-first fact ("Fill
+# timeout indicates low water pressure.") and an alternative remedy from a
+# different table row ("Replace the drain pump."), neither of which has a
+# real position to be "out of order" relative to each other -- the system
+# prompt explicitly lets the model order those by relevance (e.g.
+# most-likely-cause first), and ordering them anyway produced false
 # rejections for exactly the messy-table content this validator exists to
-# accept (see parse_and_validate's own docstring, and 1d3f58b).
+# accept.
 _ISOLATION_ACTION_PHRASES = frozenset({
-    (_stem(w), None) for w in ("disconnect", "unplug")
+    (_stem("unplug"), None),
 } | {
     (_stem(a), _stem(b)) for a, b in (
         ("shut", "off"), ("turn", "off"), ("switch", "off"), ("power", "off"),
@@ -514,21 +514,32 @@ _ISOLATION_ACTION_PHRASES = frozenset({
     )
 })
 
+# "Disconnect" alone is NOT in _ISOLATION_ACTION_PHRASES -- a repair action
+# can disconnect something that is not the hazard itself ("Disconnect the
+# drain hose and flush it.", "Disconnect the thermistor leads and check
+# resistance."), and those are ordinary alternative remedies, not isolation
+# steps. "Disconnect" only counts when its own clause also names what's
+# being isolated.
+_ISOLATION_POWER_WORDS = frozenset(_stem(w) for w in "power electrical electric mains breaker supply plug cord".split())
+
 
 def _claim_is_isolation_action(item_text: str) -> bool:
     """True if any clause of this claim/step opens with an unambiguous
-    hazard-isolation action (see _ISOLATION_ACTION_PHRASES) rather than
-    naming a subject or a different kind of action first -- the system
-    prompt tells the model this belongs in STEPS, not CLAIMS; a claim
-    phrased as one anyway is held to the same cross-item ordering as steps
-    (see parse_and_validate), since a model mislabeling a reversed
-    isolation step as a "claim" is exactly what must not dodge that check."""
+    hazard-isolation action (see _ISOLATION_ACTION_PHRASES and
+    _ISOLATION_POWER_WORDS) rather than naming a subject or a different
+    kind of action first -- the system prompt tells the model this belongs
+    in STEPS, not CLAIMS; a claim phrased as one anyway is held to the same
+    cross-item ordering as other such claims (see parse_and_validate),
+    since a model mislabeling a reversed isolation step as a "claim" is
+    exactly what must not dodge that check."""
     for clause in _claim_clauses(item_text):
         words = [w for w in _prose_tokens(clause) if w not in _STOPWORDS]
         if not words:
             continue
         first = _stem(words[0])
         second = _stem(words[1]) if len(words) > 1 else None
+        if first == _stem("disconnect") and {_stem(w) for w in words} & _ISOLATION_POWER_WORDS:
+            return True
         if (first, None) in _ISOLATION_ACTION_PHRASES or (first, second) in _ISOLATION_ACTION_PHRASES:
             return True
     return False
@@ -548,9 +559,21 @@ _ACTION_VERB_STEMS = frozenset(_stem(w) for w in (
 ).split())
 
 
+# A copula or reporting verb ("is", "are", "means", "indicates") anywhere
+# in a clause is a reliable sign it is a FACT ABOUT an action's result or
+# timing ("Drain time is approximately 5 minutes.", "E5 means fill
+# timeout."), not an instruction to perform one, even when its first
+# content word is also in _ACTION_VERB_STEMS ("drain"). Checked against the
+# clause's raw tokens, before _STOPWORDS removes "is"/"are".
+_FACT_MARKER_STEMS = frozenset(_stem(w) for w in "is are means indicates".split())
+
+
 def _claim_is_action(item_text: str) -> bool:
     for clause in _claim_clauses(item_text):
-        words = [w for w in _prose_tokens(clause) if w not in _STOPWORDS]
+        raw_words = _prose_tokens(clause)
+        if {_stem(w) for w in raw_words} & _FACT_MARKER_STEMS:
+            continue
+        words = [w for w in raw_words if w not in _STOPWORDS]
         if words and _stem(words[0]) in _ACTION_VERB_STEMS:
             return True
     return False
@@ -1169,9 +1192,9 @@ def parse_and_validate(
     # citing unrelated excerpts impose no ordering on each other -- there is
     # no reliable signal for cross-excerpt sequence here.
     #
-    # Every claim's grounded position is tracked in the SAME way, against
-    # the same shared high-water mark as steps -- but a claim regressing
-    # behind it only REJECTS the response when that claim is itself an
+    # Each claim's grounded position is tracked the same way, in its OWN
+    # tracker (not shared with steps) -- but a claim regressing behind an
+    # earlier one only REJECTS the response when it is itself an
     # unambiguous hazard-isolation action (see _claim_is_isolation_action):
     # a model mislabeling a reversed isolation step as a "claim" must not
     # be able to dodge this check that way. An ordinary fact claim or an
@@ -1181,14 +1204,14 @@ def parse_and_validate(
     # model order those by relevance rather than manual order (e.g.
     # most-likely-cause first), and enforcing order on every claim produced
     # false rejections for exactly the messy-table content this validator
-    # exists to accept (see parse_and_validate's own docstring, and
-    # 1d3f58b). A claim commonly also restates something ALSO stated by an
-    # unrelated-positioned step in the same excerpt (e.g. a replacement
+    # exists to accept. Claims are tracked separately from steps, not in
+    # the same tracker: a claim commonly restates something ALSO stated by
+    # an unrelated-positioned step in the same excerpt (e.g. a replacement
     # part number called out as its own claim as well as inside the step
-    # that uses it, exactly as the system prompt asks for) -- claims and
-    # steps are tracked in separate domains for this reason; ordering a
+    # that uses it, exactly as the system prompt asks for), and ordering a
     # claim against step order produced exactly that false rejection in
-    # testing.
+    # testing. (A different check below, against isolation steps
+    # specifically, still applies across the two lists.)
     last_position_by_content_claims: dict[str, tuple[int, int]] = {}
     last_position_by_content_steps: dict[str, tuple[int, int]] = {}
 
@@ -1206,11 +1229,14 @@ def parse_and_validate(
         return ok
 
     # Run steps first: the claims pass below needs to know, for each
-    # excerpt's own text, whether some step is itself a hazard-isolation
-    # action and where it grounds (isolation_position_by_content), and
-    # which physical sentences (by local_index, not exact end position --
-    # a trimmed restatement can match a different end position in the same
-    # sentence) the steps collectively ground in (step_sentences_by_content).
+    # excerpt's own text, where the EARLIEST hazard-isolation step grounds
+    # (isolation_position_by_content) -- a claim is rejected (see below) for
+    # grounding anywhere after that, not just after the latest isolation
+    # step, since claims display above the whole steps list starting from
+    # the first one -- and which physical sentences (by local_index, not
+    # exact end position -- a trimmed restatement can match a different end
+    # position in the same sentence) the steps collectively ground in
+    # (step_sentences_by_content).
     isolation_position_by_content: dict[str, tuple[int, int]] = {}
     step_sentences_by_content: dict[str, set[int]] = {}
     for item in steps:
@@ -1229,7 +1255,7 @@ def parse_and_validate(
             if is_isolation_step:
                 key = (local_index, end_pos)
                 prior = isolation_position_by_content.get(content_key)
-                if prior is None or key > prior:
+                if prior is None or key < prior:
                     isolation_position_by_content[content_key] = key
 
     # Claims render ABOVE the steps list (see the answer assembly below), so
