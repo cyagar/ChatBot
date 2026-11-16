@@ -562,6 +562,116 @@ def test_a_prerequisite_phrased_as_a_claim_cannot_silently_disappear():
     assert parse_and_validate(raw, passages, "test") is None
 
 
+def test_a_claim_cannot_stitch_two_table_rows_into_one_record():
+    """A table whose rows ran together during extraction becomes one
+    _excerpt_lines window with no row boundary (see _best_overlap_scope's
+    own docstring) -- a claim naming row 1's identifier could otherwise
+    borrow row 2's unrelated text just because the words appear in order
+    somewhere in the flattened table. "E4 Fill timeout" borrows E4 from row
+    1 and "Fill timeout" from row 2's cause column; it names no real row."""
+    passages = [_passage(1, 1, (
+        "| Code | Cause | Remedy |\n"
+        "| E4 | Thermistor open | Replace thermistor |\n"
+        "| E5 | Fill timeout | Check water supply |"
+    ))]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "E4 Fill timeout", "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
+    # Positive control: a claim naming one row's own identifier and its own
+    # cause, with no foreign row identifier in between, must still pass --
+    # this must reject cross-row stitching specifically, not every claim
+    # against a multi-row table.
+    raw_ok = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "E4 Thermistor open", "cited_excerpt_numbers": [1]}],
+        "steps": [], "warnings": [],
+    })
+    assert parse_and_validate(raw_ok, passages, "test") is not None
+
+
+def test_a_spec_value_sharing_its_sentence_with_another_is_not_mistaken_for_a_second_record():
+    """The cross-row identifier guard above must not fire on two ordinary
+    measurements in one sentence ("120V and draws 8.5A") -- a unit-suffixed
+    numeral ("120v") is shaped exactly like a letter+digit identifier
+    ("e4") at the token level, but it is not a second record."""
+    assert _single_claim(
+        "The heating element draws 8.5A.",
+        "The heating element operates at 120V and draws 8.5A.",
+    ) is not None
+
+
+def test_two_steps_citing_duplicate_copies_of_the_same_passage_cannot_be_reversed():
+    """Two different excerpt numbers can be the same passage re-chunked or
+    duplicated into the retrieved set -- the cross-item ordering check is
+    keyed on the excerpt's own normalized text, so two steps citing two
+    different copies of an identical passage are still compared against
+    each other: reversing them (step 2's text cited against copy 1, step
+    1's text cited against copy 2) must still be rejected."""
+    excerpt = "1. Disconnect power. 2. Remove the cover."
+    passages = [_passage(1, 1, excerpt), _passage(2, 1, excerpt)]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [],
+        "steps": [
+            {"text": "Remove the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Disconnect power.", "cited_excerpt_numbers": [2]},
+        ],
+        "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
+
+
+def test_a_reversed_isolation_step_cannot_dodge_ordering_by_calling_it_a_claim():
+    """A claim phrased as a hazard-isolation action ("Disconnect power.") is
+    held to the manual's own order against every excerpt citing the same
+    underlying text, exactly like a step -- labeling a reversed two-step
+    procedure as CLAIMS instead of STEPS, citing the same excerpt, must not
+    bypass that ordering."""
+    passages = [_passage(1, 1, "1. Disconnect power. 2. Remove the cover.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [
+            {"text": "Remove the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Disconnect power.", "cited_excerpt_numbers": [1]},
+        ],
+        "steps": [], "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
+
+
+@pytest.mark.parametrize("excerpt, first, second", [
+    # An ordinary fact claim (an error code's meaning) must be freely
+    # orderable, exactly as the system prompt tells the model (e.g.
+    # most-likely-cause first), even against another fact claim from the
+    # same excerpt that happens to ground earlier in it.
+    (
+        "E4 means thermistor open. E5 means fill timeout.",
+        "E5 means fill timeout.", "E4 means thermistor open.",
+    ),
+    # An alternative remedy from a different table row is not a position in
+    # a sequence -- listing the less-likely remedy first must not be
+    # treated as "out of order" relative to the more-likely one.
+    (
+        "Replace the thermistor. Clean the drain pump.",
+        "Clean the drain pump.", "Replace the thermistor.",
+    ),
+])
+def test_non_isolation_claims_may_still_be_ordered_however_reads_clearest(excerpt, first, second):
+    passages = [_passage(1, 1, excerpt)]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [
+            {"text": first, "cited_excerpt_numbers": [1]},
+            {"text": second, "cited_excerpt_numbers": [1]},
+        ],
+        "steps": [], "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is not None
+
+
 # A claim can keep every one of the excerpt's own words -- no invented number,
 # no invented identifier, nothing _claim_supported alone would catch -- and
 # still swap which entity plays which role. Coverage-based grounding (every

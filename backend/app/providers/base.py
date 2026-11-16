@@ -114,10 +114,16 @@ be a complete, meaningful statement on its own (a bare repeated label like "Chec
 with no object is not one) -- if a row's own wording is incomplete out of context, keep enough \
 of the surrounding text in that same item to make it a self-contained instruction. You may \
 also group and order your CLAIMS in whatever way is clearest for the technician (e.g. the \
-most likely cause first) -- claims do not need to appear in the manual's own order. STEPS are \
-different: when two steps cite the same excerpt, the second one must be grounded at the same \
-place in that excerpt or later, never earlier -- so write/order your steps citing a shared \
-excerpt the same way that excerpt itself orders them, whether or not the source numbered them.
+most likely cause first) -- an ordinary fact claim, or an alternative repair action, does not \
+need to appear in the manual's own order. A claim that is itself a hazard-isolation action \
+(disconnecting or cutting power, unplugging, locking out) belongs in STEPS, not CLAIMS; if you \
+still write one as a claim, it is held to the manual's own order against every excerpt with the \
+same underlying text, the same way steps are below -- never state a power-isolation step out of \
+order just because you called it a claim. STEPS are different from ordinary claims: when two \
+steps cite excerpts with the same underlying text, the later one must \
+be grounded at the same place in that text or later, never earlier -- so write/order your steps \
+citing a shared excerpt the same way that excerpt itself orders them, whether or not the source \
+numbered them.
 - Only use excerpts that apply to the technician's selected machine. If an excerpt is about \
 a different model, do not apply its content to the selected machine.
 - Do not report a revision conflict yourself -- the system detects and presents that \
@@ -482,6 +488,76 @@ _CRITICAL_STEMS = frozenset(_stem(w) for w in (
     "must may should shall always operate run activate deactivate"
 ).split())
 
+# A clause opening with one of these (as a single word, or as the two-word
+# phrase on its right) is unambiguously a hazard-isolation action -- cutting
+# power or otherwise making the machine safe to open up -- never an
+# alternative remedy or a restated fact. Deliberately narrow: a broader set
+# built from all of _CRITICAL_STEMS also matches an ordinary noun-first
+# fact ("Fill timeout indicates low water pressure.") and an alternative
+# remedy from a different table row ("Replace the drain pump."), neither of
+# which has a real position to be "out of order" relative to each other --
+# the system prompt explicitly lets the model order those by relevance
+# (e.g. most-likely-cause first), and ordering them anyway produced false
+# rejections for exactly the messy-table content this validator exists to
+# accept (see parse_and_validate's own docstring, and 1d3f58b).
+_ISOLATION_ACTION_PHRASES = frozenset({
+    (_stem(w), None) for w in ("disconnect", "unplug")
+} | {
+    (_stem(a), _stem(b)) for a, b in (
+        ("shut", "off"), ("turn", "off"), ("switch", "off"), ("power", "off"),
+        ("cut", "power"), ("lock", "out"), ("de", "energize"),
+    )
+})
+
+
+def _claim_is_isolation_action(item_text: str) -> bool:
+    """True if any clause of this claim/step opens with an unambiguous
+    hazard-isolation action (see _ISOLATION_ACTION_PHRASES) rather than
+    naming a subject or a different kind of action first -- the system
+    prompt tells the model this belongs in STEPS, not CLAIMS; a claim
+    phrased as one anyway is held to the same cross-item ordering as steps
+    (see parse_and_validate), since a model mislabeling a reversed
+    isolation step as a "claim" is exactly what must not dodge that check."""
+    for clause in _claim_clauses(item_text):
+        words = [w for w in _prose_tokens(clause) if w not in _STOPWORDS]
+        if not words:
+            continue
+        first = _stem(words[0])
+        second = _stem(words[1]) if len(words) > 1 else None
+        if (first, None) in _ISOLATION_ACTION_PHRASES or (first, second) in _ISOLATION_ACTION_PHRASES:
+            return True
+    return False
+
+
+# An identifier-shaped token (an error code, part number, or similar
+# letter+digit label) that appears in the span a claim's words are matched
+# across, but isn't one of the claim's own identifier tokens, means that
+# span straddles a DIFFERENT record than the one the claim names -- the
+# E4/E5 cross-row stitch: a table row's own identifier plus a neighboring
+# row's unrelated text can otherwise satisfy the plain word-order check
+# because _excerpt_lines treats an unpunctuated table/list as a single
+# window (see its own docstring), with no row boundary for the subsequence
+# check to respect. Matching loosely (letters/digits in either order, not
+# just letter-prefix-then-digits) also catches a part number like "99-000"
+# written as "99000" after _prose_tokens strips the hyphen.
+#
+# A measurement written with no space before its unit ("120V", "8.5A") is
+# ALSO a contiguous letter+digit token at the _prose_tokens level -- there
+# is nothing shape-wise to tell "120v" apart from "e4". Excluded via
+# _RECORD_UNIT_SUFFIX_RE (digits followed by a known unit abbreviation)
+# rather than folded into the identifier check: two different spec values
+# in one sentence ("120V and draws 8.5A") are not two different records.
+# Deliberately a different name from the module's own _UNIT_SUFFIX_RE
+# (used by _token_supported for the numeric-claim check) -- that one
+# captures (numeral, unit) groups for a different purpose, and reusing its
+# name here would silently shadow it for every caller in the module.
+_IDENTIFIER_SHAPE_RE = re.compile(r"^(?=.*[a-z])(?=.*[0-9])[a-z0-9]{2,8}$")
+_RECORD_UNIT_SUFFIX_RE = re.compile(r"^\d+(v|a|w|f|c|hz|ma|kg|lb|oz|ft|in|mm|cm|psi|hp|rpm)$")
+
+
+def _identifier_shaped(stems: list[str]) -> set[str]:
+    return {w for w in stems if _IDENTIFIER_SHAPE_RE.match(w) and not _RECORD_UNIT_SUFFIX_RE.match(w)}
+
 
 def _unmatched_allowance(claim_stems: list[str]) -> int:
     """Non-critical words of a claim that may be missing from its matched
@@ -695,6 +771,16 @@ def _clause_grounded(
     if span is None:
         return None
     start_pos, end_pos = span
+
+    # A different record's identifier (a different error code, part number,
+    # etc.) inside the span this claim's words were matched across means the
+    # claim was assembled from two different rows of a table/list, not one --
+    # see _IDENTIFIER_SHAPE_RE's own comment.
+    claim_ids = _identifier_shaped(claim_stems)
+    if claim_ids:
+        foreign_ids = _identifier_shaped(window_stems[start_pos : end_pos + 1]) - claim_ids
+        if foreign_ids:
+            return None
 
     # A _RELATIONAL_STEMS word inside the span the claim draws from, but
     # absent from the claim itself, isn't a harmlessly trimmed connective --
@@ -1041,30 +1127,68 @@ def parse_and_validate(
     # be able to vanish while a hazardous action stays: dropping it would
     # display a partial, misleadingly-confident answer instead of failing
     # closed to a repair retry / the "could not verify" fallback.
+    # Steps are additionally checked against EACH OTHER: a later one that
+    # cites an excerpt with the SAME underlying text as an earlier one must
+    # not ground to an EARLIER position in that text than the earlier one
+    # already reached. This is what catches two numbered steps listed in
+    # the wrong relative order -- each step's _claim_grounded call above
+    # only checks that step in isolation, and cannot see that a DIFFERENT
+    # step was already grounded further along the same text. Keyed by the
+    # excerpt's own normalized text, not its bare excerpt number: two
+    # different excerpt numbers can be the same passage re-chunked or
+    # duplicated into the retrieved set, and a step citing one copy must
+    # still be ordered against a step citing the other. Only steps that
+    # share an excerpt's text with an earlier one are constrained; steps
+    # citing unrelated excerpts impose no ordering on each other -- there is
+    # no reliable signal for cross-excerpt sequence here.
+    #
+    # Every claim's grounded position is tracked in the SAME way, against
+    # the same shared high-water mark as steps -- but a claim regressing
+    # behind it only REJECTS the response when that claim is itself an
+    # unambiguous hazard-isolation action (see _claim_is_isolation_action):
+    # a model mislabeling a reversed isolation step as a "claim" must not
+    # be able to dodge this check that way. An ordinary fact claim or an
+    # alternative remedy from a different table row is tracked (so a LATER
+    # isolation claim can still be checked against it) but never itself
+    # rejected for regressing -- the system prompt explicitly lets the
+    # model order those by relevance rather than manual order (e.g.
+    # most-likely-cause first), and enforcing order on every claim produced
+    # false rejections for exactly the messy-table content this validator
+    # exists to accept (see parse_and_validate's own docstring, and
+    # 1d3f58b). A claim commonly also restates something ALSO stated by an
+    # unrelated-positioned step in the same excerpt (e.g. a replacement
+    # part number called out as its own claim as well as inside the step
+    # that uses it, exactly as the system prompt asks for) -- claims and
+    # steps are tracked in separate domains for this reason; ordering a
+    # claim against step order produced exactly that false rejection in
+    # testing.
+    last_position_by_content_claims: dict[str, tuple[int, int]] = {}
+    last_position_by_content_steps: dict[str, tuple[int, int]] = {}
+
+    def _check_order(
+        clause_positions: list[tuple[int, int, int, int]], tracker: dict[str, tuple[int, int]], enforce: bool
+    ) -> bool:
+        ok = True
+        for _flat_index, end_pos, excerpt_number, local_index in clause_positions:
+            key = (local_index, end_pos)
+            content_key = _normalize_ws(passages[excerpt_number - 1].content)
+            prior = tracker.get(content_key)
+            if prior is not None and key < prior and enforce:
+                ok = False
+            tracker[content_key] = max(key, prior) if prior is not None else key
+        return ok
+
     for item in claims:
         cited = _cited_content(item, passages)
         if not _claim_supported(item.text, cited, machine_label):
             return None
-        if _claim_grounded(item.text, item.excerpt_numbers, passages, machine_label) is None:
+        clause_positions = _claim_grounded(item.text, item.excerpt_numbers, passages, machine_label)
+        if clause_positions is None:
+            return None
+        enforce = _claim_is_isolation_action(item.text)
+        if not _check_order(clause_positions, last_position_by_content_claims, enforce):
             return None
 
-    # Steps are additionally checked against EACH OTHER: a later step that
-    # cites the same excerpt number as an earlier one must not ground to an
-    # EARLIER position in that excerpt than the earlier step already
-    # reached. This is what catches two numbered steps listed in the wrong
-    # relative order -- each step's _claim_grounded call above only checks
-    # that step in isolation, and cannot see that a DIFFERENT step was
-    # already grounded further along the same excerpt. Only excerpt numbers
-    # a step actually shares with an earlier one are constrained; steps
-    # citing different excerpts impose no ordering on each other -- there is
-    # no reliable signal for cross-excerpt sequence here. Scoped to steps
-    # only, not claims: a claim is a standalone fact, not a position in a
-    # numbered sequence, and commonly restates something ALSO stated by a
-    # step elsewhere in the same excerpt (e.g. a replacement part number
-    # called out as its own claim as well as inside the step that uses it)
-    # -- comparing it against step order the same way steps compare against
-    # each other produced exactly that false rejection in testing.
-    last_position_by_excerpt: dict[int, tuple[int, int]] = {}
     for item in steps:
         cited = _cited_content(item, passages)
         if not _claim_supported(item.text, cited, machine_label):
@@ -1072,12 +1196,8 @@ def parse_and_validate(
         clause_positions = _claim_grounded(item.text, item.excerpt_numbers, passages, machine_label)
         if clause_positions is None:
             return None
-        for _flat_index, end_pos, excerpt_number, local_index in clause_positions:
-            key = (local_index, end_pos)
-            prior = last_position_by_excerpt.get(excerpt_number)
-            if prior is not None and key < prior:
-                return None
-            last_position_by_excerpt[excerpt_number] = max(key, prior) if prior is not None else key
+        if not _check_order(clause_positions, last_position_by_content_steps, True):
+            return None
     for item in warnings:
         if not _warning_supported(item.text, _cited_content(item, passages)):
             return None
