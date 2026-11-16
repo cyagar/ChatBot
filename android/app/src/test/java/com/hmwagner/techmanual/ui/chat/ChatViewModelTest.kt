@@ -435,6 +435,39 @@ class ChatViewModelTest {
         .addHeader("Content-Type", "application/json")
 
     @Test
+    fun `a 409 on retry reloads instead of leaving a stuck spinner`() {
+        // The server can resolve a "retrying" row (completed, or reclaimed
+        // by a different attempt) between when the UI last saw it and when
+        // a tap on it reaches the server -- retryAnswer then 409s with
+        // "Only a failed answer can be retried." Without a reload, the
+        // local state keeps showing "retrying" forever, with no way back
+        // to a usable screen but restarting the app.
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path?.contains("/retry") == true && request.method == "POST" -> conflict("RETRY_NOT_ALLOWED")
+                request.path == "/api/conversations/1" && request.method == "GET" -> conversationJsonResponse()
+                request.path?.contains("/messages") == true && request.method == "GET" -> jsonResponse(
+                    """[{"id": 20, "role": "user", "content": "q", "created_at": "2026-08-24T00:00:00Z"},
+                        {"id": 21, "role": "assistant", "content": "the real answer", "reply_to_message_id": 20,
+                         "answer_status": "completed", "created_at": "2026-08-24T00:00:00Z"}]"""
+                )
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+
+        vm.retry(21)
+        // retry() clears `sending` as soon as the 409 itself comes back and
+        // THEN kicks off the reload (a separate suspend call gated by its
+        // own `loadingHistory` flag, not `sending`) -- waiting on `sending`
+        // alone would read state before the reload actually lands.
+        awaitState { !it.sending && !it.loadingHistory }
+
+        val reply = vm.state.value.messages.first { it.role == "assistant" }
+        assertEquals("completed", reply.answer_status)
+        assertEquals("the real answer", reply.content)
+    }
+
+    @Test
     fun `an in-progress replay whose reload finds the reply resolves the pending question`() {
         var sentKey: String? = null
         server.dispatcher = object : Dispatcher() {

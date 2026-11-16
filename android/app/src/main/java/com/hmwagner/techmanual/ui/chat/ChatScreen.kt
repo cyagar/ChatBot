@@ -239,6 +239,7 @@ fun ChatScreen(conversationId: Int, machineLabel: String?, onBack: (() -> Unit)?
                                 saved = state.savedMessageIds.contains(msg.id),
                                 onFeedback = { rating, comment -> vm.submitFeedback(msg.id, rating, comment) },
                                 feedback = state.feedbackByMessageId[msg.id],
+                                sending = state.sending,
                                 // A clarifying-question message's chips must
                                 // stay live only on the message still
                                 // awaiting resolution, not on every loaded
@@ -466,6 +467,7 @@ private fun MessageBubble(
     onFeedback: (String, String?) -> Unit,
     feedback: String?,
     isLatestMessage: Boolean,
+    sending: Boolean,
 ) {
     val isUser = msg.role == "user"
     // A no-answer response is the honest, by-design outcome when retrieval
@@ -526,7 +528,7 @@ private fun MessageBubble(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Info, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(
-                            "No verified answer from the approved manuals",
+                            noAnswerHeading(msg.reason),
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(start = 6.dp),
@@ -537,7 +539,28 @@ private fun MessageBubble(
                 FormattedAnswer(msg.content)
 
                 if (msg.answer_status == "failed") {
-                    TextButton(onClick = onRetry) { Text("Retry") }
+                    TextButton(onClick = onRetry, enabled = !sending) { Text("Retry") }
+                } else if (msg.answer_status == "retrying") {
+                    // A retry's own processing lease can expire mid-attempt
+                    // (e.g. a backend restart) with no way for the stuck
+                    // "retrying" row to ever reach "failed" on its own --
+                    // the backend already reclaims an expired lease the
+                    // next time retry is called on it (see routes_chat.py's
+                    // _LEASE_AVAILABLE_SQL), so this just gives a technician
+                    // a way to trigger that call instead of being stuck with
+                    // no control at all. A lease that's still genuinely
+                    // active surfaces the server's own 409 as the normal
+                    // error banner -- that's an expected, non-broken result
+                    // of tapping this before the lease expires.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text(
+                            "Checking answer status…",
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                    TextButton(onClick = onRetry, enabled = !sending) { Text("Check now") }
                 }
 
                 msg.conflict_note?.let { note ->
@@ -694,9 +717,42 @@ private fun MessageBubble(
                         }
                     }
                 }
+
+                // A no-answer response whose underlying manuals might
+                // actually contain the answer is worth reporting just like
+                // a substantive-but-wrong answer is -- the backend accepts
+                // rating="missing_answer" only on this kind of row (see
+                // submit_feedback's pairing check), so this button is kept
+                // separate from the "Helpful/Incorrect/Missing info" chips
+                // above rather than added as a fourth chip there.
+                if (isNoAnswer && msg.answer_status == "completed") {
+                    if (feedback == "missing_answer") {
+                        Text(
+                            "Reported as missing from the manuals",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        TextButton(onClick = { onFeedback("missing_answer", null) }) {
+                            Text("Report: manual may have this answer")
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+// Collapses every completed no-answer reason into one "manual gap" framing
+// and every failed reason into "service problem" (shown via the Retry
+// button above, keyed on answer_status, not reason) -- the heading itself
+// doesn't need to say more than the reason code actually distinguishes.
+internal fun noAnswerHeading(reason: String?): String = when (reason) {
+    "service_unavailable" -> "Manual search is temporarily unavailable"
+    "no_eligible_manual" -> "No approved manual is on file yet for this machine"
+    "insufficient_evidence", "model_abstained", "validation_rejected" ->
+        "I couldn't confirm this answer in the approved manuals"
+    else -> "No verified answer from the approved manuals"
 }
 
 @Composable

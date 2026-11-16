@@ -74,6 +74,12 @@ data class MessageOut(
     val content: String,
     val is_clarifying_question: Boolean = false,
     val is_no_answer: Boolean = false,
+    // Why is_no_answer is set: "no_eligible_manual" | "insufficient_evidence" |
+    // "model_abstained" | "validation_rejected" | "service_unavailable" | null.
+    // Null on a substantive answer, a clarifying question, or a message from
+    // before this field existed -- always show the generic fallback heading
+    // in that case, never infer a reason from message content.
+    val reason: String? = null,
     val answer_status: String = "completed",
     val citations: List<CitationOut> = emptyList(),
     val safety_warnings: List<String> = emptyList(),

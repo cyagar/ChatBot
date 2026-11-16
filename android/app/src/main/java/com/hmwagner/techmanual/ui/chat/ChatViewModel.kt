@@ -422,7 +422,15 @@ class ChatViewModel(
                         messages = _state.value.messages.map { if (it.id == updated.id) updated else it },
                     )
                 } else {
+                    // The row can already have resolved server-side by the
+                    // time this call lands -- e.g. "Check now" on a
+                    // "retrying" row whose attempt already finished returns
+                    // 409 "Only a failed answer can be retried." A reload
+                    // catches local state up with whatever the server
+                    // actually has now, instead of leaving a stuck spinner
+                    // with no way out but a manual app restart.
                     _state.value = _state.value.copy(sending = false, error = resp.describeError("Retry failed"))
+                    loadMessages()
                 }
             } catch (_: Exception) {
                 _state.value = _state.value.copy(sending = false, error = "Can't reach the server. Check your connection.")
