@@ -642,6 +642,68 @@ def test_a_reversed_isolation_step_cannot_dodge_ordering_by_calling_it_a_claim()
     assert parse_and_validate(raw, passages, "test") is None
 
 
+def test_a_standalone_isolation_prerequisite_claim_with_a_full_separate_steps_list_still_passes():
+    """Stating a prerequisite as its own claim while the full remaining
+    procedure is given correctly in STEPS is the exact pattern the system
+    prompt tells the model to use -- no step here restates "Disconnect
+    power.", and none needs to: nothing in STEPS comes from before it in
+    the manual, so there is no later action hiding behind an unlisted
+    isolation step."""
+    passages = [_passage(1, 1, "Disconnect power. Remove the cover. Replace the part. Reinstall the cover.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Disconnect power.", "cited_excerpt_numbers": [1]}],
+        "steps": [
+            {"text": "Remove the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Replace the part.", "cited_excerpt_numbers": [1]},
+            {"text": "Reinstall the cover.", "cited_excerpt_numbers": [1]},
+        ],
+        "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is not None
+
+
+def test_an_action_claim_after_an_unlisted_isolation_step_is_rejected():
+    """Claims display ABOVE the steps list. A claim describing an action
+    from AFTER the manual's own isolation step, with that isolation step
+    appearing only as a different item's claim (never in STEPS at all),
+    would display the later action before the isolation step a technician
+    reading top-to-bottom needs first -- the same hazard as a reversed
+    isolation step, just split across CLAIMS and STEPS instead of within
+    one of them."""
+    passages = [_passage(1, 1, "Disconnect power. Remove the cover.")]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Remove the cover.", "cited_excerpt_numbers": [1]}],
+        "steps": [{"text": "Disconnect power.", "cited_excerpt_numbers": [1]}],
+        "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is None
+
+
+def test_a_trimmed_restatement_of_a_step_still_counts_as_the_same_sentence():
+    """The restatement check above matches by sentence (local_index), not
+    the claim's exact end position -- a claim that trims the step's own
+    wording down still grounds in the same sentence as the step, and must
+    not be penalized for ending earlier in it than the full step does."""
+    passages = [_passage(1, 1, (
+        "Disconnect power before removing the cover. Remove the four screws and lift off the cover. "
+        "Replace the sprayhead with a new one, part number 81-118-31. Reinstall the cover and reconnect power."
+    ))]
+    raw = json.dumps({
+        "is_no_answer": False,
+        "claims": [{"text": "Replace the sprayhead, part number 81-118-31.", "cited_excerpt_numbers": [1]}],
+        "steps": [
+            {"text": "Disconnect power before removing the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Remove the four screws and lift off the cover.", "cited_excerpt_numbers": [1]},
+            {"text": "Replace the sprayhead with a new one, part number 81-118-31.", "cited_excerpt_numbers": [1]},
+            {"text": "Reinstall the cover and reconnect power.", "cited_excerpt_numbers": [1]},
+        ],
+        "warnings": [],
+    })
+    assert parse_and_validate(raw, passages, "test") is not None
+
+
 @pytest.mark.parametrize("excerpt, first, second", [
     # An ordinary fact claim (an error code's meaning) must be freely
     # orderable, exactly as the system prompt tells the model (e.g.

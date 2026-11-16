@@ -119,7 +119,12 @@ need to appear in the manual's own order. A claim that is itself a hazard-isolat
 (disconnecting or cutting power, unplugging, locking out) belongs in STEPS, not CLAIMS; if you \
 still write one as a claim, it is held to the manual's own order against every excerpt with the \
 same underlying text, the same way steps are below -- never state a power-isolation step out of \
-order just because you called it a claim. STEPS are different from ordinary claims: when two \
+order just because you called it a claim. CLAIMS display above your STEPS list: if your steps \
+include a power-isolation step, any OTHER action you also state as a claim (not just an \
+isolation one) must be one of those same steps, worded however you like -- never an action from \
+later in the manual than the isolation step that only appears as a claim, since a technician \
+reading claims first would see it before the isolation step it should follow. STEPS are \
+different from ordinary claims: when two \
 steps cite excerpts with the same underlying text, the later one must \
 be grounded at the same place in that text or later, never earlier -- so write/order your steps \
 citing a shared excerpt the same way that excerpt itself orders them, whether or not the source \
@@ -525,6 +530,28 @@ def _claim_is_isolation_action(item_text: str) -> bool:
         first = _stem(words[0])
         second = _stem(words[1]) if len(words) > 1 else None
         if (first, None) in _ISOLATION_ACTION_PHRASES or (first, second) in _ISOLATION_ACTION_PHRASES:
+            return True
+    return False
+
+
+# Any repair/check action verb, much broader than _ISOLATION_ACTION_PHRASES
+# -- used only to spot a claim that describes SOME action (not necessarily
+# isolation) once an isolation step has already established there's a real
+# procedure to be out of order relative to (see parse_and_validate). Safe to
+# be broad here specifically because that isolation-step gate keeps this
+# from firing on ordinary fact claims or alternative remedies in the common
+# case where no procedure is even in play for that excerpt.
+_ACTION_VERB_STEMS = frozenset(_stem(w) for w in (
+    "remove install connect disconnect unplug plug open close enable disable engage disengage "
+    "increase decrease raise lower add drain fill turn start stop replace insert tighten loosen "
+    "jumper energize lock unlock reset clean delime operate run activate deactivate"
+).split())
+
+
+def _claim_is_action(item_text: str) -> bool:
+    for clause in _claim_clauses(item_text):
+        words = [w for w in _prose_tokens(clause) if w not in _STOPWORDS]
+        if words and _stem(words[0]) in _ACTION_VERB_STEMS:
             return True
     return False
 
@@ -1178,6 +1205,41 @@ def parse_and_validate(
             tracker[content_key] = max(key, prior) if prior is not None else key
         return ok
 
+    # Run steps first: the claims pass below needs to know, for each
+    # excerpt's own text, whether some step is itself a hazard-isolation
+    # action and where it grounds (isolation_position_by_content), and
+    # which physical sentences (by local_index, not exact end position --
+    # a trimmed restatement can match a different end position in the same
+    # sentence) the steps collectively ground in (step_sentences_by_content).
+    isolation_position_by_content: dict[str, tuple[int, int]] = {}
+    step_sentences_by_content: dict[str, set[int]] = {}
+    for item in steps:
+        cited = _cited_content(item, passages)
+        if not _claim_supported(item.text, cited, machine_label):
+            return None
+        clause_positions = _claim_grounded(item.text, item.excerpt_numbers, passages, machine_label)
+        if clause_positions is None:
+            return None
+        if not _check_order(clause_positions, last_position_by_content_steps, True):
+            return None
+        is_isolation_step = _claim_is_isolation_action(item.text)
+        for _flat_index, end_pos, excerpt_number, local_index in clause_positions:
+            content_key = _normalize_ws(passages[excerpt_number - 1].content)
+            step_sentences_by_content.setdefault(content_key, set()).add(local_index)
+            if is_isolation_step:
+                key = (local_index, end_pos)
+                prior = isolation_position_by_content.get(content_key)
+                if prior is None or key > prior:
+                    isolation_position_by_content[content_key] = key
+
+    # Claims render ABOVE the steps list (see the answer assembly below), so
+    # a claim describing some action that the manual places AFTER a real
+    # isolation step would display out of the safe order even though
+    # claims and steps are otherwise separately ordered (see above) -- a
+    # claim that only restates a step already displayed in the steps list
+    # is fine (the technician still sees the isolation step first); one
+    # that doesn't is the same hazard as a reversed isolation step, just
+    # split across CLAIMS and STEPS instead of within one of them.
     for item in claims:
         cited = _cited_content(item, passages)
         if not _claim_supported(item.text, cited, machine_label):
@@ -1188,16 +1250,17 @@ def parse_and_validate(
         enforce = _claim_is_isolation_action(item.text)
         if not _check_order(clause_positions, last_position_by_content_claims, enforce):
             return None
+        if _claim_is_action(item.text):
+            for _flat_index, end_pos, excerpt_number, local_index in clause_positions:
+                content_key = _normalize_ws(passages[excerpt_number - 1].content)
+                isolation_position = isolation_position_by_content.get(content_key)
+                if isolation_position is None:
+                    continue
+                if (local_index, end_pos) > isolation_position and local_index not in step_sentences_by_content.get(
+                    content_key, set()
+                ):
+                    return None
 
-    for item in steps:
-        cited = _cited_content(item, passages)
-        if not _claim_supported(item.text, cited, machine_label):
-            return None
-        clause_positions = _claim_grounded(item.text, item.excerpt_numbers, passages, machine_label)
-        if clause_positions is None:
-            return None
-        if not _check_order(clause_positions, last_position_by_content_steps, True):
-            return None
     for item in warnings:
         if not _warning_supported(item.text, _cited_content(item, passages)):
             return None
