@@ -129,6 +129,69 @@ def test_no_extractable_content_anywhere_returns_question_unchanged():
     assert resolve_follow_up_query(q, history) == q
 
 
+def test_a_short_error_code_question_after_an_unrelated_turn_is_unchanged():
+    """'Error E4' has only one real content word ('Error' -- 'E4' is below
+    _content_words' own minimum length) and would otherwise be misjudged
+    as too short to stand alone, inheriting an unrelated prior topic's
+    words into its retrieval query and diluting the ranking signal for the
+    one exact code that actually matters."""
+    history = [
+        HistoryTurn(role="user", content="How do I fix an inlet valve leak?"),
+        HistoryTurn(role="assistant", content="Check the inlet valve seals on the water supply line for leaking."),
+    ]
+    q = "Error E4"
+    assert resolve_follow_up_query(q, history) == q
+
+
+def test_a_cue_phrase_naming_a_different_code_is_still_unchanged():
+    """The identifier check overrides a leading cue phrase too: 'What about
+    E5?' after an E4 discussion names its OWN target code and must not
+    inherit E4's context words just because it opens with 'what about'."""
+    history = [
+        HistoryTurn(role="user", content="What does error E4 mean?"),
+        HistoryTurn(role="assistant", content="E4 indicates a thermistor failure; replace the thermistor."),
+    ]
+    q = "What about E5?"
+    assert resolve_follow_up_query(q, history) == q
+
+
+def test_a_part_number_question_is_unchanged_even_with_a_pronoun():
+    history = [
+        HistoryTurn(role="user", content="How do I replace the tank heater?"),
+        HistoryTurn(role="assistant", content="Disconnect power, then replace the tank heater."),
+    ]
+    q = "Is this part number 81-118-31?"
+    assert resolve_follow_up_query(q, history) == q
+
+
+def test_a_bare_number_is_not_mistaken_for_an_identifier():
+    """A plain number ('12') must not count as the question 'naming its own
+    identifier' -- only a letter-bearing token (E4) or hyphenated digit
+    groups (a part number) should. Without this, an ordinary pronoun
+    follow-up that happens to contain a number would wrongly skip
+    resolution."""
+    history = [
+        HistoryTurn(role="user", content="Why is it not heating?"),
+        HistoryTurn(role="assistant", content="Check the tank heater and thermistor for failure."),
+    ]
+    resolved = resolve_follow_up_query("Can I set it to 12?", history)
+    assert resolved != "Can I set it to 12?"
+    assert "heater" in resolved.lower() or "thermistor" in resolved.lower()
+
+
+def test_a_true_pronoun_follow_up_with_no_identifier_still_resolves():
+    """Confirms the identifier check is narrow, not a blanket exemption for
+    anything short -- a genuine pronoun follow-up with no code/part number
+    of its own must still resolve exactly as before."""
+    history = [
+        HistoryTurn(role="user", content="Why is it not heating?"),
+        HistoryTurn(role="assistant", content="Check the tank heater and thermistor for failure."),
+    ]
+    resolved = resolve_follow_up_query("Where is it?", history)
+    assert resolved != "Where is it?"
+    assert "heater" in resolved.lower() or "thermistor" in resolved.lower()
+
+
 def test_resolution_walks_back_past_a_failed_retry_to_a_real_prior_answer():
     """Turn 1 answered for real; turn 2 was a failed retry attempt (same
     conversation, e.g. a transient provider error); turn 3 is a follow-up.

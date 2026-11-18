@@ -32,7 +32,12 @@ is returned unchanged rather than guessed at -- retrieving on the
 technician's own words is safer than retrieving on noise. This is the
 module's whole confidence model: "resolved" (an antecedent was found) vs
 "unresolved" (returned unchanged), observable by the caller via
-`!= question`. What this does NOT do: extract or persist structured fields
+`!= question`. A third case is also "unresolved": a question that already
+names its own error code or part number (see _has_identifier) is never
+treated as a follow-up at all, even with a pronoun or cue phrase present --
+it is specific enough to retrieve on by itself, and appending a prior
+turn's words would only dilute Postgres's OR-ranking across more terms.
+What this does NOT do: extract or persist structured fields
 for "referenced component/procedure" or "unresolved pronoun" as their own DB
 columns, or surface a clarification prompt to the technician when resolution
 fails -- those would need a genuine NLP/entity-extraction step or new UI.
@@ -57,6 +62,29 @@ _STOPWORDS = {
 }
 _SHORT_QUESTION_WORD_THRESHOLD = 4
 
+# Similar in spirit to extractive.py's _CODE_TOKEN_RE (both exist to spot a
+# code/part-number-shaped token), but NOT the same shape: that regex allows
+# zero leading letters, which is right for its own job (matching a token
+# from the question against one already in a passage) but wrong for this
+# one, where a bare number ("12", "2026") would wrongly count as this
+# question "naming its own identifier" and skip resolution for an ordinary
+# pronoun follow-up like "Can I set it to 12?". A token here must contain a
+# letter (e.g. "E4"), or be hyphenated digit groups (e.g. "81-118-31") --
+# plain digits alone are never enough. A token like "E4" is only 2
+# characters, below _content_words' own minimum length, so without this
+# check a question like "Error E4" has ONE content word ("Error") and is
+# misjudged as too short to stand alone.
+_IDENTIFIER_TOKEN_RE = re.compile(r"^[A-Za-z]{1,4}-?\d[\dA-Za-z-]*$")
+_HYPHENATED_DIGITS_RE = re.compile(r"^\d+(-\d+)+$")
+
+
+def _has_identifier(text: str) -> bool:
+    words = re.findall(r"[A-Za-z0-9-]+", text)
+    return any(
+        len(w) >= 2 and (_IDENTIFIER_TOKEN_RE.match(w) or _HYPHENATED_DIGITS_RE.match(w))
+        for w in words
+    )
+
 
 def _content_words(text: str, limit: int) -> list[str]:
     words = re.findall(r"[A-Za-z][A-Za-z0-9/-]{2,}", text)
@@ -75,6 +103,14 @@ def _content_words(text: str, limit: int) -> list[str]:
 
 def _looks_like_follow_up(question: str) -> bool:
     stripped = question.strip()
+    # A question naming its own error code or part number is already
+    # specific enough to retrieve on -- appending a prior turn's words
+    # would only dilute Postgres's OR-ranking across more terms, pulling
+    # the ranking away from the one exact identifier that actually matters.
+    # This overrides a pronoun or cue phrase too: "What about E5?" after an
+    # E4 discussion names its OWN target and must not inherit E4's context.
+    if _has_identifier(stripped):
+        return False
     if _FOLLOWUP_CUE_RE.match(stripped):
         return True
     if _PRONOUN_RE.search(stripped):

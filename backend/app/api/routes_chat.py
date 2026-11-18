@@ -151,55 +151,96 @@ def _machine_name_variants(model_name: str) -> list[str]:
     return [v for v in variants if len(v) >= 2]
 
 
-def _resolve_machine_mention(question: str) -> tuple[int | None, list[dict]]:
-    """Used only when a conversation has no machine selected yet. Never called
-    again once a machine is set for a conversation -- a machine change must go
-    through the explicit /machine endpoint below, never be inferred from a
-    later message. No silent machine switch, ever.
+def _eligible_machine_rows(conn) -> list:
+    return conn.execute(
+        # Same eligibility rules as routes_machines.py's search_machines/
+        # recent_machines (approved link, indexed/partial + approved +
+        # current-revision document) -- without this join, a free-text
+        # mention could resolve to a machine the explicit picker would
+        # never even show, immediately dead-ending into "no manuals"
+        # right after the technician just confirmed which machine they
+        # meant. DISTINCT, not GROUP BY: nothing here is aggregated, just
+        # de-duplicated against however many qualifying links/documents
+        # a machine happens to have.
+        "SELECT DISTINCT m.id, m.model_name, m.aliases, mf.name AS manufacturer FROM machines m "
+        "JOIN manufacturers mf ON mf.id = m.manufacturer_id "
+        "JOIN document_machines dm ON dm.machine_id = m.id AND dm.review_status = 'approved' "
+        "JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial') "
+        "AND d.deactivated_at IS NULL AND d.review_status = 'approved' AND d.is_current_revision = true"
+    ).fetchall()
 
-    Tries an exact, word-bounded match first (on the full model name or any
-    '/'-separated component, plus any curated alias); falls back to
-    deterministic fuzzy matching only if nothing matched exactly, so a typo or
-    slightly different phrasing ('TF-DBC' vs 'TF DBC') still resolves without
-    making bare-substring matching (e.g. a 2-letter code) looser than it
-    already is."""
-    with get_conn() as conn:
-        rows = conn.execute(
-            # Same eligibility rules as routes_machines.py's search_machines/
-            # recent_machines (approved link, indexed/partial + approved +
-            # current-revision document) -- without this join, a free-text
-            # mention could resolve to a machine the explicit picker would
-            # never even show, immediately dead-ending into "no manuals"
-            # right after the technician just confirmed which machine they
-            # meant. DISTINCT, not GROUP BY: nothing here is aggregated, just
-            # de-duplicated against however many qualifying links/documents
-            # a machine happens to have.
-            "SELECT DISTINCT m.id, m.model_name, m.aliases, mf.name AS manufacturer FROM machines m "
-            "JOIN manufacturers mf ON mf.id = m.manufacturer_id "
-            "JOIN document_machines dm ON dm.machine_id = m.id AND dm.review_status = 'approved' "
-            "JOIN documents d ON d.id = dm.document_id AND d.status IN ('indexed','partial') "
-            "AND d.deactivated_at IS NULL AND d.review_status = 'approved' AND d.is_current_revision = true"
-        ).fetchall()
+
+def _machine_aliases(row) -> list[str]:
+    try:
+        return [a for a in json.loads(row["aliases"] or "[]") if isinstance(a, str)]
+    except (TypeError, ValueError):
+        return []
+
+
+def _exact_machine_match_spans(question: str, rows: list) -> list[tuple[int, int, object]]:
+    """All exact, word-bounded match spans (start, end, machine_row) for
+    each machine's model name (or any '/'-separated component) or curated
+    alias."""
     q_lower = question.lower()
-
-    exact_matches = []
-    fuzzy_matches = []
+    spans: list[tuple[int, int, object]] = []
     for r in rows:
-        try:
-            aliases = [a for a in json.loads(r["aliases"] or "[]") if isinstance(a, str)]
-        except (TypeError, ValueError):
-            aliases = []
-        names = _machine_name_variants(r["model_name"]) + aliases
+        names = _machine_name_variants(r["model_name"]) + _machine_aliases(r)
+        for n in names:
+            for m in re.finditer(rf"\b{re.escape(n.lower())}\b", q_lower):
+                spans.append((m.start(), m.end(), r))
+    return spans
 
-        if any(re.search(rf"\b{re.escape(n.lower())}\b", q_lower) for n in names):
-            exact_matches.append(r)
-            continue
 
+def _exact_machine_matches(question: str, rows: list) -> list:
+    """Distinct machines with at least one exact, word-bounded match.
+    Deliberately INCLUSIVE of overlapping sibling names (e.g. "Axiom"
+    inside "Axiom Pro", since \\b treats a space the same as any other
+    boundary): a short model name can be a real base/variant relationship
+    where a bare mention of the longer one is genuinely ambiguous between
+    the two (see _resolve_machine_mention's candidate-listing behavior),
+    not a false hit to resolve away. _detect_machine_mismatch below needs a
+    narrower, position-aware version of this same scan for a different
+    reason -- there, a false mismatch alert costs an interruption on an
+    otherwise-answerable question, so it uses _exact_machine_match_spans
+    directly instead of this inclusive list."""
+    seen_ids: set = set()
+    result = []
+    for _start, _end, r in _exact_machine_match_spans(question, rows):
+        if r["id"] not in seen_ids:
+            seen_ids.add(r["id"])
+            result.append(r)
+    return result
+
+
+def _fuzzy_machine_matches(question: str, rows: list) -> list:
+    q_lower = question.lower()
+    out = []
+    for r in rows:
+        names = _machine_name_variants(r["model_name"]) + _machine_aliases(r)
         best = max((fuzz.token_set_ratio(q_lower, n.lower()) for n in names), default=0)
         if best >= FUZZY_MACHINE_MATCH_THRESHOLD:
-            fuzzy_matches.append(r)
+            out.append(r)
+    return out
 
-    matches = exact_matches or fuzzy_matches
+
+def _resolve_machine_mention(question: str) -> tuple[int | None, list[dict]]:
+    """Used when a conversation has no machine selected yet, resolving a
+    free-text mention to exactly one eligible machine (applied directly by
+    the caller as the conversation's initial pick) or a short list of
+    candidates to disambiguate. Also used by _detect_machine_mismatch below
+    for the already-selected case -- there, the caller never applies a
+    match directly; a machine change always goes through the explicit
+    /machine endpoint (set_conversation_machine), confirmed by the
+    technician, never inferred and applied silently from a later message.
+
+    Tries an exact, word-bounded match first; falls back to deterministic
+    fuzzy matching only if nothing matched exactly, so a typo or slightly
+    different phrasing ('TF-DBC' vs 'TF DBC') still resolves without making
+    bare-substring matching (e.g. a 2-letter code) looser than it already
+    is."""
+    with get_conn() as conn:
+        rows = _eligible_machine_rows(conn)
+    matches = _exact_machine_matches(question, rows) or _fuzzy_machine_matches(question, rows)
     if len(matches) == 1:
         return matches[0]["id"], []
     if len(matches) > 1:
@@ -207,6 +248,66 @@ def _resolve_machine_mention(question: str) -> tuple[int | None, list[dict]]:
             {"id": r["id"], "label": f"{r['manufacturer']} {r['model_name']}"} for r in matches[:5]
         ]
     return None, []
+
+
+def _detect_machine_mismatch(conn, question: str, current_machine_id: int) -> dict | None:
+    """When a machine IS already selected, detect whether the question
+    EXPLICITLY names a different eligible machine with no exact mention of
+    the current one too -- e.g. the technician started asking about a
+    similar but different model mid-conversation, and retrieval would
+    otherwise silently keep searching the WRONG machine's manuals. Returns
+    the other machine's {id, label} to offer as a one-tap confirmation
+    through the same clarifying-options UI and /machine endpoint
+    (set_conversation_machine) as the no-machine-selected case; it never
+    changes machine_id itself.
+
+    Exact-match only, never the fuzzy fallback: a false positive here
+    interrupts an otherwise-answerable question, a higher cost than missing
+    a genuine switch (which a later, more explicit mention can still
+    catch).
+
+    Unlike _resolve_machine_mention's inclusive scan, a match for the
+    CURRENT machine only counts as a genuine mention here if its span isn't
+    entirely shadowed by a STRICTLY LONGER match for a DIFFERENT machine at
+    the same position -- e.g. the current machine is "ICB" and the
+    question says "the ICB-DV documentation says..."; \\b treats the
+    hyphen as a boundary too, so a bare substring check would read that as
+    mentioning "ICB" and wrongly suppress the alert for the sibling model
+    actually named. The reverse direction is also suppressed: a candidate
+    whose OWN name is itself a substring of the CURRENT machine's name
+    (e.g. current is "Axiom Pro", question just says "Axiom") is treated
+    as shorthand for the current machine, not a mention of a different
+    one -- that reading is far more likely than a deliberate switch to a
+    shorter, less specific sibling, and this check's whole cost model
+    already favors missing a genuine switch over a false-positive
+    interruption."""
+    rows = _eligible_machine_rows(conn)
+    spans = _exact_machine_match_spans(question, rows)
+
+    def _is_shadowed(start: int, end: int, machine_id: int) -> bool:
+        return any(
+            os <= start and end <= oe and (oe - os) > (end - start) and other["id"] != machine_id
+            for os, oe, other in spans
+        )
+
+    if any(r["id"] == current_machine_id and not _is_shadowed(s, e, r["id"]) for s, e, r in spans):
+        return None
+    other_ids = {r["id"] for _s, _e, r in spans if r["id"] != current_machine_id}
+    if len(other_ids) != 1:
+        return None
+    other_id = next(iter(other_ids))
+    r = next(r for _s, _e, r in spans if r["id"] == other_id)
+
+    current_row = next((cr for cr in rows if cr["id"] == current_machine_id), None)
+    if current_row is not None:
+        other_names = [n.lower() for n in _machine_name_variants(r["model_name"]) + _machine_aliases(r)]
+        current_names = [
+            n.lower() for n in _machine_name_variants(current_row["model_name"]) + _machine_aliases(current_row)
+        ]
+        if any(re.search(rf"\b{re.escape(on)}\b", cn) for on in other_names for cn in current_names):
+            return None
+
+    return {"id": r["id"], "label": f"{r['manufacturer']} {r['model_name']}"}
 
 
 @router.post("/conversations", response_model=ConversationOut, status_code=status.HTTP_201_CREATED)
@@ -421,33 +522,52 @@ def _release_conversation_processing(conversation_id: int, attempt_id: str) -> N
         )
 
 
-def _fetch_history(conn, conversation_id: int, *, before_message_id: int | None = None) -> list[HistoryTurn]:
-    """Bounded prior turns, oldest first. Clarifying-question prompts are
-    excluded -- they're navigation, not content a provider should reason
-    about. `before_message_id` lets the pending-message resumption path
-    (set_conversation_machine) compute exactly the history that existed at
-    the moment the pending question was originally asked, the same way the
-    normal ask_question path computes history before inserting its new
-    question."""
+def _fetch_history(
+    conn, conversation_id: int, machine_id: int | None, *, before_message_id: int | None = None
+) -> list[HistoryTurn]:
+    """Bounded prior turns, oldest first, scoped to `machine_id` -- the
+    machine the CALLER is about to answer against, not necessarily the
+    conversation's current one (the pending-resume path passes the NEW
+    machine being switched to). Clarifying-question prompts are excluded --
+    they're navigation, not content a provider should reason about.
+    `before_message_id` lets the pending-message resumption path
+    (set_conversation_machine) and retry compute exactly the history that
+    existed at the moment the original question was asked, the same way
+    ask_question computes history before inserting its new question.
+
+    Only assistant rows carry machine_id (user rows never do -- a
+    technician's own wording doesn't name which machine it's about). A
+    NULL machine_id on an assistant row is treated as "not a cutoff" either
+    way: before any machine was ever resolved, that's safe (there's no
+    wrong machine yet to leak); a row from before this column existed at
+    all is NOT provably safe the same way, but there is no data left to
+    tell the two apart. Walking backward from most recent, the first assistant row whose
+    machine_id IS set and differs from `machine_id` marks a machine switch
+    -- everything at or before it is a different machine's conversation and
+    must not leak into this answer's history (an old topic's words diluting
+    query resolution, or an old machine's values reaching the provider
+    prompt for a similar current model)."""
     if before_message_id is not None:
         rows = conn.execute(
-            "SELECT role, content, is_no_answer FROM messages WHERE conversation_id = %s AND id < %s "
+            "SELECT role, content, is_no_answer, machine_id FROM messages WHERE conversation_id = %s AND id < %s "
             "AND is_clarifying_question = false ORDER BY id DESC LIMIT %s",
             (conversation_id, before_message_id, MAX_HISTORY_TURNS),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT role, content, is_no_answer FROM messages WHERE conversation_id = %s "
+            "SELECT role, content, is_no_answer, machine_id FROM messages WHERE conversation_id = %s "
             "AND is_clarifying_question = false ORDER BY id DESC LIMIT %s",
             (conversation_id, MAX_HISTORY_TURNS),
         ).fetchall()
-    return [
-        HistoryTurn(
+    turns: list[HistoryTurn] = []
+    for r in rows:
+        if r["role"] == "assistant" and r["machine_id"] is not None and r["machine_id"] != machine_id:
+            break
+        turns.append(HistoryTurn(
             role=r["role"], content=r["content"][:MAX_HISTORY_TURN_CHARS],
             is_no_answer=bool(r["is_no_answer"]),
-        )
-        for r in reversed(rows)
-    ]
+        ))
+    return list(reversed(turns))
 
 
 def _generate_and_persist_answer(
@@ -803,7 +923,9 @@ def set_conversation_machine(
                 pending_row = conn.execute("SELECT content FROM messages WHERE id = %s", (pending_id,)).fetchone()
                 if pending_row is not None:
                     pending_question = pending_row["content"]
-                    pending_history = _fetch_history(conn, conversation_id, before_message_id=pending_id)
+                    pending_history = _fetch_history(
+                        conn, conversation_id, payload.machine_id, before_message_id=pending_id
+                    )
                 else:
                     # Same-connection release, fenced on attempt_id -- see
                     # the matching comment in ask_question's
@@ -1155,7 +1277,7 @@ def ask_question(
         # Bounded prior turns, captured before this question is inserted, so
         # follow-ups like "what about replacing it?" have real context instead
         # of only ever seeing the latest question in isolation.
-        history = _fetch_history(conn, conversation_id, before_message_id=resume_message_id)
+        history = _fetch_history(conn, conversation_id, machine_id, before_message_id=resume_message_id)
 
         if resume_message_id is not None:
             user_message_id = resume_message_id
@@ -1205,6 +1327,39 @@ def ask_question(
             "UPDATE conversations SET pending_message_id = NULL WHERE id = %s", (conversation_id,)
         )
 
+        def _ask_clarifying_question(clarifying_text: str, candidates: list[dict]) -> MessageOut:
+            # Waiting on the technician to pick/confirm a machine, not on the
+            # provider -- must not hold the lock indefinitely (would block
+            # the already-supported "ask something else instead" case;
+            # see test_asking_a_new_question_clears_a_stale_pending_clarification).
+            # Released on THIS still-open connection, not via
+            # _release_conversation_processing -- that helper opens a
+            # separate connection, which would block forever waiting on
+            # the row lock this transaction hasn't committed (and won't,
+            # until this function returns) yet.
+            cur = conn.execute(
+                "INSERT INTO messages (conversation_id, role, content, is_clarifying_question, "
+                "clarifying_options, reply_to_message_id) VALUES (%s, 'assistant', %s, true, %s, %s) "
+                "RETURNING id",
+                (conversation_id, clarifying_text, json.dumps(candidates), user_message_id),
+            )
+            msg_id = cur.fetchone()["id"]
+            conn.execute(
+                "UPDATE conversations SET updated_at = now(), pending_message_id = %s WHERE id = %s",
+                (user_message_id, conversation_id),
+            )
+            conn.execute(
+                "UPDATE conversations SET is_processing = false, processing_attempt_id = NULL, "
+                "processing_claimed_at = NULL WHERE id = %s AND processing_attempt_id = %s",
+                (conversation_id, attempt_id),
+            )
+            return MessageOut(
+                id=msg_id, role="assistant", content=clarifying_text,
+                is_clarifying_question=True, is_no_answer=False,
+                clarifying_options=candidates, reply_to_message_id=user_message_id,
+                created_at=conn.execute("SELECT created_at FROM messages WHERE id=%s", (msg_id,)).fetchone()["created_at"],
+            )
+
         # --- Clarify instead of guessing when the machine is unclear ---
         if machine_id is None:
             resolved_id, candidates = _resolve_machine_mention(question)
@@ -1220,37 +1375,28 @@ def ask_question(
                         else "Please select a manufacturer and model before I search the manuals."
                     )
                 )
-                cur = conn.execute(
-                    "INSERT INTO messages (conversation_id, role, content, is_clarifying_question, "
-                    "clarifying_options, reply_to_message_id) VALUES (%s, 'assistant', %s, true, %s, %s) "
-                    "RETURNING id",
-                    (conversation_id, clarifying_text, json.dumps(candidates), user_message_id),
+                return _ask_clarifying_question(clarifying_text, candidates)
+        else:
+            # --- Confirm instead of silently searching the wrong machine ---
+            # A machine is already selected, but the question explicitly
+            # names a different eligible one (e.g. the technician started
+            # asking about a different model mid-conversation) -- without
+            # this, retrieval keeps searching the ORIGINAL machine's
+            # manuals for a question about a different one, and a similar
+            # sibling model's different values could pass as an answer.
+            other = _detect_machine_mismatch(conn, question, machine_id)
+            if other is not None:
+                current_label = _machine_label(conn, machine_id)
+                clarifying_text = (
+                    f"This looks like it might be about the {other['label']} rather than the "
+                    f"{current_label} currently selected for this conversation. Switch machines, "
+                    f"or keep going with the {current_label}?"
                 )
-                msg_id = cur.fetchone()["id"]
-                conn.execute(
-                    "UPDATE conversations SET updated_at = now(), pending_message_id = %s WHERE id = %s",
-                    (user_message_id, conversation_id),
-                )
-                # Waiting on the technician to pick a machine, not on the
-                # provider -- must not hold the lock indefinitely (would block
-                # the already-supported "ask something else instead" case;
-                # see test_asking_a_new_question_clears_a_stale_pending_clarification).
-                # Released on THIS still-open connection, not via
-                # _release_conversation_processing -- that helper opens a
-                # separate connection, which would block forever waiting on
-                # the row lock this transaction hasn't committed (and won't,
-                # until this function returns) yet.
-                conn.execute(
-                    "UPDATE conversations SET is_processing = false, processing_attempt_id = NULL, "
-                    "processing_claimed_at = NULL WHERE id = %s AND processing_attempt_id = %s",
-                    (conversation_id, attempt_id),
-                )
-                return MessageOut(
-                    id=msg_id, role="assistant", content=clarifying_text,
-                    is_clarifying_question=True, is_no_answer=False,
-                    clarifying_options=candidates, reply_to_message_id=user_message_id,
-                    created_at=conn.execute("SELECT created_at FROM messages WHERE id=%s", (msg_id,)).fetchone()["created_at"],
-                )
+                candidates = [
+                    {"id": other["id"], "label": f"Switch to {other['label']}"},
+                    {"id": machine_id, "label": f"Keep {current_label}"},
+                ]
+                return _ask_clarifying_question(clarifying_text, candidates)
 
     try:
         return _generate_and_persist_answer(
@@ -1377,7 +1523,7 @@ def retry_answer(
             )
             raise HTTPException(status.HTTP_409_CONFLICT, detail="This answer cannot be retried.")
 
-        history = _fetch_history(conn, conversation_id, before_message_id=user_row["id"])
+        history = _fetch_history(conn, conversation_id, machine_id, before_message_id=user_row["id"])
 
     try:
         return _generate_and_persist_answer(

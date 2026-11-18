@@ -245,3 +245,101 @@ def test_follow_up_resolution_changes_which_passage_retrieval_surfaces(test_env)
         "resolved query should surface the service-procedure chunk even though "
         "the follow-up's own literal wording doesn't lexically match it"
     )
+
+
+def test_history_does_not_leak_across_a_machine_switch(test_env, monkeypatch):
+    """After switching machines mid-conversation, neither the provider
+    prompt's history nor query resolution's context words may carry a
+    turn from the OLD machine -- a similar sibling model's own different
+    values must never reach an answer for the new one."""
+    import app.api.routes_chat as routes_chat
+    from app.providers.base import AIProvider, GeneratedAnswer
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Machine A')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Machine B')")
+
+    captured: list[list] = []
+
+    class _CapturingProvider(AIProvider):
+        name = "test_capturing"
+
+        def generate(self, question, machine_label, passages, history=None):
+            captured.append(list(history or []))
+            return GeneratedAnswer(
+                answer=f"Answer about {machine_label}.", citations=[], provider=self.name, is_no_answer=False,
+            )
+
+    monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: [])
+    monkeypatch.setattr(routes_chat, "has_eligible_manual", lambda *a, **k: True)
+    monkeypatch.setattr(routes_chat, "get_provider", lambda: _CapturingProvider())
+
+    _register("historyleak@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    resp_a = client.post(
+        f"/api/conversations/{conv['id']}/messages", json={"content": "What is the fill temperature for Machine A?"}
+    )
+    assert resp_a.status_code == 200
+    assert captured[-1] == [], "the very first question has no prior history to leak"
+
+    switch = client.post(f"/api/conversations/{conv['id']}/machine", json={"machine_id": 2})
+    assert switch.status_code == 200, switch.text
+
+    resp_b = client.post(
+        f"/api/conversations/{conv['id']}/messages", json={"content": "What is the fill temperature?"}
+    )
+    assert resp_b.status_code == 200
+    history_for_b = captured[-1]
+    assert history_for_b == [], (
+        f"Machine A's turn must not appear in Machine B's history, got {history_for_b}"
+    )
+
+
+def test_a_legacy_null_machine_id_row_is_not_treated_as_a_switch_cutoff(test_env, monkeypatch):
+    """A row from before messages.machine_id existed has NULL there, same
+    as a row from before any machine was ever resolved -- _fetch_history
+    must not mistake either for a machine-switch boundary and truncate
+    history that's actually still relevant."""
+    import app.api.routes_chat as routes_chat
+    from app.providers.base import AIProvider, GeneratedAnswer
+
+    with get_conn() as conn:
+        conn.execute("INSERT INTO manufacturers (name) VALUES ('Bunn-O-Matic Corporation')")
+        conn.execute("INSERT INTO machines (manufacturer_id, model_name) VALUES (1, 'Machine A')")
+
+    captured: list[list] = []
+
+    class _CapturingProvider(AIProvider):
+        name = "test_capturing"
+
+        def generate(self, question, machine_label, passages, history=None):
+            captured.append(list(history or []))
+            return GeneratedAnswer(
+                answer="A real answer about the heater.", citations=[], provider=self.name, is_no_answer=False,
+            )
+
+    monkeypatch.setattr(routes_chat, "hybrid_search", lambda *a, **k: [])
+    monkeypatch.setattr(routes_chat, "has_eligible_manual", lambda *a, **k: True)
+    monkeypatch.setattr(routes_chat, "get_provider", lambda: _CapturingProvider())
+
+    _register("legacynullrow@example.com")
+    conv = client.post("/api/conversations", json={"machine_id": 1}).json()
+    client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "Why is it not heating?"})
+
+    # Simulate a pre-migration row: a real answer with machine_id explicitly
+    # NULLed out, as if this column never existed when it was written.
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE messages SET machine_id = NULL WHERE conversation_id = %s AND role = 'assistant'",
+            (conv["id"],),
+        )
+
+    client.post(f"/api/conversations/{conv['id']}/messages", json={"content": "What about replacing it?"})
+    history_for_followup = captured[-1]
+    # "heater" is unique to the NULLed assistant row's own content (the
+    # user turn never carries machine_id and would pass regardless) --
+    # proving specifically that THIS row survived the cutoff check.
+    assert any("heater" in h.content.lower() for h in history_for_followup), (
+        f"a legacy NULL machine_id row must not be mistaken for a switch boundary, got {history_for_followup}"
+    )
