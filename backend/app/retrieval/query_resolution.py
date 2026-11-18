@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import re
 
+from app.identifiers import is_identifier_token
+
 _FOLLOWUP_CUE_RE = re.compile(
     r"^(what about|and what about|and|also|what if|how about|ok(ay)?,?\s+what about)\b",
     re.IGNORECASE,
@@ -62,28 +64,21 @@ _STOPWORDS = {
 }
 _SHORT_QUESTION_WORD_THRESHOLD = 4
 
-# Similar in spirit to extractive.py's _CODE_TOKEN_RE (both exist to spot a
-# code/part-number-shaped token), but NOT the same shape: that regex allows
-# zero leading letters, which is right for its own job (matching a token
-# from the question against one already in a passage) but wrong for this
-# one, where a bare number ("12", "2026") would wrongly count as this
-# question "naming its own identifier" and skip resolution for an ordinary
-# pronoun follow-up like "Can I set it to 12?". A token here must contain a
-# letter (e.g. "E4"), or be hyphenated digit groups (e.g. "81-118-31") --
-# plain digits alone are never enough. A token like "E4" is only 2
-# characters, below _content_words' own minimum length, so without this
-# check a question like "Error E4" has ONE content word ("Error") and is
-# misjudged as too short to stand alone.
-_IDENTIFIER_TOKEN_RE = re.compile(r"^[A-Za-z]{1,4}-?\d[\dA-Za-z-]*$")
-_HYPHENATED_DIGITS_RE = re.compile(r"^\d+(-\d+)+$")
-
-
+# A bare number ("12", "2026") or an ordinary two-group range/duration/spec
+# ("2-3", "120-240") must NOT count as this question "naming its own
+# identifier" and skip resolution for what's actually an ordinary pronoun
+# follow-up ("Can I set it to 12?", "Should I run it for 2-3 minutes?") --
+# unlike extractive.py's code-token rescue, this module has no surrounding
+# "error/part-number intent" concept to conditionally allow either shape,
+# so is_identifier_token's unconditional check (a letter+digit mix, or 3+
+# hyphenated groups) is used as-is, never the two ambiguous shapes it
+# deliberately excludes. A token like "E4" is only 2 characters, below
+# _content_words' own minimum length, so without this check a question
+# like "Error E4" has ONE content word ("Error") and is misjudged as too
+# short to stand alone.
 def _has_identifier(text: str) -> bool:
     words = re.findall(r"[A-Za-z0-9-]+", text)
-    return any(
-        len(w) >= 2 and (_IDENTIFIER_TOKEN_RE.match(w) or _HYPHENATED_DIGITS_RE.match(w))
-        for w in words
-    )
+    return any(len(w) >= 2 and is_identifier_token(w) for w in words)
 
 
 def _content_words(text: str, limit: int) -> list[str]:

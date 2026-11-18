@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 
+from app.identifiers import is_bare_digit_token, is_identifier_token, is_two_group_digit_range
 from app.providers.base import (
     AIProvider,
     Citation,
@@ -59,31 +60,74 @@ MIN_VECTOR_SIMILARITY_FOR_ANSWER = 0.62
 # identifiers — e.g. the real chunk containing "81-118-31" scored only 0.62.
 # Rather than lower the global threshold (which would let genuinely off-topic
 # passages through, defeating the reason 0.65 was picked), this adds a narrow,
-# precise rescue: if a code-like token from the question (has a digit, len>=2)
-# appears as an exact whole token in a candidate passage, that passage is
-# treated as relevant regardless of its vector score. Exact tokenization (not
-# substring search) matters — it is what keeps a query for "E4" from being
-# "rescued" by an unrelated chunk whose content is just the single letter "E".
-_CODE_TOKEN_RE = re.compile(r"^[A-Za-z]{0,4}-?\d[\dA-Za-z-]*$")
+# precise rescue: if a code-like token from the question appears as an exact
+# whole token in a candidate passage, that passage is treated as relevant
+# regardless of its vector score. Exact tokenization (not substring search)
+# matters — it is what keeps a query for "E4" from being "rescued" by an
+# unrelated chunk whose content is just the single letter "E".
+#
+# A letter+digit mix ("E4") or a genuine multi-segment part number
+# ("81-118-31") is distinctive enough to rescue on its own
+# (is_identifier_token). A BARE number or a two-group range ("10", "2-3")
+# is not: "10 minutes" and "120 volts" would otherwise "rescue" any
+# unrelated passage that happens to contain that same number anywhere ("see
+# page 10", "replace every 120 days") and present it as a positive answer.
+# Either of those ambiguous shapes only counts when it sits immediately
+# after an explicit error/part-number intent phrase, or a standalone "#"
+# (a catalog convention independent of any particular word before it, e.g.
+# "pump cover #082-6307") -- in the SAME text being scanned, not merely
+# present somewhere else in a longer question or passage -- or (passage
+# side only) when the chunk is already classified as an error-code table,
+# which is itself the context. "part" alone, with no "number"/"no."/"#"
+# after it, is NOT a trigger -- "part of the cycle" is ordinary prose, not
+# an intent to look up a part number.
+_INTENT_NUMBER_RE = re.compile(
+    r"(?:\b(?:error|code|fault|part\s*(?:number|no\.?|#)|p\s*/\s*n)\s*[:#-]?\s*|#\s*)(\d[\dA-Za-z-]*)\b",
+    re.IGNORECASE,
+)
 
 
-def _extract_code_tokens(text: str) -> set[str]:
+def _intent_confirmed_numbers(text: str) -> set[str]:
+    return {m.group(1).upper() for m in _INTENT_NUMBER_RE.finditer(text)}
+
+
+def _extract_code_tokens(text: str, confirmed: set[str] | None = None) -> set[str]:
+    """`confirmed` (uppercased tokens) lets a caller allow an otherwise
+    ambiguous bare number or two-group range through -- see
+    _code_token_rescue, which only populates it for a number with explicit
+    error/part-number context. Without it, only unconditionally
+    identifier-shaped tokens (is_identifier_token) are extracted."""
+    confirmed = confirmed or set()
     words = re.findall(r"[A-Za-z0-9-]+", text)
-    return {
-        w.upper()
-        for w in words
-        if len(w) >= 2 and any(c.isdigit() for c in w) and _CODE_TOKEN_RE.match(w)
-    }
+    out: set[str] = set()
+    for w in words:
+        if len(w) < 2:
+            continue
+        wu = w.upper()
+        if is_identifier_token(w):
+            out.add(wu)
+        elif (is_two_group_digit_range(w) or is_bare_digit_token(w)) and wu in confirmed:
+            out.add(wu)
+    return out
 
 
 def _code_token_rescue(question: str, passages):
     """Return the first passage whose content contains an exact code-token
     match for the question, or None if no such rescue applies."""
-    q_tokens = _extract_code_tokens(question)
+    q_tokens = _extract_code_tokens(question, _intent_confirmed_numbers(question))
     if not q_tokens:
         return None
     for p in passages:
-        content_tokens = _extract_code_tokens(p.content)
+        content_confirmed = _intent_confirmed_numbers(p.content)
+        if getattr(p, "chunk_type", None) == "error_code":
+            # The chunk's own classification is the context -- no adjacent
+            # intent phrase needed within its text for a bare number or
+            # range to count there.
+            content_confirmed |= {
+                w.upper() for w in re.findall(r"[A-Za-z0-9-]+", p.content)
+                if is_two_group_digit_range(w) or is_bare_digit_token(w)
+            }
+        content_tokens = _extract_code_tokens(p.content, content_confirmed)
         if q_tokens & content_tokens:
             return p
     return None

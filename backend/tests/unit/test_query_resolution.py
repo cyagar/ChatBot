@@ -179,6 +179,59 @@ def test_a_bare_number_is_not_mistaken_for_an_identifier():
     assert "heater" in resolved.lower() or "thermistor" in resolved.lower()
 
 
+def test_a_two_group_digit_range_is_not_mistaken_for_a_part_number():
+    """A two-group, all-digit range ('2-3') is shaped like a short part
+    number but is at least as likely an ordinary duration/spec -- must not
+    skip resolution for a genuine pronoun follow-up any more than a bare
+    number does. A real multi-segment part number (3+ groups, e.g.
+    '81-118-31') is unaffected -- see
+    test_a_part_number_question_is_unchanged_even_with_a_pronoun."""
+    history = [
+        HistoryTurn(role="user", content="Why is it not heating?"),
+        HistoryTurn(role="assistant", content="Check the tank heater and thermistor for failure."),
+    ]
+    resolved = resolve_follow_up_query("Should I run it for 2-3 minutes?", history)
+    assert resolved != "Should I run it for 2-3 minutes?"
+    assert "heater" in resolved.lower() or "thermistor" in resolved.lower()
+
+
+def test_an_ordinal_is_not_mistaken_for_an_identifier():
+    """'2nd' has a letter+digit mix the same shape as 'E4' -- but it's a
+    word-position marker, not an identifier, and must not stop a genuine
+    pronoun follow-up from resolving."""
+    history = [
+        HistoryTurn(role="user", content="Why is it not heating?"),
+        HistoryTurn(role="assistant", content="Check the tank heater and thermistor for failure."),
+    ]
+    resolved = resolve_follow_up_query("What about the 2nd one?", history)
+    assert resolved != "What about the 2nd one?"
+    assert "heater" in resolved.lower() or "thermistor" in resolved.lower()
+
+
+def test_a_letter_prefixed_hyphenated_code_is_unchanged():
+    """'E-04' is the hyphenated counterpart of 'E4' -- just as specific an
+    identifier, and must be recognized the same unconditional way."""
+    history = [
+        HistoryTurn(role="user", content="How do I fix an inlet valve leak?"),
+        HistoryTurn(role="assistant", content="Check the inlet valve seals on the water supply line for leaking."),
+    ]
+    q = "Error E-04"
+    assert resolve_follow_up_query(q, history) == q
+
+
+def test_an_asymmetric_two_group_part_number_is_unchanged():
+    """'082-6302' (short first group, long second group) is this corpus's
+    dominant two-group part-number shape -- a bare mention after an
+    unrelated turn must stand on its own, the same as a 3+-group part
+    number, not get diluted with the prior topic's words."""
+    history = [
+        HistoryTurn(role="user", content="How do I fix an inlet valve leak?"),
+        HistoryTurn(role="assistant", content="Check the inlet valve seals on the water supply line for leaking."),
+    ]
+    q = "082-6302"
+    assert resolve_follow_up_query(q, history) == q
+
+
 def test_a_true_pronoun_follow_up_with_no_identifier_still_resolves():
     """Confirms the identifier check is narrow, not a blanket exemption for
     anything short -- a genuine pronoun follow-up with no code/part number
