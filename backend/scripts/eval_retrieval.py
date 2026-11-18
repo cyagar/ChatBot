@@ -200,7 +200,7 @@ def run_case(case: dict) -> dict:
     independently unit-tested) for every pass/fail judgment."""
     machine_id = resolve_machine_id(case.get("machine"))
     conv_resp = client.post("/api/conversations", json={"machine_id": machine_id})
-    if conv_resp.status_code != 200:
+    if conv_resp.status_code != 201:
         raise RuntimeError(f"POST /api/conversations failed: {conv_resp.status_code} {conv_resp.text}")
     conv = conv_resp.json()
     resp = client.post(
