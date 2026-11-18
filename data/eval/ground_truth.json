@@ -1,5 +1,6 @@
 {
   "_notes": "Every entry's expected_filename/expected_keywords was verified against actually-indexed chunk content in this corpus (see data/reports/*.csv and the inspection scripts used to build this file) — none of it is invented. Machine names must match machines.model_name exactly for the eval script's lookup.",
+  "_schema_optional_fields": "Four more optional fields are supported (see backend/scripts/eval_scoring.py) but no case below defines them yet — they need reviewer-verified values against the real corpus, not authored here. expected_answer_contains: list of exact value/unit strings that must appear in the ANSWER TEXT itself (not just a cited excerpt) — catches the right citation paired with the wrong value. answer_must_not_contain: list of values (typically a sibling model's) that must NOT appear in the answer text. expected_step_order: list of substrings that must appear in the answer's numbered steps, in that exact order. required_warnings: list of substrings that must appear in the response's safety_warnings. A case defining any of these fails the whole eval run on any mismatch (zero-tolerance, like cross_model_leak), not just the 80% aggregate thresholds.",
   "cases": [
     {
       "id": "troubleshoot-axiom-heating",

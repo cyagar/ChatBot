@@ -45,21 +45,20 @@ from dotenv import dotenv_values  # noqa: E402
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 PROD_ENV_FILE = Path(os.environ.get("TMA_EVAL_PROD_ENV_FILE_FOR_TESTS") or (BACKEND_DIR / ".env"))
 
-# Below this overall pass rate, or if EITHER retrieval hit rate or
-# citation-support rate falls below its own threshold, the process exits
+# Below the overall pass rate, or if retrieval / citation-selection /
+# cited-support rate falls below its own threshold, the process exits
 # nonzero -- a report full of FAILs that still exits 0 is worse than no
-# report at all.
+# report at all. retrieval and citation_selection are deliberately
+# separate: a passage can be genuinely retrieved (present in
+# message_sources) without the model choosing to cite it, and a single
+# combined check cannot tell those two failure modes apart.
+# Answer-correctness and procedure-safety failures are a separate,
+# zero-tolerance gate below (like cross-model leakage), not part of
+# these aggregate thresholds -- see main().
 MIN_OVERALL_PASS_RATE = 0.80
 MIN_RETRIEVAL_HIT_RATE = 0.80
+MIN_CITATION_SELECTION_RATE = 0.80
 MIN_CITATION_SUPPORT_RATE = 0.80
-
-# expected_chunk_type values in ground_truth.json are composite categories,
-# not literal chunks.chunk_type values (text | table | procedure |
-# error_code | warning | spec) -- mapped explicitly here rather than left to
-# silently never match.
-_CHUNK_TYPE_GROUPS = {
-    "table_or_error_code": {"table", "error_code"},
-}
 
 
 def _normalize_dsn(url: str) -> tuple:
@@ -124,6 +123,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.auth.security import hash_password  # noqa: E402
 from app.db import get_conn, run_migrations  # noqa: E402
 from app.main import app  # noqa: E402
+from scripts.eval_scoring import score_case  # noqa: E402
 
 run_migrations()
 
@@ -179,7 +179,25 @@ def _chunk_types_for(chunk_ids: list[int]) -> dict[int, str]:
     return {r["id"]: r["chunk_type"] for r in rows}
 
 
+def _retrieved_filenames_for(message_id: int) -> list[str]:
+    """Every passage retrieval actually fetched for this message, cited or
+    not (message_sources records all of them) -- distinct from the
+    citations the model chose to put in its answer. See
+    eval_scoring.score_case's "retrieval" vs "citation_selected" split."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT d.original_filename FROM message_sources ms "
+            "JOIN chunks c ON c.id = ms.chunk_id JOIN documents d ON d.id = c.document_id "
+            "WHERE ms.message_id = %s",
+            (message_id,),
+        ).fetchall()
+    return [r["original_filename"] for r in rows]
+
+
 def run_case(case: dict) -> dict:
+    """The network/DB layer: POST the question, fetch what retrieval
+    actually surfaced for it, then hand off to score_case (app/-free, pure,
+    independently unit-tested) for every pass/fail judgment."""
     machine_id = resolve_machine_id(case.get("machine"))
     conv_resp = client.post("/api/conversations", json={"machine_id": machine_id})
     if conv_resp.status_code != 200:
@@ -195,86 +213,14 @@ def run_case(case: dict) -> dict:
         )
     body = resp.json()
 
-    result = {"id": case["id"], "category": case["category"], "question": case["question"], "ok": True, "notes": []}
+    retrieved_filenames: list[str] = []
+    chunk_types: dict[int, str] = {}
+    message_id = body.get("id")
+    if message_id is not None:
+        retrieved_filenames = _retrieved_filenames_for(message_id)
+        chunk_types = _chunk_types_for([c["chunk_id"] for c in body.get("citations", [])])
 
-    if case.get("expect_clarifying_question"):
-        result["ok"] = bool(body.get("is_clarifying_question"))
-        if not result["ok"]:
-            result["notes"].append("expected a clarifying question, did not get one")
-        return result
-
-    if case.get("expect_no_answer"):
-        # answer_status=='completed' is required alongside is_no_answer: a
-        # real provider outage or persistence failure (answer_status ==
-        # 'failed') must never read as "the system correctly abstained" just
-        # because it also produced no citations.
-        result["ok"] = bool(body.get("is_no_answer")) and body.get("answer_status") == "completed"
-        if not result["ok"]:
-            if body.get("answer_status") != "completed":
-                result["notes"].append(
-                    f"expected an honest no-answer, but answer_status was {body.get('answer_status')!r} "
-                    "(a system failure, not an honest abstention)"
-                )
-            else:
-                result["notes"].append("expected an honest no-answer, got a confident-looking answer instead")
-        return result
-
-    if body.get("answer_status") != "completed":
-        result["ok"] = False
-        result["notes"].append(
-            f"answer_status was {body.get('answer_status')!r}, not 'completed' -- a system "
-            "failure, not a content mismatch, must never be scored as a retrieval/citation miss"
-        )
-        return result
-
-    citations = body.get("citations", [])
-    cited_filenames = [c["filename"] for c in citations]
-    result["cited_filenames"] = cited_filenames
-
-    expected_sub = case.get("expected_filename_contains")
-    if expected_sub:
-        hit = any(expected_sub.lower() in f.lower() for f in cited_filenames)
-        result["retrieval_hit"] = hit
-        if not hit:
-            result["ok"] = False
-            result["notes"].append(f"expected a citation containing '{expected_sub}', got {cited_filenames}")
-
-    for forbidden in case.get("must_not_come_from", []):
-        leaked = [f for f in cited_filenames if forbidden.lower() in f.lower()]
-        if leaked:
-            result["ok"] = False
-            result["notes"].append(f"cross-model leak: citation from '{forbidden}' should not appear here: {leaked}")
-    result["cross_model_clean"] = not case.get("must_not_come_from") or not any(
-        forbidden.lower() in f.lower() for forbidden in case.get("must_not_come_from", []) for f in cited_filenames
-    )
-
-    expected_type = case.get("expected_chunk_type")
-    if expected_type:
-        allowed_types = _CHUNK_TYPE_GROUPS.get(expected_type, {expected_type})
-        chunk_types = _chunk_types_for([c["chunk_id"] for c in citations])
-        actual = {chunk_types.get(c["chunk_id"]) for c in citations}
-        result["chunk_type_match"] = bool(actual & allowed_types)
-        if not result["chunk_type_match"]:
-            result["ok"] = False
-            result["notes"].append(f"expected a citation of chunk_type in {sorted(allowed_types)}, cited types were {sorted(t for t in actual if t)}")
-
-    keywords = case.get("expected_keywords", [])
-    if keywords:
-        # Checked against cited excerpts, not the model's free-form answer
-        # text -- excerpts are verbatim chunk content returned by the API,
-        # not model-generated text, so requiring the keyword there is a real
-        # claim-to-evidence check, not just a claim-to-output one. A keyword
-        # appearing only in generated prose, never actually quoted from a
-        # cited chunk, must not pass.
-        excerpt_haystack = " ".join(c.get("excerpt", "") for c in citations).lower()
-        found = [k for k in keywords if k.lower() in excerpt_haystack]
-        result["citation_support"] = len(found) == len(keywords)
-        if len(found) != len(keywords):
-            result["ok"] = False
-            missing = [k for k in keywords if k not in found]
-            result["notes"].append(f"expected keywords not found in any CITED EXCERPT (checked excerpts only, not answer text): {missing}")
-
-    return result
+    return score_case(case, body, retrieved_filenames, chunk_types)
 
 
 def run_source_withdrawal_check() -> dict:
@@ -291,9 +237,11 @@ def run_source_withdrawal_check() -> dict:
                 "notes": ["troubleshoot-axiom-heating case not found -- cannot run this check"]}
 
     before = run_case(case)
-    if not before.get("retrieval_hit"):
+    # Must have been CITED (not just retrieved) before withdrawal, or the
+    # "no longer cited after withdrawal" check below is meaningless.
+    if not before.get("citation_selected"):
         return {"id": "source-withdrawal-check", "category": "source_withdrawal", "ok": False,
-                "notes": [f"base case did not retrieve as expected before withdrawal: {before.get('notes')}"]}
+                "notes": [f"base case did not cite the expected document before withdrawal: {before.get('notes')}"]}
 
     with get_conn() as conn:
         doc_ids = [
@@ -352,12 +300,27 @@ def main() -> int:
     retrieval_cases = [r for r in results if "retrieval_hit" in r]
     retrieval_hits = sum(1 for r in retrieval_cases if r["retrieval_hit"])
     retrieval_rate = retrieval_hits / len(retrieval_cases) if retrieval_cases else 1.0
-    citation_cases = [r for r in results if "citation_support" in r]
-    citation_hits = sum(1 for r in citation_cases if r["citation_support"])
+    citation_selection_cases = [r for r in results if "citation_selected" in r]
+    citation_selection_hits = sum(1 for r in citation_selection_cases if r["citation_selected"])
+    citation_selection_rate = (
+        citation_selection_hits / len(citation_selection_cases) if citation_selection_cases else 1.0
+    )
+    citation_cases = [r for r in results if "cited_support" in r]
+    citation_hits = sum(1 for r in citation_cases if r["cited_support"])
     citation_rate = citation_hits / len(citation_cases) if citation_cases else 1.0
     cross_model_cases = [r for r in results if "cross_model_clean" in r]
     cross_model_clean = sum(1 for r in cross_model_cases if r["cross_model_clean"])
     cross_model_leaks = len(cross_model_cases) - cross_model_clean
+    # Zero-tolerance, like cross-model leakage: a case that DEFINES an
+    # answer-correctness or procedure-safety check and fails it is a real
+    # wrong-value-paired-with-a-model or out-of-order-steps problem,
+    # regardless of how well everything else scored. No authored case
+    # currently defines either (see data/eval/ground_truth.json's schema
+    # note) -- these print "0 cases checked", not a passing rate.
+    answer_correctness_cases = [r for r in results if "answer_correctness" in r]
+    answer_correctness_failures = sum(1 for r in answer_correctness_cases if not r["answer_correctness"])
+    procedure_safety_cases = [r for r in results if "procedure_safety" in r]
+    procedure_safety_failures = sum(1 for r in procedure_safety_cases if not r["procedure_safety"])
 
     lines = []
     lines.append("# Retrieval & Citation Evaluation Report")
@@ -371,11 +334,25 @@ def main() -> int:
     lines.append("")
     lines.append(f"- Overall pass rate: **{passed}/{total}** ({100*pass_rate:.0f}%), threshold {100*MIN_OVERALL_PASS_RATE:.0f}%")
     if retrieval_cases:
-        lines.append(f"- Retrieval hit rate (expected document cited): **{retrieval_hits}/{len(retrieval_cases)}** ({100*retrieval_rate:.0f}%), threshold {100*MIN_RETRIEVAL_HIT_RATE:.0f}%")
+        lines.append(f"- Retrieval rate (expected document actually fetched, cited or not): **{retrieval_hits}/{len(retrieval_cases)}** ({100*retrieval_rate:.0f}%), threshold {100*MIN_RETRIEVAL_HIT_RATE:.0f}%")
+    if citation_selection_cases:
+        lines.append(f"- Citation-selection rate (model chose to cite the expected document): **{citation_selection_hits}/{len(citation_selection_cases)}** ({100*citation_selection_rate:.0f}%), threshold {100*MIN_CITATION_SELECTION_RATE:.0f}%")
     if citation_cases:
-        lines.append(f"- Citation-support rate (expected facts present in a CITED EXCERPT, not just the answer text): **{citation_hits}/{len(citation_cases)}** ({100*citation_rate:.0f}%), threshold {100*MIN_CITATION_SUPPORT_RATE:.0f}%")
+        lines.append(f"- Cited-support rate (expected facts present in a CITED EXCERPT, not just the answer text): **{citation_hits}/{len(citation_cases)}** ({100*citation_rate:.0f}%), threshold {100*MIN_CITATION_SUPPORT_RATE:.0f}%")
     if cross_model_cases:
         lines.append(f"- Cross-model isolation (no leak from a forbidden document): **{cross_model_clean}/{len(cross_model_cases)}**")
+    lines.append(
+        f"- Answer correctness (value stated correctly in the answer TEXT, zero-tolerance): "
+        f"**{len(answer_correctness_cases) - answer_correctness_failures}/{len(answer_correctness_cases)}** cases checked"
+        if answer_correctness_cases else
+        "- Answer correctness: 0 cases checked (no authored case defines expected_answer_contains/answer_must_not_contain yet)"
+    )
+    lines.append(
+        f"- Procedure safety (step order / required warnings, zero-tolerance): "
+        f"**{len(procedure_safety_cases) - procedure_safety_failures}/{len(procedure_safety_cases)}** cases checked"
+        if procedure_safety_cases else
+        "- Procedure safety: 0 cases checked (no authored case defines expected_step_order/required_warnings yet)"
+    )
     lines.append("")
     lines.append(
         "**Calibration disclosure:** `MIN_VECTOR_SIMILARITY_FOR_ANSWER` in "
@@ -407,21 +384,31 @@ def main() -> int:
     below_threshold = (
         pass_rate < MIN_OVERALL_PASS_RATE
         or retrieval_rate < MIN_RETRIEVAL_HIT_RATE
+        or citation_selection_rate < MIN_CITATION_SELECTION_RATE
         or citation_rate < MIN_CITATION_SUPPORT_RATE
     )
     if below_threshold:
         print(
             f"\nBelow acceptance threshold (overall {100*pass_rate:.0f}%/{100*MIN_OVERALL_PASS_RATE:.0f}%, "
             f"retrieval {100*retrieval_rate:.0f}%/{100*MIN_RETRIEVAL_HIT_RATE:.0f}%, "
-            f"citation {100*citation_rate:.0f}%/{100*MIN_CITATION_SUPPORT_RATE:.0f}%) -- exiting nonzero."
+            f"citation selection {100*citation_selection_rate:.0f}%/{100*MIN_CITATION_SELECTION_RATE:.0f}%, "
+            f"cited support {100*citation_rate:.0f}%/{100*MIN_CITATION_SUPPORT_RATE:.0f}%) -- exiting nonzero."
         )
         return 1
-    # Cross-model leakage is a zero-tolerance gate, not part of the 80%
-    # aggregate thresholds above -- a technician shown one citation from the
-    # wrong machine's manual is a real safety issue regardless of how well
-    # every OTHER case scored, so even a single leak fails the whole run.
+    # Cross-model leakage, answer-correctness failures, and procedure-safety
+    # failures are all zero-tolerance gates, not part of the 80% aggregate
+    # thresholds above -- a technician shown one citation from the wrong
+    # machine's manual, a wrong value paired with a model, or steps out of
+    # order is a real problem regardless of how well every OTHER case
+    # scored, so even a single one fails the whole run.
     if cross_model_leaks > 0:
         print(f"\n{cross_model_leaks} cross-model leak(s) detected -- exiting nonzero regardless of pass rate.")
+        return 1
+    if answer_correctness_failures > 0:
+        print(f"\n{answer_correctness_failures} answer-correctness failure(s) detected -- exiting nonzero.")
+        return 1
+    if procedure_safety_failures > 0:
+        print(f"\n{procedure_safety_failures} procedure-safety failure(s) detected -- exiting nonzero.")
         return 1
     return 0
 
